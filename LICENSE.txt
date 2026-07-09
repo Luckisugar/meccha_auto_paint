@@ -1,11 +1,15 @@
-Meccha Camouflage
+Meccha Camouflage / Meccha Auto Paint (unofficial modified build)
 Copyright (C) 2026 Acentrist
+Copyright (C) 2026 Drigotine (modifications in this fork)
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
-The official project repository is https://github.com/acentrist/MecchaCamouflage. Modified builds must preserve the license notice and must not imply they are official releases.
+The official upstream project repository is https://github.com/acentrist/MecchaCamouflage.
+This fork repository is https://github.com/Luckisugar/meccha_auto_paint.
+
+Modified builds must preserve the license notice and must not imply they are official upstream releases.
 
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007

@@ -1,13 +1,19 @@
 # Branding and Official Builds
 
-Meccha Camouflage, its icon, and release branding identify official builds from
-the upstream project:
+## Upstream
+
+**Meccha Camouflage**, its icon, and official release branding identify builds from:
 
 https://github.com/acentrist/MecchaCamouflage
 
-Modified builds are allowed under the project license, but they must clearly
-identify themselves as modified or unofficial builds and must not imply
-endorsement by the upstream project.
+That project is the original upstream work by Acentrist.
 
-Do not remove copyright, license, or repository notices from redistributed
-copies.
+## This fork
+
+**Meccha Auto Paint** (`Luckisugar/meccha_auto_paint`) is an **unofficial modified build**.
+
+- It must not be presented as an official Meccha Camouflage release.
+- It must not imply endorsement by Acentrist or the upstream project.
+- Copyright, license, and repository notices must be preserved in redistributed copies.
+
+Modified builds are allowed under the project license (GNU GPL v3 or later) when these conditions are met.

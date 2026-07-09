@@ -6064,6 +6064,16 @@ namespace
         std::string mode{"not_run"};
     };
 
+    struct MeshFirstRuntimeComponentTransformRefine
+    {
+        bool applied{false};
+        int samples{0};
+        double translation_delta{0.0};
+        double residual_avg{0.0};
+        double residual_max{0.0};
+        std::string mode{"not_run"};
+    };
+
     struct MeshFirstRuntimePaintWarmup
     {
         bool attempted{false};
@@ -6709,6 +6719,114 @@ namespace
         out.avg_delta = samples > 0 ? delta_sum / static_cast<double>(samples) : 0.0;
         out.max_delta = delta_max;
         out.mode = out.applied ? "local_component_world" : "unavailable";
+        return out;
+    }
+
+    // Recover ComponentToWorld.Translation from local/world triangle pairs when the
+    // live transform is slightly off (common after freecam / attach / stale scan).
+    // Rotation and scale are kept; only translation is estimated as
+    // T ≈ world - R*(S*local) averaged over stable samples.
+    auto mesh_first_refine_component_to_world_translation(const std::vector<MeshFirstRuntimeTriangle>& triangles,
+                                                          sdk::FTransform& component_to_world) -> MeshFirstRuntimeComponentTransformRefine
+    {
+        MeshFirstRuntimeComponentTransformRefine out{};
+        if (triangles.empty())
+        {
+            out.mode = "empty";
+            return out;
+        }
+
+        sdk::FVector translation_sum{};
+        int samples = 0;
+        const int step = std::max(1, static_cast<int>(triangles.size() / 256));
+        sdk::FTransform rotation_scale = component_to_world;
+        rotation_scale.Translation = {};
+        for (std::size_t tri = 0; tri < triangles.size(); tri += static_cast<std::size_t>(step))
+        {
+            const auto& triangle = triangles[tri];
+            for (int vertex = 0; vertex < 3; ++vertex)
+            {
+                if (!mesh_first_finite_vector(triangle.local[vertex]) || !mesh_first_finite_vector(triangle.world[vertex]))
+                {
+                    continue;
+                }
+                const auto rotated = mesh_first_transform_apply_point(rotation_scale, triangle.local[vertex]);
+                const auto candidate = sdk_vec_sub(triangle.world[vertex], rotated);
+                if (!mesh_first_finite_vector(candidate))
+                {
+                    continue;
+                }
+                translation_sum = sdk_vec_add(translation_sum, candidate);
+                ++samples;
+            }
+        }
+        out.samples = samples;
+        if (samples <= 0)
+        {
+            out.mode = "no_samples";
+            return out;
+        }
+
+        const auto refined_translation = sdk_vec_mul(translation_sum, 1.0 / static_cast<double>(samples));
+        out.translation_delta = sdk_vec_len(sdk_vec_sub(refined_translation, component_to_world.Translation));
+        if (!std::isfinite(out.translation_delta))
+        {
+            out.mode = "invalid_translation";
+            return out;
+        }
+
+        // Only apply when the refinement is meaningful but not absurd.
+        if (out.translation_delta < 1.0)
+        {
+            out.mode = "delta_below_threshold";
+            return out;
+        }
+        if (out.translation_delta > 5000.0)
+        {
+            out.mode = "delta_too_large";
+            return out;
+        }
+
+        const auto previous_translation = component_to_world.Translation;
+        component_to_world.Translation = refined_translation;
+
+        double residual_sum = 0.0;
+        double residual_max = 0.0;
+        int residual_samples = 0;
+        for (std::size_t tri = 0; tri < triangles.size(); tri += static_cast<std::size_t>(step))
+        {
+            const auto& triangle = triangles[tri];
+            for (int vertex = 0; vertex < 3; ++vertex)
+            {
+                const auto rebuilt = mesh_first_transform_apply_point(component_to_world, triangle.local[vertex]);
+                const double residual = sdk_vec_len(sdk_vec_sub(triangle.world[vertex], rebuilt));
+                if (!std::isfinite(residual))
+                {
+                    continue;
+                }
+                residual_sum += residual;
+                residual_max = std::max(residual_max, residual);
+                ++residual_samples;
+            }
+        }
+        if (residual_samples <= 0)
+        {
+            component_to_world.Translation = previous_translation;
+            out.mode = "residual_unavailable";
+            return out;
+        }
+        out.residual_avg = residual_sum / static_cast<double>(residual_samples);
+        out.residual_max = residual_max;
+        // Reject refinement that does not actually improve coordinate agreement.
+        if (!std::isfinite(out.residual_avg) || out.residual_avg > MeshFirstRuntimeCoordinateMaxAvgErrorCm)
+        {
+            component_to_world.Translation = previous_translation;
+            out.mode = "residual_still_unstable";
+            return out;
+        }
+
+        out.applied = true;
+        out.mode = "translation_from_triangle_pairs";
         return out;
     }
 
@@ -9597,7 +9715,6 @@ namespace
         metadata += ",\"runtime_triangle_coordinate_direct_avg_error\":" + std::to_string(runtime_coordinate_selection.direct_avg_error);
         metadata += ",\"runtime_triangle_coordinate_swapped_avg_error\":" + std::to_string(runtime_coordinate_selection.swapped_avg_error);
         metadata += ",\"runtime_triangle_coordinate_selected_avg_error\":" + std::to_string(runtime_coordinate_selection.selected_avg_error);
-        metadata += ",\"component_world_transform_effective_source\":\"" + json_escape(component_transform_source) + "\"";
         const int active_texture_size = profile_available ? profile.texture_size : 1024;
         const char region_axis = profile_available ? mesh_first_region_axis(profile)
                                                    : mesh_first_region_axis_from_runtime_triangles(runtime_triangle_cache.triangles);
@@ -9656,18 +9773,123 @@ namespace
         const bool runtime_world_rebuild_required = runtime_uses_profile_component_world;
         auto runtime_world_rebuild = MeshFirstRuntimeTriangleWorldRebuild{};
         MeshFirstRuntimeTriangleProjectionSelection runtime_projection_selection{};
+        MeshFirstRuntimeComponentTransformRefine component_transform_refine{};
+        std::string runtime_projection_active_source =
+            runtime_world_rebuild_required ? "local_component_world" : "cached_runtime_world";
+        bool runtime_world_rebuild_used = false;
         if (runtime_world_rebuild_required)
         {
+            // Probe rebuild on a copy first so we can refine/fallback without destroying
+            // the original cached world coordinates.
+            auto rebuild_probe_triangles = runtime_triangle_cache.triangles;
             runtime_world_rebuild =
-                mesh_first_rebuild_runtime_triangle_world_from_local(runtime_triangle_cache.triangles, component_to_world);
-            runtime_projection_selection =
-                mesh_first_select_runtime_triangle_projection_coordinates(ref,
-                                                                         ctx,
-                                                                         runtime_triangle_cache.triangles,
-                                                                         center_ray.location,
-                                                                         camera_direction,
-                                                                         viewport,
-                                                                         "local_component_world");
+                mesh_first_rebuild_runtime_triangle_world_from_local(rebuild_probe_triangles, component_to_world);
+
+            const bool initial_rebuild_ok =
+                runtime_world_rebuild.samples > 0 &&
+                std::isfinite(runtime_world_rebuild.avg_delta);
+            const bool initial_rebuild_stable =
+                initial_rebuild_ok &&
+                runtime_world_rebuild.avg_delta <= MeshFirstRuntimeCoordinateMaxAvgErrorCm;
+
+            if (!initial_rebuild_stable)
+            {
+                // Attempt translation-only recovery from local/world pairs, then re-probe.
+                auto refine_source_triangles = runtime_triangle_cache.triangles;
+                component_transform_refine =
+                    mesh_first_refine_component_to_world_translation(refine_source_triangles, component_to_world);
+                if (component_transform_refine.applied)
+                {
+                    component_transform_source += "+refined_translation";
+                    rebuild_probe_triangles = runtime_triangle_cache.triangles;
+                    runtime_world_rebuild =
+                        mesh_first_rebuild_runtime_triangle_world_from_local(rebuild_probe_triangles, component_to_world);
+                }
+            }
+
+            const bool rebuild_ok =
+                runtime_world_rebuild.samples > 0 &&
+                std::isfinite(runtime_world_rebuild.avg_delta);
+            const bool rebuild_stable =
+                rebuild_ok &&
+                runtime_world_rebuild.avg_delta <= MeshFirstRuntimeCoordinateMaxAvgErrorCm;
+
+            MeshFirstRuntimeTriangleProjectionSelection rebuild_projection{};
+            if (rebuild_ok)
+            {
+                rebuild_projection =
+                    mesh_first_select_runtime_triangle_projection_coordinates(ref,
+                                                                             ctx,
+                                                                             rebuild_probe_triangles,
+                                                                             center_ray.location,
+                                                                             camera_direction,
+                                                                             viewport,
+                                                                             "local_component_world");
+            }
+            const bool rebuild_projects = rebuild_projection.inside_view > 0;
+            const bool raw_projects = raw_runtime_projection_selection.inside_view > 0;
+
+            // Prefer local+component world when stable. When unstable, still accept it if
+            // it projects and cached world does not (stale world after movement). Otherwise
+            // fall back to cached world when that projects.
+            bool prefer_rebuild = false;
+            if (rebuild_stable && rebuild_projects)
+            {
+                prefer_rebuild = true;
+            }
+            else if (rebuild_stable && !rebuild_projects && !raw_projects)
+            {
+                prefer_rebuild = true; // fail later with projection error
+            }
+            else if (!rebuild_stable && rebuild_projects)
+            {
+                // Local/world disagree under the live transform. If rebuilt points still
+                // project, prefer them: cached world is more likely stale than local space.
+                prefer_rebuild = true;
+            }
+            else if (rebuild_stable && !rebuild_projects && raw_projects)
+            {
+                prefer_rebuild = false;
+            }
+            else
+            {
+                prefer_rebuild = false;
+            }
+
+            if (prefer_rebuild && rebuild_ok)
+            {
+                runtime_triangle_cache.triangles = std::move(rebuild_probe_triangles);
+                runtime_projection_selection = rebuild_projection;
+                runtime_world_rebuild_used = true;
+                runtime_projection_active_source =
+                    rebuild_stable ? "local_component_world" : "local_component_world_unstable_projected";
+                if (!rebuild_stable)
+                {
+                    runtime_world_rebuild.mode = "local_component_world_unstable_projected";
+                }
+            }
+            else if (raw_projects)
+            {
+                runtime_projection_selection = raw_runtime_projection_selection;
+                runtime_world_rebuild.applied = false;
+                runtime_world_rebuild.mode =
+                    rebuild_ok ? "fallback_cached_runtime_world_after_unstable_rebuild"
+                               : "fallback_cached_runtime_world_rebuild_unavailable";
+                runtime_projection_active_source = "cached_runtime_world";
+            }
+            else if (rebuild_ok && rebuild_projects)
+            {
+                runtime_triangle_cache.triangles = std::move(rebuild_probe_triangles);
+                runtime_projection_selection = rebuild_projection;
+                runtime_world_rebuild_used = true;
+                runtime_projection_active_source = "local_component_world";
+            }
+            else
+            {
+                runtime_projection_selection = rebuild_ok ? rebuild_projection : raw_runtime_projection_selection;
+                runtime_projection_active_source =
+                    rebuild_ok ? "local_component_world" : "cached_runtime_world";
+            }
         }
         else
         {
@@ -9677,15 +9899,23 @@ namespace
             runtime_world_rebuild.applied = false;
             runtime_world_rebuild.mode = "diagnostic_skipped_uv_only_runtime";
             runtime_projection_selection = raw_runtime_projection_selection;
+            runtime_projection_active_source = "cached_runtime_world";
         }
         metadata += ",\"runtime_triangle_world_rebuild_required\":" + std::string(json_bool(runtime_world_rebuild_required));
         metadata += ",\"runtime_triangle_world_rebuild_mode\":\"" + json_escape(runtime_world_rebuild.mode) + "\"";
         metadata += ",\"runtime_triangle_world_rebuild_applied\":" + std::string(json_bool(runtime_world_rebuild.applied));
+        metadata += ",\"runtime_triangle_world_rebuild_used\":" + std::string(json_bool(runtime_world_rebuild_used));
         metadata += ",\"runtime_triangle_world_rebuild_samples\":" + std::to_string(runtime_world_rebuild.samples);
         metadata += ",\"runtime_triangle_world_rebuild_avg_delta\":" + std::to_string(runtime_world_rebuild.avg_delta);
         metadata += ",\"runtime_triangle_world_rebuild_max_delta\":" + std::to_string(runtime_world_rebuild.max_delta);
-        metadata += ",\"runtime_triangle_projection_active_source\":\"" +
-                    std::string(runtime_world_rebuild_required ? "local_component_world" : "cached_runtime_world") + "\"";
+        metadata += ",\"component_world_transform_refine_mode\":\"" + json_escape(component_transform_refine.mode) + "\"";
+        metadata += ",\"component_world_transform_refine_applied\":" + std::string(json_bool(component_transform_refine.applied));
+        metadata += ",\"component_world_transform_refine_samples\":" + std::to_string(component_transform_refine.samples);
+        metadata += ",\"component_world_transform_refine_translation_delta\":" + std::to_string(component_transform_refine.translation_delta);
+        metadata += ",\"component_world_transform_refine_residual_avg\":" + std::to_string(component_transform_refine.residual_avg);
+        metadata += ",\"component_world_transform_refine_residual_max\":" + std::to_string(component_transform_refine.residual_max);
+        metadata += ",\"component_world_transform_effective_source\":\"" + json_escape(component_transform_source) + "\"";
+        metadata += ",\"runtime_triangle_projection_active_source\":\"" + json_escape(runtime_projection_active_source) + "\"";
         metadata += ",\"runtime_triangle_projection_mode\":\"" + json_escape(runtime_projection_selection.mode) + "\"";
         metadata += ",\"runtime_triangle_projection_samples\":" + std::to_string(runtime_projection_selection.samples);
         metadata += ",\"runtime_triangle_projection_source_candidates\":" + std::to_string(runtime_projection_selection.source_candidates);
@@ -9694,10 +9924,16 @@ namespace
         metadata += ",\"runtime_triangle_projection_best_score\":" + std::to_string(runtime_projection_selection.best_score);
         metadata += ",\"runtime_triangle_projection_summary\":\"" + json_escape(runtime_projection_selection.summary) + "\"";
         metadata += ",\"runtime_triangle_coordinate_max_avg_error\":" + std::to_string(MeshFirstRuntimeCoordinateMaxAvgErrorCm);
+        // Only hard-fail when neither rebuilt nor cached world coordinates can be trusted
+        // for projection. Large local/world delta alone is no longer fatal (stale cache or
+        // slight transform drift is recoverable via refine/fallback).
+        const bool coordinates_projectable = runtime_projection_selection.inside_view > 0;
         if (runtime_world_rebuild_required &&
+            !coordinates_projectable &&
             (runtime_world_rebuild.samples <= 0 ||
              !std::isfinite(runtime_world_rebuild.avg_delta) ||
-             runtime_world_rebuild.avg_delta > MeshFirstRuntimeCoordinateMaxAvgErrorCm))
+             runtime_world_rebuild.avg_delta > MeshFirstRuntimeCoordinateMaxAvgErrorCm) &&
+            raw_runtime_projection_selection.inside_view <= 0)
         {
             return response_json(false,
                                  "runtime_triangle_coordinate_cache_unstable",
@@ -9712,7 +9948,7 @@ namespace
                                  "runtime_triangle_coordinate_projection_unavailable",
                                  0,
                                  1,
-                                 runtime_world_rebuild_required
+                                 runtime_projection_active_source.find("local_component_world") != std::string::npos
                                      ? "runtime triangle local-component coordinates do not project camera-facing samples into the current viewport"
                                      : "runtime triangle cached world coordinates do not project camera-facing samples into the current viewport",
                                  metadata + ",\"replay_blocked\":true");
