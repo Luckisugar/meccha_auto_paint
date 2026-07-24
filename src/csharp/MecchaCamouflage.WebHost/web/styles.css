@@ -26,7 +26,8 @@
   color-scheme: dark;
   --primary: #ffffff;
   --primary-soft: color-mix(in srgb, var(--primary) 78%, white);
-  --background: #131313;
+  --background: #000000;
+  --field-background: #131313;
   --surface: #0e0e0e;
   --surface-low: #1b1b1b;
   --surface-mid: #1f1f1f;
@@ -108,7 +109,7 @@ select {
   height: 36px;
   border: 1px solid var(--hairline);
   border-radius: 2px;
-  background: var(--background);
+  background: var(--field-background);
   color: var(--text);
   outline: none;
 }
@@ -944,7 +945,7 @@ body.editing #image-fill-section.disabled .field-label {
   justify-content: space-between;
   border-top: 1px solid var(--hairline);
   padding: 0 12px;
-  background: var(--surface);
+  background: #000000;
   color: var(--muted);
   font: 500 12px/14px var(--font-ui);
 }

@@ -321,7 +321,7 @@ public sealed class AppSettings
     public int LogRetentionDays { get; set; } = 14;
     public string GameProcessName { get; set; } = "PenguinHotel-Win64-Shipping.exe";
     public bool AlwaysOnTop { get; set; } = true;
-    public double Opacity { get; set; } = 1.0;
+    public double Opacity { get; set; } = 0.99;
     public RgbColor ThemeColor { get; set; } = RgbColor.White;
     public string StartHotkey { get; set; } = "F1";
     public string PreviewHotkey { get; set; } = "F2";

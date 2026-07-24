@@ -118,7 +118,7 @@ public sealed class MainForm : Form
         }
         TopMost = session.Settings.AlwaysOnTop;
         Opacity = session.Settings.Opacity;
-        BackColor = Color.FromArgb(32, 32, 32);
+        BackColor = Color.Black;
         webView = CreateWebViewControl();
         Controls.Add(webView);
 
@@ -1435,7 +1435,7 @@ public sealed class MainForm : Form
             _ = DwmSetWindowAttribute(Handle, DwmwaUseImmersiveDarkMode, ref dark, sizeof(int));
             if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
             {
-                var caption = ColorRef(Color.FromArgb(32, 32, 32));
+                var caption = ColorRef(Color.Black);
                 var text = ColorRef(Color.White);
                 _ = DwmSetWindowAttribute(Handle, DwmwaCaptionColor, ref caption, sizeof(int));
                 _ = DwmSetWindowAttribute(Handle, DwmwaTextColor, ref text, sizeof(int));

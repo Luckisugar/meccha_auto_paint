@@ -12,7 +12,7 @@ var tests = new List<(string Name, Action Run)>
     ("paint defaults expose a single brush", PaintDefaultsExposeSingleBrush),
     ("single brush persists and migrates legacy detail settings", SingleBrushPersistsAndMigratesLegacyDetailSettings),
     ("single brush settings clamp to supported range", SingleBrushSettingsClampToSupportedRange),
-    ("app defaults use 100 percent opacity", AppDefaultsUse100PercentOpacity),
+    ("app defaults use 99 percent opacity", AppDefaultsUse99PercentOpacity),
     ("payload sends a single brush and compression tolerance", PayloadSendsSingleBrushPipeline),
     ("image payload carries a full canonical canvas", ImagePayloadCarriesFullCanonicalCanvas),
     ("image transparency fills regions before painting opaque pixels", ImageTransparencyFillsRegionsBeforePaintingOpaquePixels),
@@ -581,14 +581,14 @@ static void SingleBrushSettingsClampToSupportedRange()
         "color compression tolerance should clamp to 10");
 }
 
-static void AppDefaultsUse100PercentOpacity()
+static void AppDefaultsUse99PercentOpacity()
 {
     using var temp = new TempHome();
     var defaults = new AppSettings();
     var loaded = new SettingsStore(new AppPaths("opacity-default-test")).Load();
 
-    Assert(Math.Abs(defaults.Opacity - 1.0) < 0.000001, "a new app settings instance should default to 100 percent opacity");
-    Assert(Math.Abs(loaded.Opacity - 1.0) < 0.000001, "a new persisted settings file should inherit the 100 percent opacity default");
+    Assert(Math.Abs(defaults.Opacity - 0.99) < 0.000001, "a new app settings instance should default to 99 percent opacity");
+    Assert(Math.Abs(loaded.Opacity - 0.99) < 0.000001, "a new persisted settings file should inherit the 99 percent opacity default");
 }
 
 static void PayloadSendsSingleBrushPipeline()
