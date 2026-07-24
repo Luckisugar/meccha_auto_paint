@@ -12,7 +12,7 @@ var tests = new List<(string Name, Action Run)>
     ("paint defaults expose a single brush", PaintDefaultsExposeSingleBrush),
     ("single brush persists and migrates legacy detail settings", SingleBrushPersistsAndMigratesLegacyDetailSettings),
     ("single brush settings clamp to supported range", SingleBrushSettingsClampToSupportedRange),
-    ("app defaults use 99 percent opacity", AppDefaultsUse99PercentOpacity),
+    ("app defaults use 100 percent opacity", AppDefaultsUse100PercentOpacity),
     ("payload sends a single brush and compression tolerance", PayloadSendsSingleBrushPipeline),
     ("image payload carries a full canonical canvas", ImagePayloadCarriesFullCanonicalCanvas),
     ("image transparency fills regions before painting opaque pixels", ImageTransparencyFillsRegionsBeforePaintingOpaquePixels),
@@ -97,6 +97,7 @@ var tests = new List<(string Name, Action Run)>
     ("native progress exposes replay pass state", NativeProgressExposesReplayPassState),
     ("hotkey validation rejects duplicates", HotkeyValidationRejectsDuplicates),
     ("host session reset restores setting default", HostSessionResetRestoresDefault),
+    ("host session resets the brush section with current vocabulary", HostSessionResetsBrushSectionWithCurrentVocabulary),
     ("host session updates a single brush", HostSessionUpdatesSingleBrush),
     ("host session rolls back invalid hotkey update", HostSessionRollsBackInvalidHotkeyUpdate),
     ("host session applies multiple setting updates atomically", HostSessionAppliesMultipleSettingUpdatesAtomically),
@@ -580,14 +581,14 @@ static void SingleBrushSettingsClampToSupportedRange()
         "color compression tolerance should clamp to 10");
 }
 
-static void AppDefaultsUse99PercentOpacity()
+static void AppDefaultsUse100PercentOpacity()
 {
     using var temp = new TempHome();
     var defaults = new AppSettings();
     var loaded = new SettingsStore(new AppPaths("opacity-default-test")).Load();
 
-    Assert(Math.Abs(defaults.Opacity - 0.99) < 0.000001, "a new app settings instance should default to 99 percent opacity");
-    Assert(Math.Abs(loaded.Opacity - 0.99) < 0.000001, "a new persisted settings file should inherit the 99 percent opacity default");
+    Assert(Math.Abs(defaults.Opacity - 1.0) < 0.000001, "a new app settings instance should default to 100 percent opacity");
+    Assert(Math.Abs(loaded.Opacity - 1.0) < 0.000001, "a new persisted settings file should inherit the 100 percent opacity default");
 }
 
 static void PayloadSendsSingleBrushPipeline()
@@ -1443,6 +1444,7 @@ static void WebUiExposesSingleBrushSliderAndCompressionTolerance()
     var repository = FindRepositoryRoot();
     var index = File.ReadAllText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "index.html"));
     var app = File.ReadAllText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "app.js"));
+    var styles = File.ReadAllText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "styles.css"));
     Assert(index.Contains("id=\"brush-size\"", StringComparison.Ordinal), "web UI should include the single brush slider");
     Assert(index.Contains("id=\"color-compression-tolerance\"", StringComparison.Ordinal), "web UI should include compression tolerance");
     Assert(index.Contains("min=\"1\" max=\"10\" step=\"0.5\"", StringComparison.Ordinal), "single brush should expose the 1-10 range");
@@ -1450,6 +1452,11 @@ static void WebUiExposesSingleBrushSliderAndCompressionTolerance()
         "compression tolerance should expose the 0-10 range in half-step increments");
     Assert(app.Contains("paint.brushSizeTexels", StringComparison.Ordinal), "web UI should bind the single brush");
     Assert(app.Contains("paint.colorCompressionTolerance", StringComparison.Ordinal), "web UI should bind compression tolerance");
+    Assert(app.Contains("function initializeRangeScales()", StringComparison.Ordinal) &&
+           app.Contains("addRangeScale(byId(\"crop-editor-zoom\"), \"crop-range-scale\");", StringComparison.Ordinal) &&
+           styles.Contains(".range-scale-bounds", StringComparison.Ordinal) &&
+           styles.Contains("input[type=\"range\"]::-webkit-slider-runnable-track", StringComparison.Ordinal),
+        "sliders should expose subdued minimum and maximum values without noisy intermediate ticks");
     Assert(!app.Contains("paint.brush1", StringComparison.Ordinal) && !app.Contains("paint.brush2", StringComparison.Ordinal),
         "web UI should not retain two-brush bindings");
 }
@@ -1494,16 +1501,16 @@ static void WebUiImagePaintEditorUsesSavedTransaction()
            index.Contains("data-settings-tab=\"image\" data-i18n=\"settings.image\">Image</button>", StringComparison.Ordinal) &&
            index.Contains("data-settings-tab=\"application\" data-i18n=\"settings.app\">App</button>", StringComparison.Ordinal) &&
            index.Contains("data-settings-panel=\"application\" hidden", StringComparison.Ordinal) &&
-           index.Contains("class=\"image-design-action-grid\"", StringComparison.Ordinal) &&
+           index.Contains("class=\"image-editor-action-grid\"", StringComparison.Ordinal) &&
            !index.Contains("id=\"image-preset-open\"", StringComparison.Ordinal) &&
            index.Contains("id=\"image-preset-load\"", StringComparison.Ordinal) &&
            index.Contains("id=\"image-preset-save\"", StringComparison.Ordinal) &&
-           index.Contains("<div class=\"group-title\" data-i18n=\"image.design\">Image Design</div>", StringComparison.Ordinal) &&
+           index.Contains("<div class=\"group-title\" data-i18n=\"group.editor\">Editor</div>", StringComparison.Ordinal) &&
            !index.Contains("<div class=\"group-title\">Presets</div>", StringComparison.Ordinal) &&
            !index.Contains("<div class=\"group-title\">Layers</div>", StringComparison.Ordinal) &&
            !index.Contains("image-design-list", StringComparison.Ordinal) &&
            !index.Contains("image-design-name", StringComparison.Ordinal),
-        "Image uses the Paint/Image tabs and file presets without a named design library");
+        "Image uses the Paint/Image tabs and file presets within one named editor workspace");
     var applicationPanelStart = index.IndexOf("data-settings-panel=\"application\"", StringComparison.Ordinal);
     var applicationPanelEnd = index.IndexOf("</section>", applicationPanelStart, StringComparison.Ordinal);
     Assert(applicationPanelStart >= 0 &&
@@ -1513,8 +1520,11 @@ static void WebUiImagePaintEditorUsesSavedTransaction()
            index.IndexOf("id=\"always-on-top\"", applicationPanelStart, StringComparison.Ordinal) < applicationPanelEnd &&
            index.IndexOf("id=\"opacity\"", applicationPanelStart, StringComparison.Ordinal) < applicationPanelEnd &&
            index.IndexOf("class=\"hotkey-list", applicationPanelStart, StringComparison.Ordinal) < applicationPanelEnd &&
+           index.Contains("class=\"settings-group app-general-section\"", StringComparison.Ordinal) &&
+           index.Contains("class=\"settings-group app-appearance-section\"", StringComparison.Ordinal) &&
+           index.Contains("class=\"settings-group app-hotkeys-section\"", StringComparison.Ordinal) &&
            !index.Contains("class=\"sub-panel\"", StringComparison.Ordinal),
-        "application controls must be grouped in the Application Settings tab instead of a separate scrolling sub-panel");
+        "application controls must use General, Appearance, and Hotkeys groups instead of a separate scrolling sub-panel");
     Assert(index.Contains("id=\"image-file-input\"", StringComparison.Ordinal) &&
            index.Contains("multiple hidden", StringComparison.Ordinal) &&
            index.Contains("id=\"image-upload\"", StringComparison.Ordinal) &&
@@ -1548,9 +1558,9 @@ static void WebUiImagePaintEditorUsesSavedTransaction()
            index.Contains("image-color-compression-tolerance", StringComparison.Ordinal) &&
            index.Contains("image-metallic", StringComparison.Ordinal) &&
            index.Contains("image-fill-metallic", StringComparison.Ordinal) &&
-           index.IndexOf("class=\"group image-design-actions\"", StringComparison.Ordinal) <
-               index.IndexOf("id=\"image-paint-section\"", StringComparison.Ordinal),
-        "Image owns its Fill material without a background-material UI, and Image Design appears before Geometry");
+           index.IndexOf("class=\"settings-group image-editor-section\"", StringComparison.Ordinal) <
+               index.IndexOf("id=\"image-brush-section\"", StringComparison.Ordinal),
+        "Image owns its Fill material without a background-material UI, and Editor appears before Brush");
     Assert(app.Contains("function defaultImageCropForLayer(layer)", StringComparison.Ordinal) &&
            app.Contains("const targetAspect = layer.width / layer.height;", StringComparison.Ordinal) &&
            app.Contains("const width = base.width / factor;", StringComparison.Ordinal) &&
@@ -1599,8 +1609,8 @@ static void WebUiImagePaintEditorUsesSavedTransaction()
            !mainForm.Contains("case \"commitImageDesign\"", StringComparison.Ordinal) &&
            !mainForm.Contains("case \"listImageDesigns\"", StringComparison.Ordinal),
         "native file dialogs own preset paths and the old library commands are absent");
-    Assert(styles.Contains(".image-design-action-grid", StringComparison.Ordinal) &&
-           styles.Contains(".image-design-action-grid button", StringComparison.Ordinal) &&
+    Assert(styles.Contains(".image-editor-action-grid", StringComparison.Ordinal) &&
+           styles.Contains(".image-editor-action-grid button", StringComparison.Ordinal) &&
            styles.Contains(".region-choice[data-image-region]", StringComparison.Ordinal) &&
            styles.Contains(".image-settings-stack {\n  display: grid;\n  gap: 0;", StringComparison.Ordinal) &&
            styles.Contains(".image-layer-row", StringComparison.Ordinal) &&
@@ -1681,9 +1691,17 @@ static void WebUiSeparatesSettingAndLogTabs()
     var markup = ReadRepositoryText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "index.html"));
     var styles = ReadRepositoryText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "styles.css"));
 
-    Assert(markup.Contains("<div class=\"group-title\" data-i18n=\"image.design\">Image Design</div>", StringComparison.Ordinal) &&
+    Assert(markup.Contains("<div class=\"group-title\" data-i18n=\"group.editor\">Editor</div>", StringComparison.Ordinal) &&
            !markup.Contains("<div class=\"group-title\">Images</div>", StringComparison.Ordinal),
-        "the Upload, Load preset, and Save preset controls must use the Image Design group title");
+        "the Upload, Load preset, and Save preset controls must use the Editor group title");
+    Assert(markup.Contains("class=\"settings-group\"", StringComparison.Ordinal) &&
+           markup.Contains("class=\"field-label\"", StringComparison.Ordinal) &&
+           styles.Contains(".settings-group {\n  position: relative;\n  border: 1px solid var(--hairline);\n  border-top: 0;\n  padding: 20px 12px 16px;", StringComparison.Ordinal) &&
+           styles.Contains(".group-title {\n  position: absolute;\n  top: -9px;\n  left: 8px;\n  display: flex;", StringComparison.Ordinal) &&
+           styles.Contains(".settings-group::before {", StringComparison.Ordinal) &&
+           styles.Contains(".group-title::after {", StringComparison.Ordinal) &&
+           styles.Contains(".field-label,", StringComparison.Ordinal),
+        "settings must use semantic bordered sections with inset titles and shared field-label typography");
     Assert(styles.Contains(".settings-tab + .settings-tab {\n  border-left: 0;\n}", StringComparison.Ordinal) &&
            styles.Contains(".tab + .tab {\n  border-left: 0;\n}", StringComparison.Ordinal) &&
            styles.Contains(".settings-tabs {\n  display: grid;", StringComparison.Ordinal) &&
@@ -1885,7 +1903,7 @@ static void WebUiLocalizesImageEditorControlsAndCropDialog()
     var catalog = LocalizationCatalog.Load();
     var keys = new[]
     {
-        "image.design", "button.upload", "button.load.preset", "button.save.preset",
+        "group.editor", "group.brush", "group.general", "group.appearance", "button.upload", "button.load.preset", "button.save.preset",
         "image.body.type", "body.round", "body.cube", "region.right", "region.left",
         "group.hotkeys", "hotkey.image.paint", "hotkey.image.preview", "hotkey.image.unpreview", "hotkey.image.stop",
         "image.action.wrap", "image.action.mirror", "image.action.fit", "image.action.crop", "image.action.remove",
@@ -1895,7 +1913,10 @@ static void WebUiLocalizesImageEditorControlsAndCropDialog()
         "dialog.crop.image.alt", "aria.settings.sections", "aria.image.body.type", "aria.image.canvas"
     };
 
-    Assert(markup.Contains("data-i18n=\"image.design\"", StringComparison.Ordinal) &&
+    Assert(markup.Contains("data-i18n=\"group.editor\"", StringComparison.Ordinal) &&
+           markup.Contains("data-i18n=\"group.brush\"", StringComparison.Ordinal) &&
+           markup.Contains("data-i18n=\"group.general\"", StringComparison.Ordinal) &&
+           markup.Contains("data-i18n=\"group.appearance\"", StringComparison.Ordinal) &&
            markup.Contains("data-i18n=\"button.upload\"", StringComparison.Ordinal) &&
            markup.Contains("data-i18n=\"group.hotkeys\"", StringComparison.Ordinal) &&
            markup.Contains("data-i18n=\"dialog.crop.title\"", StringComparison.Ordinal) &&
@@ -2192,6 +2213,30 @@ static void HostSessionResetRestoresDefault()
     Assert(reset.Success, reset.Message);
     Assert(Math.Abs(session.Settings.Paint.BrushSizeTexels - new AppSettings().Paint.BrushSizeTexels) < 0.000001,
         "single brush should reset");
+}
+
+static void HostSessionResetsBrushSectionWithCurrentVocabulary()
+{
+    using var temp = new TempHome();
+    var session = new HostSession("host-brush-section-reset-test");
+
+    Assert(session.UpdateSetting("paint.brushSizeTexels", JsonSerializer.SerializeToElement(7.5)).Success,
+        "brush size should update before the section reset");
+    Assert(session.UpdateSetting("paint.colorCompressionTolerance", JsonSerializer.SerializeToElement(2.0)).Success,
+        "compression tolerance should update before the section reset");
+    Assert(session.UpdateSetting("paint.metallic", JsonSerializer.SerializeToElement(0.65)).Success,
+        "material should update before the section reset");
+
+    var reset = session.ResetSection("paint.brush");
+    var defaults = new AppSettings().Paint;
+    Assert(reset.Success, reset.Message);
+    Assert(Math.Abs(session.Settings.Paint.BrushSizeTexels - defaults.BrushSizeTexels) < 0.000001 &&
+           Math.Abs(session.Settings.Paint.ColorCompressionTolerance - defaults.ColorCompressionTolerance) < 0.000001,
+        "paint.brush should reset only brush size and compression tolerance");
+    Assert(Math.Abs(session.Settings.Paint.Metallic - 0.65) < 0.000001,
+        "paint.brush must not reset material settings");
+    Assert(!session.ResetSection("paint.geometry").Success && !session.ResetSection("geometry").Success,
+        "removed geometry section names must not remain as aliases");
 }
 
 static void HostSessionUpdatesSingleBrush()

@@ -124,10 +124,57 @@ select:disabled {
 }
 
 input[type="range"] {
-  height: 4px;
+  width: 100%;
+  height: 18px;
   padding: 0;
   border: 0;
-  accent-color: var(--primary);
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--primary) 0 var(--range-progress, 0%), var(--surface-highest) var(--range-progress, 0%) 100%);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border: 1px solid var(--background);
+  border-radius: 50%;
+  appearance: none;
+  background: var(--primary);
+  box-shadow: 0 0 0 1px var(--hairline);
+}
+
+input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 1px var(--hairline), 0 0 0 3px var(--primary);
+}
+
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-highest);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--primary);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--background);
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 1px var(--hairline);
 }
 
 input[type="checkbox"] {
@@ -236,10 +283,6 @@ a:hover {
   display: none;
 }
 
-.settings-tab-panel > .group:first-child {
-  margin-top: 0;
-}
-
 .panel-content {
   flex: 0 0 auto;
   padding: 16px;
@@ -259,20 +302,46 @@ a:hover {
   gap: 24px;
 }
 
-.settings-tab-panel > .group + .group {
+.settings-group {
+  position: relative;
+  border: 1px solid var(--hairline);
+  border-top: 0;
+  padding: 20px 12px 16px;
+}
+
+.settings-group + .settings-group {
   margin-top: 24px;
 }
 
+.settings-group::before {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 8px;
+  border-top: 1px solid var(--hairline);
+  content: "";
+}
+
 .group-title {
-  margin-bottom: 10px;
-  color: var(--muted);
+  position: absolute;
+  top: -9px;
+  left: 8px;
+  display: flex;
+  width: calc(100% - 16px);
+  align-items: center;
+  margin: 0;
+  color: var(--text);
   font: 600 13px/16px var(--font-ui);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
-body.editing .group-title {
-  color: var(--text);
+.group-title::after {
+  height: 1px;
+  flex: 1 1 auto;
+  margin-left: 8px;
+  background: var(--hairline);
+  content: "";
 }
 
 .setting-grid {
@@ -289,6 +358,7 @@ body.editing .group-title {
 }
 
 .field > span,
+.field-label,
 .brush-toggle > span,
 .hotkey-row > span {
   color: var(--muted);
@@ -296,6 +366,7 @@ body.editing .group-title {
 }
 
 body.editing .field > span,
+body.editing .field-label,
 body.editing .brush-toggle > span,
 body.editing .hotkey-row > span {
   color: var(--text);
@@ -309,8 +380,37 @@ body.editing .hotkey-row > span {
 .range-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 72px;
+  grid-template-rows: 18px 12px;
   align-items: center;
-  gap: 12px;
+  column-gap: 12px;
+  row-gap: 2px;
+}
+
+.range-row > input[type="range"] {
+  grid-row: 1;
+  grid-column: 1;
+}
+
+.range-row > .range-number {
+  grid-row: 1;
+  grid-column: 2;
+}
+
+.range-scale {
+  display: grid;
+  min-width: 0;
+  color: color-mix(in srgb, var(--muted) 75%, var(--background));
+  font: 400 10px/11px var(--font-mono);
+}
+
+.range-row > .range-scale {
+  grid-row: 2;
+  grid-column: 1;
+}
+
+.range-scale-bounds {
+  display: flex;
+  justify-content: space-between;
 }
 
 .range-number {
@@ -385,15 +485,6 @@ body.editing .image-toggle-row label {
   margin-bottom: 12px;
 }
 
-.region-grid > strong {
-  color: var(--muted);
-  font: 500 13px/16px var(--font-ui);
-}
-
-body.editing .region-grid > strong {
-  color: var(--text);
-}
-
 .region-choice {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -418,15 +509,16 @@ body.editing .region-grid > strong {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-#fill-section.disabled,
+#paint-fill-section.disabled,
 #image-fill-section.disabled .image-fill-material-controls {
   opacity: 0.55;
 }
 
-body.editing #fill-section.disabled .group-title,
-body.editing #fill-section.disabled .field > span,
+body.editing #paint-fill-section.disabled .group-title,
+body.editing #paint-fill-section.disabled .field > span,
 body.editing #image-fill-section.disabled .group-title,
-body.editing #image-fill-section.disabled .field > span {
+body.editing #image-fill-section.disabled .field > span,
+body.editing #image-fill-section.disabled .field-label {
   color: var(--muted);
 }
 
@@ -435,13 +527,13 @@ body.editing #image-fill-section.disabled .field > span {
   gap: 0;
 }
 
-.image-design-action-grid {
+.image-editor-action-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
-.image-design-action-grid button {
+.image-editor-action-grid button {
   height: 36px;
   padding: 0 8px;
   font: 500 13px/16px var(--font-ui);
@@ -516,27 +608,14 @@ body.editing #image-fill-section.disabled .field > span {
   gap: 10px 12px;
 }
 
-.image-choice-list > strong {
-  color: var(--muted);
-  font: 500 13px/16px var(--font-ui);
-}
-
-body.editing .image-choice-list > strong {
-  color: var(--text);
-}
-
 .image-choice {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.image-design-actions {
+.image-editor-section {
   display: grid;
   gap: 12px;
   padding-bottom: 24px;
-}
-
-.image-design-actions > .group-title {
-  margin: 0;
 }
 
 .image-canvas-wrap {
@@ -639,8 +718,25 @@ body.editing .image-choice-list > strong {
 .crop-editor-zoom {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: 18px 12px;
   align-items: center;
-  gap: 10px;
+  column-gap: 10px;
+  row-gap: 2px;
+}
+
+.crop-editor-zoom > span {
+  grid-row: 1 / -1;
+  grid-column: 1;
+}
+
+.crop-editor-zoom > input[type="range"] {
+  grid-row: 1;
+  grid-column: 2;
+}
+
+.crop-editor-zoom > .range-scale {
+  grid-row: 2;
+  grid-column: 2;
 }
 
 .crop-editor-actions {

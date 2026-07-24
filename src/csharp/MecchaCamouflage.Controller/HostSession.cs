@@ -627,8 +627,7 @@ public sealed class HostSession
         {
             case "runtime":
                 return new HostCommandResult(true);
-            case "paint.geometry":
-            case "geometry":
+            case "paint.brush":
                 next.Paint.BrushSizeTexels = defaults.Paint.BrushSizeTexels;
                 next.Paint.ColorCompressionTolerance = defaults.Paint.ColorCompressionTolerance;
                 break;
@@ -1585,7 +1584,7 @@ public sealed class HostSession
         var map = ResetKeys.ToDictionary(key => key, key => !SettingEquals(settings, defaults, key), StringComparer.OrdinalIgnoreCase);
         var sections = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
         {
-            ["paint.geometry"] = map["paint.brushSizeTexels"] || map["paint.colorCompressionTolerance"],
+            ["paint.brush"] = map["paint.brushSizeTexels"] || map["paint.colorCompressionTolerance"],
             ["paint.material"] = map["paint.autoMaterial"] || map["paint.metallic"] || map["paint.roughness"] || map["paint.emissive"],
             ["regions"] = map["paint.frontRegionMode"] || map["paint.sideRegionMode"] || map["paint.backRegionMode"],
             ["fill.material"] = map["paint.fillColor"] || map["paint.fillMetallic"] || map["paint.fillRoughness"] || map["paint.fillEmissive"],

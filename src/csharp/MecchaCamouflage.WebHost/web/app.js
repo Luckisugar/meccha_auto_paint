@@ -128,6 +128,7 @@ function setValue(id, next) {
   const element = byId(id);
   if (document.activeElement !== element) {
     element.value = next;
+    if (element.type === "range") updateRangeProgress(element);
   }
 }
 
@@ -141,6 +142,41 @@ function clone(value) {
 
 function fmt(value) {
   return Number(value).toFixed(2).replace(/\.?0+$/, "");
+}
+
+function updateRangeProgress(range) {
+  const minimum = Number(range.min);
+  const maximum = Number(range.max);
+  const value = Number(range.value);
+  const progress = Number.isFinite(minimum) && Number.isFinite(maximum) && maximum > minimum && Number.isFinite(value)
+    ? clamp((value - minimum) / (maximum - minimum) * 100, 0, 100)
+    : 0;
+  range.style.setProperty("--range-progress", `${progress}%`);
+}
+
+function addRangeScale(range, extraClass = "") {
+  if (!range || range.parentElement?.querySelector(`.range-scale[data-range-id="${range.id}"]`)) return;
+  const scale = document.createElement("div");
+  scale.className = `range-scale ${extraClass}`.trim();
+  scale.dataset.rangeId = range.id;
+  scale.setAttribute("aria-hidden", "true");
+
+  const bounds = document.createElement("div");
+  bounds.className = "range-scale-bounds";
+  const minimum = document.createElement("span");
+  minimum.textContent = fmt(range.min);
+  const maximum = document.createElement("span");
+  maximum.textContent = fmt(range.max);
+  bounds.append(minimum, maximum);
+  scale.append(bounds);
+  range.insertAdjacentElement("afterend", scale);
+  range.addEventListener("input", () => updateRangeProgress(range));
+  updateRangeProgress(range);
+}
+
+function initializeRangeScales() {
+  for (const range of document.querySelectorAll(".range-row input[type=range]")) addRangeScale(range);
+  addRangeScale(byId("crop-editor-zoom"), "crop-range-scale");
 }
 
 function activeLocale() {
@@ -445,7 +481,7 @@ function renderSettings(snapshot) {
   setDisabled(["metallic", "metallic-number", "roughness", "roughness-number", "emissive", "emissive-number"], materialLocked);
 
   const fillLocked = !editable || !usesFill(paint);
-  byId("fill-section").classList.toggle("disabled", !usesFill(paint));
+  byId("paint-fill-section").classList.toggle("disabled", !usesFill(paint));
   setDisabled([
     "fill-color-picker",
     "fill-color",
@@ -2336,6 +2372,7 @@ function initializeImageCropEditor() {
     if (!imageCropEditor) return;
     imageCropEditor.draft = clone(imageCropEditor.base);
     byId("crop-editor-zoom").value = "100";
+    updateRangeProgress(byId("crop-editor-zoom"));
     renderImageCropSelection();
   });
   byId("crop-editor-cancel").addEventListener("click", closeImageCropEditor);
@@ -2398,6 +2435,7 @@ async function openImageCropEditor(index = imageEditor?.selected ?? -1) {
   const cropImage = byId("crop-editor-image");
   cropImage.src = layer.image.src;
   byId("crop-editor-zoom").value = String(Math.round(Math.min(base.width / draft.width, base.height / draft.height) * 100));
+  updateRangeProgress(byId("crop-editor-zoom"));
   byId("crop-editor-dialog").hidden = false;
   try {
     await cropImage.decode();
@@ -2468,6 +2506,7 @@ function applyImageCrop() {
 document.addEventListener("DOMContentLoaded", () => {
   initializeSettingsTabs();
   initializeImageEditor();
+  initializeRangeScales();
   bindRangePair("brush-size", "brush-size-number", "paint.brushSizeTexels");
   bindRangePair("color-compression-tolerance", "color-compression-tolerance-number", "paint.colorCompressionTolerance");
   bindCheckbox("auto-material", "paint.autoMaterial");
