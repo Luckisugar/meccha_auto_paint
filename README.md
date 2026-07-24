@@ -35,15 +35,12 @@ Logs are written under:
 
 ## Windows Security
 
-At startup, MecchaCamouflage checks whether the following folder is in
-Microsoft Defender's exclusion list:
+If Windows asks, approve the UAC prompt at startup to add this Microsoft
+Defender exclusion:
 
 ```text
 %LOCALAPPDATA%\MecchaCamouflage\
 ```
-
-If it is missing, Windows displays a UAC prompt and the app adds that folder
-before starting the bridge.
 
 ## Development
 

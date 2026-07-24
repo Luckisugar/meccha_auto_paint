@@ -8,6 +8,7 @@ public enum WindowsDefenderExclusionCheck
 {
     Configured,
     Missing,
+    Hidden,
     Unavailable
 }
 
@@ -39,6 +40,7 @@ public sealed class WindowsDefenderExclusionService(
     IWindowsDefenderExclusionPlatform platform)
 {
     private const int ElevationCancelledExitCode = 1223;
+    private const string MarkerFileName = "defender-exclusion-added.txt";
 
     public async Task<WindowsDefenderExclusionResult> EnsureConfiguredAsync(
         string path,
@@ -46,15 +48,29 @@ public sealed class WindowsDefenderExclusionService(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         var normalizedPath = Path.GetFullPath(path);
+        var hasConfiguredMarker = HasConfiguredMarker(normalizedPath);
         var check = await platform.CheckAsync(normalizedPath, cancellationToken);
         if (check == WindowsDefenderExclusionCheck.Configured)
         {
+            WriteConfiguredMarker(normalizedPath);
             return new WindowsDefenderExclusionResult(
                 WindowsDefenderExclusionOutcome.AlreadyConfigured,
                 "Microsoft Defender exclusion is already configured.");
         }
+        if (check == WindowsDefenderExclusionCheck.Hidden && hasConfiguredMarker)
+        {
+            return new WindowsDefenderExclusionResult(
+                WindowsDefenderExclusionOutcome.AlreadyConfigured,
+                "Microsoft Defender exclusion was previously configured.");
+        }
         if (check == WindowsDefenderExclusionCheck.Unavailable)
         {
+            if (hasConfiguredMarker)
+            {
+                return new WindowsDefenderExclusionResult(
+                    WindowsDefenderExclusionOutcome.AlreadyConfigured,
+                    "Microsoft Defender exclusion was previously configured.");
+            }
             return new WindowsDefenderExclusionResult(
                 WindowsDefenderExclusionOutcome.Unavailable,
                 "Microsoft Defender exclusion settings are unavailable.");
@@ -74,14 +90,33 @@ public sealed class WindowsDefenderExclusionService(
                 $"Microsoft Defender exclusion was not added (exit code {exitCode}).");
         }
 
-        var verification = await platform.CheckAsync(normalizedPath, cancellationToken);
-        return verification == WindowsDefenderExclusionCheck.Configured
-            ? new WindowsDefenderExclusionResult(
-                WindowsDefenderExclusionOutcome.Added,
-                "Microsoft Defender exclusion was added.")
-            : new WindowsDefenderExclusionResult(
-                WindowsDefenderExclusionOutcome.AddFailed,
-                "Microsoft Defender did not report the requested exclusion after elevation.");
+        WriteConfiguredMarker(normalizedPath);
+        return new WindowsDefenderExclusionResult(
+            WindowsDefenderExclusionOutcome.Added,
+            "Microsoft Defender exclusion was added.");
+    }
+
+    private static bool HasConfiguredMarker(string rootDirectory)
+    {
+        try
+        {
+            return string.Equals(
+                File.ReadAllText(Path.Combine(rootDirectory, MarkerFileName)).Trim(),
+                "1",
+                StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void WriteConfiguredMarker(string rootDirectory)
+    {
+        Directory.CreateDirectory(rootDirectory);
+        File.WriteAllText(
+            Path.Combine(rootDirectory, MarkerFileName),
+            "1" + Environment.NewLine);
     }
 }
 
@@ -89,6 +124,7 @@ public sealed class PowerShellWindowsDefenderExclusionPlatform :
     IWindowsDefenderExclusionPlatform
 {
     private const int MissingExitCode = 2;
+    private const int HiddenExitCode = 3;
     private const int ElevationCancelledExitCode = 1223;
 
     public async Task<WindowsDefenderExclusionCheck> CheckAsync(
@@ -108,6 +144,7 @@ public sealed class PowerShellWindowsDefenderExclusionPlatform :
             {
                 0 => WindowsDefenderExclusionCheck.Configured,
                 MissingExitCode => WindowsDefenderExclusionCheck.Missing,
+                HiddenExitCode => WindowsDefenderExclusionCheck.Hidden,
                 _ => WindowsDefenderExclusionCheck.Unavailable
             };
         }
@@ -182,12 +219,16 @@ public sealed class PowerShellWindowsDefenderExclusionPlatform :
         var literal = ToPowerShellLiteral(path);
         return
             "$target = [IO.Path]::GetFullPath('" + literal + "').TrimEnd('\\'); " +
-            "$configured = @((Get-MpPreference -ErrorAction Stop).ExclusionPath); " +
+            "$preference = Get-MpPreference -ErrorAction Stop; " +
+            "$configured = @($preference.ExclusionPath); " +
             "foreach ($candidate in $configured) { " +
             "if ([string]::IsNullOrWhiteSpace($candidate)) { continue }; " +
             "try { $normalized = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($candidate)).TrimEnd('\\') } catch { continue }; " +
             "if ([StringComparer]::OrdinalIgnoreCase.Equals($target, $normalized)) { exit 0 } " +
-            "}; exit 2";
+            "}; " +
+            "if ($preference.HideExclusionsFromLocalUsers -eq $true -or " +
+            "$preference.HideExclusionsFromLocalAdmins -eq $true) { exit 3 }; " +
+            "exit 2";
     }
 
     private static string BuildAddScript(string path)

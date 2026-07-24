@@ -75,8 +75,12 @@ These require MECCHA CHAMELEON.
 - On a machine without the Defender exclusion:
   - startup requests UAC once
   - approving it adds only `%LOCALAPPDATA%\MecchaCamouflage`
+  - `defender-exclusion-added.txt` contains `1` in that directory
   - the bridge warms up without the previous antivirus block
   - the next startup does not request UAC again
+- On a machine where the exclusion list is visible, remove the exclusion while
+  leaving the marker file.
+  - the next startup requests UAC and restores the exclusion
 - Cancel the UAC prompt once.
   - the app continues to start
   - diagnostics record the failed exclusion setup

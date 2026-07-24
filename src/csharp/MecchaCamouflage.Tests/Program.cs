@@ -135,7 +135,7 @@ var tests = new List<(string Name, Action Run)>
     ("direct bridge names avoid historical loader pattern", DirectBridgeNamesAvoidHistoricalLoaderPattern),
     ("release packaging contains only direct bridge components", ReleasePackagingContainsOnlyDirectBridge),
     ("missing Defender exclusion is added with elevation", MissingDefenderExclusionIsAddedWithElevation),
-    ("Defender exclusion addition is verified after elevation", DefenderExclusionAdditionIsVerifiedAfterElevation),
+    ("Defender exclusion marker prevents repeated elevation", DefenderExclusionMarkerPreventsRepeatedElevation),
     ("cancelling Defender elevation returns a nonfatal result", CancellingDefenderElevationReturnsNonfatalResult),
     ("configured Defender exclusion does not request elevation", ConfiguredDefenderExclusionDoesNotRequestElevation),
     ("desktop startup ensures the Defender exclusion before the GUI", DesktopStartupEnsuresDefenderExclusionBeforeGui),
@@ -3732,19 +3732,51 @@ static void MissingDefenderExclusionIsAddedWithElevation()
         "the exact MecchaCamouflage LocalAppData path must be elevated once");
 }
 
-static void DefenderExclusionAdditionIsVerifiedAfterElevation()
+static void DefenderExclusionMarkerPreventsRepeatedElevation()
 {
-    var platform = new FakeWindowsDefenderExclusionPlatform(
-        elevatedExitCode: 0,
-        WindowsDefenderExclusionCheck.Missing,
-        WindowsDefenderExclusionCheck.Missing);
-    var service = new WindowsDefenderExclusionService(platform);
+    var root = Path.Combine(
+        Path.GetTempPath(),
+        "meccha-defender-marker-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var firstPlatform = new FakeWindowsDefenderExclusionPlatform(
+            elevatedExitCode: 0,
+            WindowsDefenderExclusionCheck.Missing);
+        var first = new WindowsDefenderExclusionService(firstPlatform)
+            .EnsureConfiguredAsync(root).GetAwaiter().GetResult();
+        var markerPath = Path.Combine(root, "defender-exclusion-added.txt");
 
-    var result = service.EnsureConfiguredAsync(
-        Path.Combine(Path.GetTempPath(), "MecchaCamouflage")).GetAwaiter().GetResult();
+        Assert(first.Outcome == WindowsDefenderExclusionOutcome.Added &&
+               File.ReadAllText(markerPath).Trim() == "1",
+            "a successful elevated addition must write the version-independent root marker");
 
-    Assert(result.Outcome == WindowsDefenderExclusionOutcome.AddFailed,
-        "a zero exit code must not report success when Defender still reports the exclusion as missing");
+        var secondPlatform = new FakeWindowsDefenderExclusionPlatform(
+            elevatedExitCode: 0,
+            WindowsDefenderExclusionCheck.Hidden);
+        var second = new WindowsDefenderExclusionService(secondPlatform)
+            .EnsureConfiguredAsync(root).GetAwaiter().GetResult();
+
+        Assert(second.Outcome == WindowsDefenderExclusionOutcome.AlreadyConfigured &&
+               secondPlatform.CheckCount == 1 &&
+               secondPlatform.ElevatedPaths.Count == 0,
+            "the marker must bypass hidden Defender exclusions without another UAC request");
+
+        var removedPlatform = new FakeWindowsDefenderExclusionPlatform(
+            elevatedExitCode: 0,
+            WindowsDefenderExclusionCheck.Missing);
+        var removed = new WindowsDefenderExclusionService(removedPlatform)
+            .EnsureConfiguredAsync(root).GetAwaiter().GetResult();
+
+        Assert(removed.Outcome == WindowsDefenderExclusionOutcome.Added &&
+               removedPlatform.CheckCount == 1 &&
+               removedPlatform.ElevatedPaths.SequenceEqual([root]),
+            "a visible missing exclusion must override a stale marker and request UAC again");
+    }
+    finally
+    {
+        try { Directory.Delete(root, true); } catch { }
+    }
 }
 
 static void CancellingDefenderElevationReturnsNonfatalResult()
@@ -3935,12 +3967,14 @@ sealed class FakeWindowsDefenderExclusionPlatform(
 {
     private readonly Queue<WindowsDefenderExclusionCheck> checks = new(checks);
     private WindowsDefenderExclusionCheck lastCheck = checks.LastOrDefault();
+    public int CheckCount { get; private set; }
     public List<string> ElevatedPaths { get; } = [];
 
     public Task<WindowsDefenderExclusionCheck> CheckAsync(
         string path,
         CancellationToken cancellationToken)
     {
+        ++CheckCount;
         if (checks.Count > 0)
             lastCheck = checks.Dequeue();
         return Task.FromResult(lastCheck);
