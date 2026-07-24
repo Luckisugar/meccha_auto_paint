@@ -14,6 +14,7 @@
         <div class="settings-tabs" role="tablist" aria-label="Settings sections" data-i18n-aria-label="aria.settings.sections">
           <button class="settings-tab active" type="button" data-settings-tab="paint" data-i18n="settings.paint">Paint settings</button>
           <button class="settings-tab" type="button" data-settings-tab="image" data-i18n="settings.image">Image settings</button>
+          <button class="settings-tab" type="button" data-settings-tab="misc" data-i18n="settings.misc">Misc Settings</button>
           <button class="settings-tab" type="button" data-settings-tab="application" data-i18n="settings.app">Application Settings</button>
         </div>
 
@@ -179,6 +180,8 @@
               </div>
             </section>
 
+            <section class="settings-tab-panel" data-settings-panel="misc" hidden></section>
+
             <section class="settings-tab-panel" data-settings-panel="application" hidden>
               <div class="group">
                 <div class="group-title" data-i18n="settings.app">Application</div>
@@ -282,26 +285,6 @@
     </section>
 
     <section class="column">
-      <section id="manual-paint-controls" class="manual-paint-controls">
-        <div class="manual-paint-row">
-          <span class="manual-paint-label" data-i18n="mode.paint">Paint</span>
-          <div class="manual-paint-grid">
-            <button type="button" disabled data-manual-paint-command="paint" data-i18n="button.start">Start</button>
-            <button class="danger-action" type="button" disabled data-manual-paint-command="stop" data-i18n="button.stop">Stop</button>
-            <button type="button" disabled data-manual-paint-command="preview" data-i18n="button.preview">Preview</button>
-            <button type="button" disabled data-manual-paint-command="unpreview" data-i18n="button.unpreview">Unpreview</button>
-          </div>
-        </div>
-        <div class="manual-paint-row">
-          <span class="manual-paint-label" data-i18n="manual.image.paint">Image Paint</span>
-          <div class="manual-paint-grid">
-            <button type="button" disabled data-manual-paint-command="imagePaint" data-i18n="button.start">Start</button>
-            <button class="danger-action" type="button" disabled data-manual-paint-command="imageStop" data-i18n="button.stop">Stop</button>
-            <button type="button" disabled data-manual-paint-command="imagePreview" data-i18n="button.preview">Preview</button>
-            <button type="button" disabled data-manual-paint-command="imageUnpreview" data-i18n="button.unpreview">Unpreview</button>
-          </div>
-        </div>
-      </section>
       <section class="log-panel">
         <div class="log-tabs">
           <div class="tabs" role="tablist" aria-label="Log level" data-i18n-aria-label="log.level">
@@ -317,6 +300,26 @@
         </div>
         <pre id="logs" class="logs"></pre>
         <div id="toast" role="status" aria-live="polite"></div>
+        <section id="manual-paint-controls" class="manual-paint-controls">
+          <div class="manual-paint-group">
+            <div class="action-bar manual-paint-grid">
+              <div class="manual-paint-label" data-i18n="mode.paint">Paint</div>
+              <button type="button" disabled data-manual-paint-command="paint" data-i18n="button.start">Start</button>
+              <button class="danger-action" type="button" disabled data-manual-paint-command="stop" data-i18n="button.stop">Stop</button>
+              <button type="button" disabled data-manual-paint-command="preview" data-i18n="button.preview">Preview</button>
+              <button type="button" disabled data-manual-paint-command="unpreview" data-i18n="button.unpreview">Unpreview</button>
+            </div>
+          </div>
+          <div class="manual-paint-group">
+            <div class="action-bar manual-paint-grid">
+              <div class="manual-paint-label" data-i18n="manual.image.paint">Image Paint</div>
+              <button type="button" disabled data-manual-paint-command="imagePaint" data-i18n="button.start">Start</button>
+              <button class="danger-action" type="button" disabled data-manual-paint-command="imageStop" data-i18n="button.stop">Stop</button>
+              <button type="button" disabled data-manual-paint-command="imagePreview" data-i18n="button.preview">Preview</button>
+              <button type="button" disabled data-manual-paint-command="imageUnpreview" data-i18n="button.unpreview">Unpreview</button>
+            </div>
+          </div>
+        </section>
       </section>
     </section>
   </main>

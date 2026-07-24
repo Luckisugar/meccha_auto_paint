@@ -1137,6 +1137,7 @@ function initializeSettingsTabs() {
         loadCommittedImageDesign().catch(error => showError(error.message || String(error)));
       }
       renderImageEditor();
+      renderEditState();
     });
   }
 }

@@ -24,6 +24,7 @@ var tests = new List<(string Name, Action Run)>
     ("native image paint uses the live profile when the selected body differs", NativeImagePaintUsesLiveProfileWhenSelectedBodyDiffers),
     ("image unpreview omits paint-plan diagnostics", ImageUnpreviewOmitsPaintPlanDiagnostics),
     ("custom freecam surface is absent", CustomFreecamSurfaceIsAbsent),
+    ("misc is an empty extension surface", MiscIsAnEmptyExtensionSurface),
     ("spectator paint resolution requires local controller identity", SpectatorPaintResolutionRequiresLocalControllerIdentity),
     ("diagnostic stroke limit requires explicit option", DiagnosticStrokeLimitRequiresExplicitOption),
     ("native accepts the single brush configured range", NativeAcceptsSingleBrushConfiguredRange),
@@ -78,7 +79,7 @@ var tests = new List<(string Name, Action Run)>
     ("web ui rebuilds image guides when the language changes", WebUiRebuildsImageGuidesWhenLanguageChanges),
     ("web ui separates setting and log tabs", WebUiSeparatesSettingAndLogTabs),
     ("web ui scopes edit actions to the active settings tab", WebUiScopesEditActionsToActiveSettingsTab),
-    ("web ui offers manual paint controls above logs", WebUiOffersManualPaintControls),
+    ("web ui keeps manual paint controls inside logs", WebUiOffersManualPaintControls),
     ("runtime snapshot reports manual paint state", RuntimeSnapshotReportsManualPaintState),
     ("paint feedback uses one severity path for buttons and hotkeys", PaintFeedbackUsesOneSeverityPath),
     ("web ui reports the WebView zoom factor in the footer", WebUiReportsWebViewZoomFactorInFooter),
@@ -852,6 +853,32 @@ static void CustomFreecamSurfaceIsAbsent()
            !bridge.Contains("freecam_toggle", StringComparison.Ordinal) &&
            !bridge.Contains("ToggleDebugCamera", StringComparison.Ordinal),
         "the application must not expose or invoke its own freecam implementation");
+}
+
+static void MiscIsAnEmptyExtensionSurface()
+{
+    var root = FindRepositoryRoot();
+    var bridge = File.ReadAllText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var runtime = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
+    var session = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "HostSession.cs"));
+    var mainForm = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "MainForm.cs"));
+    var markup = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "web", "index.html"));
+    var app = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "web", "app.js"));
+
+    Assert(markup.Contains("data-settings-panel=\"misc\"", StringComparison.Ordinal) &&
+           !markup.Contains("misc-walk-speed", StringComparison.Ordinal) &&
+           !markup.Contains("misc-jump-power", StringComparison.Ordinal) &&
+           !markup.Contains("misc-gravity", StringComparison.Ordinal) &&
+           !markup.Contains("data-settings-actions=\"misc\"", StringComparison.Ordinal) &&
+           !app.Contains("getMiscState", StringComparison.Ordinal) &&
+           !app.Contains("applyMiscState", StringComparison.Ordinal) &&
+           !mainForm.Contains("getMiscState", StringComparison.Ordinal) &&
+           !mainForm.Contains("applyMiscState", StringComparison.Ordinal) &&
+           !runtime.Contains("MiscState", StringComparison.Ordinal) &&
+           !session.Contains("MiscState", StringComparison.Ordinal) &&
+           !bridge.Contains("misc_state", StringComparison.Ordinal) &&
+           !bridge.Contains("misc_apply", StringComparison.Ordinal),
+        "Misc must remain an empty UI extension surface until a verified action is available");
 }
 
 static void SpectatorPaintResolutionRequiresLocalControllerIdentity()
@@ -1659,9 +1686,10 @@ static void WebUiSeparatesSettingAndLogTabs()
         "the Upload, Load preset, and Save preset controls must use the Image Design group title");
     Assert(styles.Contains(".settings-tab + .settings-tab", StringComparison.Ordinal) &&
            styles.Contains(".tab + .tab", StringComparison.Ordinal) &&
-           styles.Contains("grid-template-columns: repeat(3, minmax(0, 1fr));", StringComparison.Ordinal) &&
+           styles.Contains(".settings-tabs {\n  display: grid;", StringComparison.Ordinal) &&
+           styles.Contains("grid-template-columns: repeat(4, minmax(0, 1fr));", StringComparison.Ordinal) &&
            styles.Contains("border-left: 1px solid var(--hairline);", StringComparison.Ordinal),
-        "the three settings tabs and log filters must have a visible divider between adjacent controls");
+        "the four settings tabs and log filters must have a visible divider between adjacent controls");
     Assert(styles.Contains(".tabs {\n  display: grid;", StringComparison.Ordinal) &&
            styles.Contains("grid-template-columns: repeat(4, minmax(0, 1fr));", StringComparison.Ordinal) &&
            styles.Contains("border-right: 1px solid var(--hairline);", StringComparison.Ordinal) &&
@@ -1686,7 +1714,7 @@ static void WebUiScopesEditActionsToActiveSettingsTab()
            markup.Contains("data-settings-actions=\"paint\"", StringComparison.Ordinal) &&
            markup.Contains("data-settings-actions=\"image\"", StringComparison.Ordinal) &&
            markup.Contains("data-settings-actions=\"application\"", StringComparison.Ordinal),
-        "each settings tab must own its Edit, Reset, Cancel, and Save action bar");
+        "each editable settings tab must own its Edit, Reset, Cancel, and Save action bar");
     Assert(app.Contains("if (editing && tab.dataset.settingsTab !== activeSettingsTab)", StringComparison.Ordinal) &&
            app.Contains("tab.disabled = editing && tab.dataset.settingsTab !== activeSettingsTab;", StringComparison.Ordinal),
         "an editing settings tab must be saved or cancelled before another tab can be selected");
@@ -1735,8 +1763,9 @@ static void WebUiOffersManualPaintControls()
         "imagePaint", "imagePreview", "imageUnpreview", "imageStop"
     };
 
-    Assert(controlsIndex >= 0 && controlsIndex < logsIndex,
-        "manual Paint controls must appear immediately above Logs");
+    Assert(controlsIndex > logsIndex &&
+           !markup[logsIndex..controlsIndex].Contains("</section>", StringComparison.Ordinal),
+        "manual Paint controls must live inside the Logs panel");
     foreach (var command in commands)
     {
         Assert(markup.Contains($"data-manual-paint-command=\"{command}\"", StringComparison.Ordinal),
@@ -1764,10 +1793,10 @@ static void WebUiOffersManualPaintControls()
            app.Contains("runtime?.activePreviewKind", StringComparison.Ordinal),
         "manual Paint controls must distinguish the running and previewed Paint kind before enabling actions");
     Assert(styles.Contains(".manual-paint-controls", StringComparison.Ordinal) &&
-           styles.Contains(".manual-paint-grid", StringComparison.Ordinal) &&
-           styles.Contains("@media (max-width: 1050px)", StringComparison.Ordinal) &&
-           styles.Contains("grid-template-columns: repeat(2, minmax(0, 1fr));", StringComparison.Ordinal),
-        "manual Paint controls must be four-wide normally and collapse to two columns on narrow windows");
+           styles.Contains("border-top: 1px solid var(--hairline);", StringComparison.Ordinal) &&
+           CountOccurrences(markup, "class=\"action-bar manual-paint-grid\"") == 2 &&
+           styles.Contains(".manual-paint-group + .manual-paint-group", StringComparison.Ordinal),
+        "manual Paint controls must reuse the same four-button action bar as the settings tabs");
 }
 
 static void RuntimeSnapshotReportsManualPaintState()
@@ -1833,12 +1862,13 @@ static void WebUiLocalizesEverySettingsTab()
 
     Assert(markup.Contains("data-i18n=\"settings.paint\"", StringComparison.Ordinal) &&
            markup.Contains("data-i18n=\"settings.image\"", StringComparison.Ordinal) &&
+           markup.Contains("data-i18n=\"settings.misc\"", StringComparison.Ordinal) &&
            markup.Contains("data-i18n=\"settings.app\"", StringComparison.Ordinal) &&
            app.Contains("document.documentElement.lang = locale;", StringComparison.Ordinal),
-        "the Paint, Image, and Application tabs must update with the selected UI language");
+        "the Paint, Image, Misc, and Application tabs must update with the selected UI language");
     foreach (var locale in LocalizationCatalog.SupportedLocales)
     {
-        foreach (var key in new[] { "settings.paint", "settings.image", "settings.app" })
+        foreach (var key in new[] { "settings.paint", "settings.image", "settings.misc", "settings.app" })
         {
             Assert(!string.Equals(catalog.Text(locale.Code, key), key, StringComparison.Ordinal),
                 $"{locale.Code} must translate {key}");

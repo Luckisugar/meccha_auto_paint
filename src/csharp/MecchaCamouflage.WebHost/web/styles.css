@@ -203,7 +203,7 @@ a:hover {
   top: 0;
   z-index: 3;
   height: 36px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   border-bottom: 1px solid var(--hairline);
   background: var(--surface-low);
 }
@@ -695,35 +695,26 @@ body.editing .image-choice-list > strong {
 .manual-paint-controls {
   display: grid;
   flex: 0 0 auto;
-  gap: 8px;
-  border: 1px solid var(--hairline);
-  border-radius: 2px;
-  padding: 10px 12px;
-  background: #000;
+  border-top: 1px solid var(--hairline);
+  background: var(--surface-low);
 }
 
-.manual-paint-row {
-  display: grid;
-  grid-template-columns: 88px minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
+.manual-paint-group + .manual-paint-group {
+  border-top: 1px solid var(--hairline);
 }
 
 .manual-paint-label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  padding: 0 4px;
   color: var(--muted);
   font: 700 11px/13px var(--font-mono);
 }
 
 .manual-paint-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.manual-paint-grid button {
-  min-width: 0;
-  padding: 0 8px;
-  font: 700 11px/13px var(--font-mono);
+  grid-template-columns: minmax(64px, 0.7fr) repeat(4, minmax(0, 1fr));
+  border-top: 0;
 }
 
 .danger-action {
@@ -745,7 +736,7 @@ body.editing .image-choice-list > strong {
 .log-tabs {
   display: grid;
   grid-template-columns: 2fr 1fr;
-  height: 34px;
+  height: 36px;
   flex: 0 0 auto;
   align-items: stretch;
   border-bottom: 1px solid var(--hairline);
@@ -762,7 +753,7 @@ body.editing .image-choice-list > strong {
 .tab {
   width: 100%;
   min-width: 0;
-  height: 33px;
+  height: 36px;
   border-width: 0 0 2px;
   border-color: transparent;
   background: transparent;
@@ -783,33 +774,23 @@ body.editing .image-choice-list > strong {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   min-width: 0;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 8px;
+  border-left: 1px solid var(--hairline);
 }
 
 .log-actions button {
   width: 100%;
   min-width: 0;
-  height: 33px;
-  border-width: 0 0 2px;
-  border-radius: 0;
-  border-color: transparent;
-  background: transparent;
-  color: var(--muted);
+  height: 28px;
+  padding: 0 6px;
+  color: var(--text);
   font: 700 11px/13px var(--font-mono);
 }
 
 .log-actions button + button {
-  border-left: 1px solid var(--hairline);
-}
-
-@media (max-width: 1050px) {
-  .manual-paint-row {
-    grid-template-columns: 76px minmax(0, 1fr);
-    gap: 8px;
-  }
-
-  .manual-paint-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+  border-left-width: 1px;
 }
 
 .logs {
