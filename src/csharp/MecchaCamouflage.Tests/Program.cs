@@ -77,7 +77,7 @@ var tests = new List<(string Name, Action Run)>
     ("web ui preserves image actions during paint snapshots", WebUiPreservesImageActionsDuringPaintSnapshots),
     ("web ui keeps mesh guides visible with imported images", WebUiKeepsMeshGuidesVisibleWithImportedImages),
     ("web ui rebuilds image guides when the language changes", WebUiRebuildsImageGuidesWhenLanguageChanges),
-    ("web ui separates setting and log tabs", WebUiSeparatesSettingAndLogTabs),
+    ("web ui keeps setting and log tabs distinct without visual noise", WebUiSeparatesSettingAndLogTabs),
     ("web ui scopes edit actions to the active settings tab", WebUiScopesEditActionsToActiveSettingsTab),
     ("web ui keeps manual paint controls inside logs", WebUiOffersManualPaintControls),
     ("runtime snapshot reports manual paint state", RuntimeSnapshotReportsManualPaintState),
@@ -1490,9 +1490,9 @@ static void WebUiImagePaintEditorUsesSavedTransaction()
     var mainForm = ReadRepositoryText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "MainForm.cs"));
     var bridge = ReadRepositoryText(Path.Combine(repository, "src", "native", "bridge", "bridge.cpp"));
 
-    Assert(index.Contains("Paint settings", StringComparison.Ordinal) &&
-           index.Contains("data-settings-tab=\"image\" data-i18n=\"settings.image\">Image settings</button>", StringComparison.Ordinal) &&
-           index.Contains("data-settings-tab=\"application\" data-i18n=\"settings.app\">Application Settings</button>", StringComparison.Ordinal) &&
+    Assert(index.Contains("data-settings-tab=\"paint\" data-i18n=\"settings.paint\">Paint</button>", StringComparison.Ordinal) &&
+           index.Contains("data-settings-tab=\"image\" data-i18n=\"settings.image\">Image</button>", StringComparison.Ordinal) &&
+           index.Contains("data-settings-tab=\"application\" data-i18n=\"settings.app\">App</button>", StringComparison.Ordinal) &&
            index.Contains("data-settings-panel=\"application\" hidden", StringComparison.Ordinal) &&
            index.Contains("class=\"image-design-action-grid\"", StringComparison.Ordinal) &&
            !index.Contains("id=\"image-preset-open\"", StringComparison.Ordinal) &&
@@ -1684,22 +1684,23 @@ static void WebUiSeparatesSettingAndLogTabs()
     Assert(markup.Contains("<div class=\"group-title\" data-i18n=\"image.design\">Image Design</div>", StringComparison.Ordinal) &&
            !markup.Contains("<div class=\"group-title\">Images</div>", StringComparison.Ordinal),
         "the Upload, Load preset, and Save preset controls must use the Image Design group title");
-    Assert(styles.Contains(".settings-tab + .settings-tab", StringComparison.Ordinal) &&
-           styles.Contains(".tab + .tab", StringComparison.Ordinal) &&
+    Assert(styles.Contains(".settings-tab + .settings-tab {\n  border-left: 0;\n}", StringComparison.Ordinal) &&
+           styles.Contains(".tab + .tab {\n  border-left: 0;\n}", StringComparison.Ordinal) &&
            styles.Contains(".settings-tabs {\n  display: grid;", StringComparison.Ordinal) &&
-           styles.Contains("grid-template-columns: repeat(4, minmax(0, 1fr));", StringComparison.Ordinal) &&
-           styles.Contains("border-left: 1px solid var(--hairline);", StringComparison.Ordinal),
-        "the four settings tabs and log filters must have a visible divider between adjacent controls");
+           styles.Contains("grid-template-columns: repeat(4, minmax(0, 1fr));", StringComparison.Ordinal),
+        "the four settings tabs and log filters must keep equal widths without unnecessary dividers");
     Assert(styles.Contains(".tabs {\n  display: grid;", StringComparison.Ordinal) &&
            styles.Contains("grid-template-columns: repeat(4, minmax(0, 1fr));", StringComparison.Ordinal) &&
-           styles.Contains("border-right: 1px solid var(--hairline);", StringComparison.Ordinal) &&
+           styles.Contains("border-right: 0;", StringComparison.Ordinal) &&
            styles.Contains(".tab {\n  width: 100%;", StringComparison.Ordinal),
-        "the four log filters must share the available width equally and the Error filter must have a right divider");
+        "the four log filters must share the available width equally without an extra terminal divider");
     Assert(styles.Contains(".log-tabs {\n  display: grid;", StringComparison.Ordinal) &&
-           styles.Contains("grid-template-columns: 2fr 1fr;", StringComparison.Ordinal) &&
+           styles.Contains("grid-template-columns: minmax(0, 1fr) auto;", StringComparison.Ordinal) &&
            styles.Contains(".log-actions {\n  display: grid;", StringComparison.Ordinal) &&
-           styles.Contains(".log-actions button + button", StringComparison.Ordinal),
-        "log actions must occupy two more equal tab-sized cells with their own divider");
+           styles.Contains("grid-template-columns: repeat(2, minmax(0, 1fr));", StringComparison.Ordinal) &&
+           styles.Contains("width: max-content;", StringComparison.Ordinal) &&
+           styles.Contains("white-space: nowrap;", StringComparison.Ordinal),
+        "log actions must remain separate, equal-width single-line action buttons without stealing tab width");
 }
 
 static void WebUiScopesEditActionsToActiveSettingsTab()

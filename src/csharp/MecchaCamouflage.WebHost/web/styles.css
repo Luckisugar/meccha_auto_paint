@@ -38,9 +38,8 @@
   --error: #e52020;
   --status-ok: #4fd16a;
   --status-warn: #f1c40f;
-  --font-stack: "D-DIN", Arial, Verdana, sans-serif;
-  --font-ui: var(--font-stack);
-  --font-mono: var(--font-stack);
+  --font-ui: "Segoe UI Variable", "Segoe UI", "Noto Sans JP", "Yu Gothic UI", sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, monospace;
 }
 
 * {
@@ -58,7 +57,7 @@ body {
   overflow: hidden;
   background: var(--background);
   color: var(--text);
-  font: 16px/22px var(--font-ui);
+  font: 14px/20px var(--font-ui);
   user-select: none;
 }
 
@@ -69,12 +68,13 @@ select {
 }
 
 button {
-  height: 32px;
-  border: 1px solid var(--hairline);
+  height: 36px;
+  border: 1px solid transparent;
   border-radius: 2px;
   padding: 0 12px;
-  background: var(--surface-mid);
+  background: var(--surface-high);
   color: var(--text);
+  font-weight: 500;
 }
 
 button:hover:not(:disabled) {
@@ -83,14 +83,19 @@ button:hover:not(:disabled) {
 
 button:disabled {
   cursor: default;
-  opacity: 0.4;
+  opacity: 0.6;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
 button.primary {
   border-color: transparent;
   background: var(--primary);
   color: #000;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 button.primary:hover:not(:disabled) {
@@ -100,7 +105,7 @@ button.primary:hover:not(:disabled) {
 input,
 select {
   width: 100%;
-  height: 32px;
+  height: 36px;
   border: 1px solid var(--hairline);
   border-radius: 2px;
   background: var(--background);
@@ -215,11 +220,11 @@ a:hover {
   border-color: transparent;
   background: transparent;
   color: var(--muted);
-  font: 700 11px/13px var(--font-mono);
+  font: 600 13px/16px var(--font-ui);
 }
 
 .settings-tab + .settings-tab {
-  border-left: 1px solid var(--hairline);
+  border-left: 0;
 }
 
 .settings-tab.active {
@@ -237,7 +242,7 @@ a:hover {
 
 .panel-content {
   flex: 0 0 auto;
-  padding: 12px;
+  padding: 16px;
 }
 
 .panel-scroll {
@@ -251,13 +256,18 @@ a:hover {
 .settings-stack {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 24px;
+}
+
+.settings-tab-panel > .group + .group {
+  margin-top: 24px;
 }
 
 .group-title {
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   color: var(--muted);
-  font: 700 12px/14px var(--font-mono);
+  font: 600 13px/16px var(--font-ui);
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
@@ -268,21 +278,21 @@ body.editing .group-title {
 .setting-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 16px;
+  gap: 16px;
 }
 
 .field {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 4px;
+  gap: 7px;
 }
 
 .field > span,
 .brush-toggle > span,
 .hotkey-row > span {
   color: var(--muted);
-  font: 700 12px/14px var(--font-mono);
+  font: 400 14px/20px var(--font-ui);
 }
 
 body.editing .field > span,
@@ -293,20 +303,20 @@ body.editing .hotkey-row > span {
 
 .mono-input {
   padding: 0 8px;
-  font: 13px/19px var(--font-mono);
+  font: 400 13px/20px var(--font-mono);
 }
 
 .range-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 72px;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 .range-number {
   padding: 0 6px;
   color: var(--text);
-  font: 700 12px/17px var(--font-mono);
+  font: 500 13px/18px var(--font-mono);
   text-align: right;
 }
 
@@ -338,17 +348,17 @@ body.editing .hotkey-row > span {
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 .color-picker {
-  height: 32px;
+  height: 36px;
   padding: 2px;
 }
 
 .checkbox-row {
   display: flex;
-  height: 32px;
+  height: 36px;
   align-items: center;
   gap: 8px;
 }
@@ -356,7 +366,7 @@ body.editing .hotkey-row > span {
 .checkbox-row > span,
 .image-toggle-row label {
   color: var(--muted);
-  font: 700 12px/14px var(--font-mono);
+  font: 400 14px/20px var(--font-ui);
 }
 
 body.editing .checkbox-row > span,
@@ -368,7 +378,7 @@ body.editing .image-toggle-row label {
   display: grid;
   grid-template-columns: 72px minmax(0, 1fr);
   align-items: center;
-  gap: 6px 10px;
+  gap: 10px 12px;
 }
 
 .image-fill-region-grid {
@@ -377,7 +387,7 @@ body.editing .image-toggle-row label {
 
 .region-grid > strong {
   color: var(--muted);
-  font: 700 12px/14px var(--font-mono);
+  font: 500 13px/16px var(--font-ui);
 }
 
 body.editing .region-grid > strong {
@@ -387,15 +397,15 @@ body.editing .region-grid > strong {
 .region-choice {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px;
+  gap: 6px;
 }
 
 .region-choice button {
-  height: 26px;
-  border-color: var(--hairline);
+  height: 32px;
+  border-color: transparent;
   background: var(--surface-mid);
   color: var(--muted);
-  font: 700 11px/13px var(--font-ui);
+  font: 500 13px/16px var(--font-ui);
 }
 
 .region-choice button.active {
@@ -428,13 +438,13 @@ body.editing #image-fill-section.disabled .field > span {
 .image-design-action-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 10px;
 }
 
 .image-design-action-grid button {
-  height: 26px;
+  height: 36px;
   padding: 0 8px;
-  font: 700 11px/13px var(--font-ui);
+  font: 500 13px/16px var(--font-ui);
 }
 
 .image-layer-list {
@@ -451,12 +461,12 @@ body.editing #image-fill-section.disabled .field > span {
 }
 
 .image-layer-item {
-  min-height: 32px;
+  min-height: 36px;
   border: 1px solid var(--hairline);
   padding: 0 8px;
   background: var(--surface-mid);
   color: var(--muted);
-  font: 700 11px/14px var(--font-mono);
+  font: 500 13px/18px var(--font-ui);
   text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -475,13 +485,13 @@ body.editing #image-fill-section.disabled .field > span {
 }
 
 .image-layer-action {
-  min-height: 32px;
-  min-width: 32px;
+  min-height: 36px;
+  min-width: 36px;
   border: 1px solid var(--hairline);
   padding: 0 7px;
   background: var(--surface-mid);
   color: var(--muted);
-  font: 700 10px/12px var(--font-mono);
+  font: 500 12px/14px var(--font-ui);
 }
 
 .image-layer-action.active {
@@ -503,12 +513,12 @@ body.editing #image-fill-section.disabled .field > span {
   display: grid;
   grid-template-columns: 72px minmax(0, 1fr);
   align-items: center;
-  gap: 6px 10px;
+  gap: 10px 12px;
 }
 
 .image-choice-list > strong {
   color: var(--muted);
-  font: 700 12px/14px var(--font-mono);
+  font: 500 13px/16px var(--font-ui);
 }
 
 body.editing .image-choice-list > strong {
@@ -521,8 +531,8 @@ body.editing .image-choice-list > strong {
 
 .image-design-actions {
   display: grid;
-  gap: 8px;
-  padding-bottom: 16px;
+  gap: 12px;
+  padding-bottom: 24px;
 }
 
 .image-design-actions > .group-title {
@@ -659,14 +669,14 @@ body.editing .image-choice-list > strong {
 
 .hotkey-list {
   display: grid;
-  gap: 8px;
+  gap: 12px;
 }
 
 .hotkey-row {
   display: grid;
   grid-template-columns: 110px minmax(0, 1fr) 88px;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 .hotkey-row input {
@@ -675,7 +685,7 @@ body.editing .image-choice-list > strong {
 
 .hotkey-row button {
   padding: 0 8px;
-  font: 700 11px/13px var(--font-mono);
+  font: 500 13px/16px var(--font-ui);
 }
 
 .action-bar {
@@ -683,9 +693,9 @@ body.editing .image-choice-list > strong {
   z-index: 3;
   flex: 0 0 auto;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+  gap: 10px;
   border-top: 1px solid var(--hairline);
-  padding: 10px 12px;
+  padding: 12px 16px;
 }
 
 .action-bar[hidden] {
@@ -709,15 +719,16 @@ body.editing .image-choice-list > strong {
   align-items: center;
   padding: 0 4px;
   color: var(--muted);
-  font: 700 11px/13px var(--font-mono);
+  font: 500 14px/20px var(--font-ui);
+  white-space: nowrap;
 }
 
 .manual-paint-grid {
-  grid-template-columns: minmax(64px, 0.7fr) repeat(4, minmax(0, 1fr));
+  grid-template-columns: minmax(84px, 0.8fr) repeat(4, minmax(0, 1fr));
   border-top: 0;
 }
 
-.danger-action {
+.danger-action:not(:disabled) {
   border-color: color-mix(in srgb, var(--error) 72%, var(--hairline));
   color: #ffabab;
 }
@@ -735,7 +746,7 @@ body.editing .image-choice-list > strong {
 
 .log-tabs {
   display: grid;
-  grid-template-columns: 2fr 1fr;
+  grid-template-columns: minmax(0, 1fr) auto;
   height: 36px;
   flex: 0 0 auto;
   align-items: stretch;
@@ -747,7 +758,7 @@ body.editing .image-choice-list > strong {
   flex: 1 1 0;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   min-width: 0;
-  border-right: 1px solid var(--hairline);
+  border-right: 0;
 }
 
 .tab {
@@ -758,11 +769,11 @@ body.editing .image-choice-list > strong {
   border-color: transparent;
   background: transparent;
   color: var(--muted);
-  font: 700 11px/13px var(--font-mono);
+  font: 600 13px/16px var(--font-ui);
 }
 
 .tab + .tab {
-  border-left: 1px solid var(--hairline);
+  border-left: 0;
 }
 
 .tab.active {
@@ -773,20 +784,23 @@ body.editing .image-choice-list > strong {
 .log-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: max-content;
   min-width: 0;
   gap: 6px;
   align-items: center;
-  padding: 3px 8px;
-  border-left: 1px solid var(--hairline);
+  padding: 3px 10px;
+  border-left: 0;
 }
 
 .log-actions button {
-  width: 100%;
-  min-width: 0;
-  height: 28px;
-  padding: 0 6px;
+  width: auto;
+  min-width: max-content;
+  height: 30px;
+  border-color: var(--hairline);
+  padding: 0 8px;
   color: var(--text);
-  font: 700 11px/13px var(--font-mono);
+  font: 500 13px/16px var(--font-ui);
+  white-space: nowrap;
 }
 
 .log-actions button + button {
@@ -797,10 +811,10 @@ body.editing .image-choice-list > strong {
   flex: 1 1 auto;
   margin: 0;
   overflow: auto;
-  padding: 8px;
+  padding: 12px;
   background-color: #000;
   color: var(--text);
-  font: 13px/19px var(--font-mono);
+  font: 400 13px/20px var(--font-mono);
   white-space: pre-wrap;
   cursor: text;
   user-select: text;
@@ -836,7 +850,7 @@ body.editing .image-choice-list > strong {
   padding: 0 12px;
   background: var(--surface);
   color: var(--muted);
-  font: 700 11px/13px var(--font-mono);
+  font: 500 12px/14px var(--font-ui);
 }
 
 .footer > div {
@@ -873,7 +887,7 @@ body.editing .image-choice-list > strong {
   padding: 10px 12px;
   background: var(--surface-low);
   color: var(--text);
-  font: 700 12px/17px var(--font-mono);
+  font: 500 14px/20px var(--font-ui);
   opacity: 0;
   pointer-events: none;
   transform: translateY(8px);
@@ -931,7 +945,7 @@ body.editing .image-choice-list > strong {
 
 .hotkey-card span {
   color: var(--muted);
-  font: 13px/19px var(--font-mono);
+  font: 400 14px/20px var(--font-ui);
 }
 
 .hotkey-dialog.error .hotkey-card {
