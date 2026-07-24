@@ -262,13 +262,18 @@ a:hover {
 }
 
 .settings-tab {
+  min-width: 0;
   height: 36px;
   border-width: 0 0 2px;
   border-radius: 0;
   border-color: transparent;
+  padding: 0 6px;
   background: transparent;
   color: var(--muted);
   font: 600 13px/16px var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-tab + .settings-tab {
@@ -318,7 +323,7 @@ a:hover {
   position: absolute;
   top: 0;
   left: 0;
-  width: 8px;
+  width: 4px;
   border-top: 1px solid var(--hairline);
   content: "";
 }
@@ -327,8 +332,8 @@ a:hover {
   position: absolute;
   top: -9px;
   left: 8px;
+  right: -1px;
   display: flex;
-  width: calc(100% - 16px);
   align-items: center;
   margin: 0;
   color: var(--text);
@@ -340,7 +345,7 @@ a:hover {
 .group-title::after {
   height: 1px;
   flex: 1 1 auto;
-  margin-left: 8px;
+  margin-left: 4px;
   background: var(--hairline);
   content: "";
 }
@@ -495,9 +500,13 @@ body.editing .image-toggle-row label {
 .region-choice button {
   height: 32px;
   border-color: transparent;
+  padding: 0 4px;
   background: var(--surface-mid);
   color: var(--muted);
   font: 500 13px/16px var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .region-choice button.active {
@@ -536,8 +545,12 @@ body.editing #image-fill-section.disabled .field-label {
 
 .image-editor-action-grid button {
   height: 36px;
+  min-width: 0;
   padding: 0 8px;
   font: 500 13px/16px var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .image-layer-list {
@@ -741,9 +754,20 @@ body.editing #image-fill-section.disabled .field-label {
 }
 
 .crop-editor-actions {
-  display: flex;
-  justify-content: flex-end;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.crop-editor-actions button {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crop-editor-actions button:last-child {
+  grid-column: 1 / -1;
 }
 
 .setting-grid > .app-wide {
@@ -771,9 +795,16 @@ body.editing #image-fill-section.disabled .field-label {
 
 .hotkey-row {
   display: grid;
-  grid-template-columns: 110px minmax(0, 1fr) 88px;
+  grid-template-columns: minmax(0, 1fr) 104px;
   align-items: center;
   gap: 12px;
+}
+
+.hotkey-row > span {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hotkey-row input {
@@ -781,8 +812,12 @@ body.editing #image-fill-section.disabled .field-label {
 }
 
 .hotkey-row button {
+  min-width: 0;
   padding: 0 8px;
   font: 500 13px/16px var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .action-bar {
@@ -790,9 +825,17 @@ body.editing #image-fill-section.disabled .field-label {
   z-index: 3;
   flex: 0 0 auto;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  gap: 6px;
   border-top: 1px solid var(--hairline);
-  padding: 12px 16px;
+  padding: 10px 12px;
+}
+
+.action-bar button {
+  min-width: 0;
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .action-bar[hidden] {
@@ -813,16 +856,20 @@ body.editing #image-fill-section.disabled .field-label {
 .manual-paint-label {
   display: flex;
   min-width: 0;
+  grid-column: 1 / -1;
   align-items: center;
-  padding: 0 4px;
+  min-height: 20px;
+  padding: 0;
   color: var(--muted);
   font: 500 14px/20px var(--font-ui);
   white-space: nowrap;
 }
 
 .manual-paint-grid {
-  grid-template-columns: minmax(84px, 0.8fr) repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
   border-top: 0;
+  padding: 8px 10px;
 }
 
 .danger-action:not(:disabled) {
@@ -864,9 +911,13 @@ body.editing #image-fill-section.disabled .field-label {
   height: 36px;
   border-width: 0 0 2px;
   border-color: transparent;
+  padding: 0 6px;
   background: transparent;
   color: var(--muted);
   font: 600 13px/16px var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tab + .tab {
@@ -893,15 +944,11 @@ body.editing #image-fill-section.disabled .field-label {
   width: auto;
   min-width: max-content;
   height: 30px;
-  border-color: var(--hairline);
   padding: 0 8px;
-  color: var(--text);
   font: 500 13px/16px var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.log-actions button + button {
-  border-left-width: 1px;
 }
 
 .logs {

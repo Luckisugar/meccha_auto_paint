@@ -1689,6 +1689,7 @@ static void WebUiSeparatesSettingAndLogTabs()
 {
     var repository = FindRepositoryRoot();
     var markup = ReadRepositoryText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "index.html"));
+    var app = ReadRepositoryText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "app.js"));
     var styles = ReadRepositoryText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "styles.css"));
 
     Assert(markup.Contains("<div class=\"group-title\" data-i18n=\"group.editor\">Editor</div>", StringComparison.Ordinal) &&
@@ -1697,11 +1698,11 @@ static void WebUiSeparatesSettingAndLogTabs()
     Assert(markup.Contains("class=\"settings-group\"", StringComparison.Ordinal) &&
            markup.Contains("class=\"field-label\"", StringComparison.Ordinal) &&
            styles.Contains(".settings-group {\n  position: relative;\n  border: 1px solid var(--hairline);\n  border-top: 0;\n  padding: 20px 12px 16px;", StringComparison.Ordinal) &&
-           styles.Contains(".group-title {\n  position: absolute;\n  top: -9px;\n  left: 8px;\n  display: flex;", StringComparison.Ordinal) &&
-           styles.Contains(".settings-group::before {", StringComparison.Ordinal) &&
-           styles.Contains(".group-title::after {", StringComparison.Ordinal) &&
+           styles.Contains(".group-title {\n  position: absolute;\n  top: -9px;\n  left: 8px;\n  right: -1px;\n  display: flex;", StringComparison.Ordinal) &&
+           styles.Contains(".settings-group::before {\n  position: absolute;\n  top: 0;\n  left: 0;\n  width: 4px;", StringComparison.Ordinal) &&
+           styles.Contains(".group-title::after {\n  height: 1px;\n  flex: 1 1 auto;\n  margin-left: 4px;", StringComparison.Ordinal) &&
            styles.Contains(".field-label,", StringComparison.Ordinal),
-        "settings must use semantic bordered sections with inset titles and shared field-label typography");
+        "settings must use semantic bordered sections with titles whose top rule reaches the right border and shared field-label typography");
     Assert(styles.Contains(".settings-tab + .settings-tab {\n  border-left: 0;\n}", StringComparison.Ordinal) &&
            styles.Contains(".tab + .tab {\n  border-left: 0;\n}", StringComparison.Ordinal) &&
            styles.Contains(".settings-tabs {\n  display: grid;", StringComparison.Ordinal) &&
@@ -1716,9 +1717,14 @@ static void WebUiSeparatesSettingAndLogTabs()
            styles.Contains("grid-template-columns: minmax(0, 1fr) auto;", StringComparison.Ordinal) &&
            styles.Contains(".log-actions {\n  display: grid;", StringComparison.Ordinal) &&
            styles.Contains("grid-template-columns: repeat(2, minmax(0, 1fr));", StringComparison.Ordinal) &&
-           styles.Contains("width: max-content;", StringComparison.Ordinal) &&
-           styles.Contains("white-space: nowrap;", StringComparison.Ordinal),
-        "log actions must remain separate, equal-width single-line action buttons without stealing tab width");
+           styles.Contains(".log-actions {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  width: max-content;", StringComparison.Ordinal) &&
+           styles.Contains(".manual-paint-grid {\n  grid-template-columns: repeat(4, minmax(0, 1fr));", StringComparison.Ordinal) &&
+           styles.Contains(".hotkey-row {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) 104px;", StringComparison.Ordinal) &&
+           styles.Contains(".image-editor-action-grid {\n  display: grid;\n  grid-template-columns: repeat(3, minmax(0, 1fr));", StringComparison.Ordinal) &&
+           styles.Contains(".log-actions button {\n  width: auto;\n  min-width: max-content;", StringComparison.Ordinal) &&
+           app.Contains("if (element instanceof HTMLButtonElement)", StringComparison.Ordinal) &&
+           app.Contains("element.title = localized;", StringComparison.Ordinal),
+        "localized controls must retain the two-pane layout with compact single-row actions and full-text tooltips");
 }
 
 static void WebUiScopesEditActionsToActiveSettingsTab()
@@ -1747,10 +1753,10 @@ static void WebUiScopesEditActionsToActiveSettingsTab()
     Assert(markup.Contains("class=\"danger-action\" type=\"button\" disabled data-settings-action=\"reset\"", StringComparison.Ordinal) &&
            markup.IndexOf("data-settings-action=\"reset\"", StringComparison.Ordinal) <
                markup.IndexOf("data-settings-action=\"edit\"", StringComparison.Ordinal) &&
-           styles.Contains("grid-template-columns: repeat(4, minmax(0, 1fr));", StringComparison.Ordinal) &&
+           styles.Contains(".action-bar {\n  display: grid;\n  z-index: 3;\n  flex: 0 0 auto;\n  grid-template-columns: repeat(4, minmax(0, 1fr));", StringComparison.Ordinal) &&
            styles.Contains(".danger-action", StringComparison.Ordinal) &&
            app.Contains("toast(i18n(\"toast.settings.reset\", i18n(settingsTabTitleKey())));", StringComparison.Ordinal),
-        "Reset must be the leftmost equal-width danger action and confirm the active tab reset with a toast");
+        "Reset must remain the leftmost equal-width danger action and confirm the active tab reset with a toast");
     var resetStart = app.IndexOf("async function resetDraft()", StringComparison.Ordinal);
     var resetEnd = app.IndexOf("async function saveDraft()", resetStart, StringComparison.Ordinal);
     var reset = app[resetStart..resetEnd];

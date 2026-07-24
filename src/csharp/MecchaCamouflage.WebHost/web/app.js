@@ -211,7 +211,11 @@ function applyI18n() {
     }
   }
   for (const element of document.querySelectorAll("[data-i18n]")) {
-    element.textContent = i18n(element.dataset.i18n);
+    const localized = i18n(element.dataset.i18n);
+    element.textContent = localized;
+    if (element instanceof HTMLButtonElement) {
+      element.title = localized;
+    }
   }
   for (const element of document.querySelectorAll("[data-i18n-aria-label]")) {
     element.setAttribute("aria-label", i18n(element.dataset.i18nAriaLabel));
@@ -563,7 +567,9 @@ function renderRegionButtons(selector, key, current, editable) {
     for (const mode of ["paint", "fill", "skip"]) {
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = i18n(`mode.${mode}`);
+      const label = i18n(`mode.${mode}`);
+      button.textContent = label;
+      button.title = label;
       button.className = mode === current ? "active" : "";
       button.disabled = !editable;
       button.addEventListener("click", () => {
@@ -585,7 +591,9 @@ function renderImageRegionButtons(editor, editable) {
     for (const mode of ["fill", "skip"]) {
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = i18n(`mode.${mode}`);
+      const label = i18n(`mode.${mode}`);
+      button.textContent = label;
+      button.title = label;
       button.className = `image-edit-control${editor[property] === mode ? " active" : ""}`;
       button.disabled = !editable;
       button.addEventListener("click", () => {
