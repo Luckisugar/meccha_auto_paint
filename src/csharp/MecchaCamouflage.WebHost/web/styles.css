@@ -562,15 +562,16 @@ body.editing #image-fill-section.disabled .field-label {
 
 .image-layer-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
 }
 
 .image-layer-item {
-  min-height: 36px;
-  border: 1px solid var(--hairline);
-  padding: 0 8px;
-  background: var(--surface-mid);
+  min-height: 32px;
+  border: 0;
+  padding: 0;
+  background: transparent;
   color: var(--muted);
   font: 500 13px/18px var(--font-ui);
   text-align: left;
@@ -580,24 +581,27 @@ body.editing #image-fill-section.disabled .field-label {
 }
 
 .image-layer-item.active {
-  border-color: var(--primary);
-  color: var(--text);
+  color: var(--primary);
 }
 
 .image-layer-tools {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, auto));
+  grid-template-columns: repeat(4, minmax(0, 1fr)) 32px;
+  min-width: 0;
   gap: 4px;
 }
 
 .image-layer-action {
-  min-height: 36px;
-  min-width: 36px;
-  border: 1px solid var(--hairline);
-  padding: 0 7px;
+  height: 32px;
+  min-width: 0;
+  border-color: transparent;
+  padding: 0 4px;
   background: var(--surface-mid);
   color: var(--muted);
-  font: 500 12px/14px var(--font-ui);
+  font: 500 13px/16px var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .image-layer-action.active {
@@ -605,14 +609,16 @@ body.editing #image-fill-section.disabled .field-label {
   color: var(--primary);
 }
 
-.image-layer-action.danger {
+.image-layer-remove {
+  width: 32px;
   padding: 0;
   font-size: 18px;
 }
 
-.image-layer-action.danger:not(:disabled):hover {
-  border-color: var(--danger);
-  color: var(--danger);
+.image-layer-remove:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--error) 72%, var(--hairline));
+  background: color-mix(in srgb, var(--error) 24%, var(--surface-high));
+  color: #ffabab;
 }
 
 .image-choice-list {

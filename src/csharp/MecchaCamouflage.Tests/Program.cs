@@ -1582,6 +1582,9 @@ static void WebUiImagePaintEditorUsesSavedTransaction()
            app.Contains("beginImagePointerInteraction", StringComparison.Ordinal) &&
            app.Contains("wrapAtlasSeam", StringComparison.Ordinal) &&
            app.Contains("image-layer-tools", StringComparison.Ordinal) &&
+           app.Contains("function compactImageLayerLabel(layer, index)", StringComparison.Ordinal) &&
+           app.Contains("const displayName = stem || i18n(\"image.layer.default\", index + 1);", StringComparison.Ordinal) &&
+           !app.Contains("Array.from(stem || i18n(\"image.layer.default\", index + 1)).slice(0, 8)", StringComparison.Ordinal) &&
            app.Contains("openImageCropEditor(index)", StringComparison.Ordinal) &&
            app.Contains("bindImageColorPair(\"image-fill-color-picker\", \"image-fill-color\", \"fillColor\")", StringComparison.Ordinal) &&
            app.Contains("fillColor: imageFillColorPayload(imageEditor.fillColor)", StringComparison.Ordinal) &&
@@ -1613,8 +1616,12 @@ static void WebUiImagePaintEditorUsesSavedTransaction()
            styles.Contains(".image-editor-action-grid button", StringComparison.Ordinal) &&
            styles.Contains(".region-choice[data-image-region]", StringComparison.Ordinal) &&
            styles.Contains(".image-settings-stack {\n  display: grid;\n  gap: 0;", StringComparison.Ordinal) &&
-           styles.Contains(".image-layer-row", StringComparison.Ordinal) &&
-           styles.Contains(".image-layer-tools", StringComparison.Ordinal) &&
+           styles.Contains(".image-layer-row {\n  display: grid;\n  grid-template-columns: 72px minmax(0, 1fr);", StringComparison.Ordinal) &&
+           styles.Contains(".image-layer-tools {\n  display: grid;\n  grid-template-columns: repeat(4, minmax(0, 1fr)) 32px;", StringComparison.Ordinal) &&
+           styles.Contains(".image-layer-remove {\n  width: 32px;", StringComparison.Ordinal) &&
+           styles.Contains(".image-layer-remove:hover:not(:disabled)", StringComparison.Ordinal) &&
+           styles.Contains(".image-layer-item {\n  min-height: 32px;\n  border: 0;", StringComparison.Ordinal) &&
+           styles.Contains("text-overflow: ellipsis;", StringComparison.Ordinal) &&
            styles.Contains(".image-layer-action", StringComparison.Ordinal) &&
            styles.Contains("#image-fill-section.disabled", StringComparison.Ordinal) &&
            styles.Contains("touch-action: none", StringComparison.Ordinal) &&

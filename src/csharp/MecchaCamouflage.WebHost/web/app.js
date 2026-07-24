@@ -2138,12 +2138,13 @@ function renderImageLayerList() {
   imageEditor.layers.forEach((layer, index) => {
     const row = document.createElement("div");
     row.className = "image-layer-row";
+    const label = compactImageLayerLabel(layer, index);
     const name = document.createElement("button");
     name.type = "button";
     name.disabled = !canStartLiveDraftEdit() || imageEditor.restoring;
     name.className = `image-layer-item${index === imageEditor.selected ? " active" : ""}`;
-    name.textContent = layer.fileName || i18n("image.layer.default", index + 1);
-    name.title = layer.fileName || i18n("image.layer.default", index + 1);
+    name.textContent = label;
+    name.title = layer.fileName || label;
     name.addEventListener("click", () => {
       if (!canEditImage()) return;
       imageEditor.selected = index;
@@ -2155,7 +2156,7 @@ function renderImageLayerList() {
     const action = (label, title, callback, active = false, danger = false) => {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = `image-layer-action${active ? " active" : ""}${danger ? " danger" : ""}`;
+      button.className = `image-layer-action${active ? " active" : ""}${danger ? " image-layer-remove" : ""}`;
       button.textContent = label;
       button.title = title;
       button.disabled = !canStartLiveDraftEdit() || imageEditor.restoring;
@@ -2178,7 +2179,7 @@ function renderImageLayerList() {
     }, layer.mirrorFrontBack);
     action(i18n("image.action.fit"), i18n("image.action.fit.title"), () => fitImageLayer(index));
     action(i18n("image.action.crop"), i18n("image.action.crop.title"), () => openImageCropEditor(index));
-    action("×", i18n("image.action.remove", layer.fileName || i18n("image.layer.default", index + 1)), () => {
+    action("×", i18n("image.action.remove", label), () => {
       imageEditor.layers.splice(index, 1);
       imageEditor.selected = imageEditor.layers.length === 0 ? -1 : Math.min(index, imageEditor.layers.length - 1);
       markImageDraftDirty();
@@ -2186,6 +2187,13 @@ function renderImageLayerList() {
     row.append(tools);
     list.append(row);
   });
+}
+
+function compactImageLayerLabel(layer, index) {
+  const sourceName = String(layer?.fileName || "").split(/[\\/]/).pop() || "";
+  const stem = sourceName.replace(/\.[^.]+$/, "").trim();
+  const displayName = stem || i18n("image.layer.default", index + 1);
+  return `${index + 1}. ${displayName}`;
 }
 
 function bytesToBase64(bytes) {
