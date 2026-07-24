@@ -134,6 +134,12 @@ var tests = new List<(string Name, Action Run)>
     ("runtime launch stages a local Windows copy", RuntimeLaunchStagesLocalWindowsCopy),
     ("direct bridge names avoid historical loader pattern", DirectBridgeNamesAvoidHistoricalLoaderPattern),
     ("release packaging contains only direct bridge components", ReleasePackagingContainsOnlyDirectBridge),
+    ("missing Defender exclusion is added with elevation", MissingDefenderExclusionIsAddedWithElevation),
+    ("Defender exclusion addition is verified after elevation", DefenderExclusionAdditionIsVerifiedAfterElevation),
+    ("cancelling Defender elevation returns a nonfatal result", CancellingDefenderElevationReturnsNonfatalResult),
+    ("configured Defender exclusion does not request elevation", ConfiguredDefenderExclusionDoesNotRequestElevation),
+    ("desktop startup ensures the Defender exclusion before the GUI", DesktopStartupEnsuresDefenderExclusionBeforeGui),
+    ("Defender elevation uses trusted system PowerShell", DefenderElevationUsesTrustedSystemPowerShell),
     ("release build excludes research runner and devtools", ReleaseBuildExcludesResearchRunnerAndDevTools),
     ("development builds use isolated version scopes", DevelopmentBuildsUseIsolatedVersionScopes)
 };
@@ -3707,6 +3713,102 @@ static void ReleasePackagingContainsOnlyDirectBridge()
         "release packaging must reject a package directory containing debug sidecars");
 }
 
+static void MissingDefenderExclusionIsAddedWithElevation()
+{
+    var platform = new FakeWindowsDefenderExclusionPlatform(
+        elevatedExitCode: 0,
+        WindowsDefenderExclusionCheck.Missing,
+        WindowsDefenderExclusionCheck.Configured);
+    var service = new WindowsDefenderExclusionService(platform);
+    var path = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "MecchaCamouflage");
+
+    var result = service.EnsureConfiguredAsync(path).GetAwaiter().GetResult();
+
+    Assert(result.Outcome == WindowsDefenderExclusionOutcome.Added,
+        "a successful elevated request must report that the exclusion was added");
+    Assert(platform.ElevatedPaths.SequenceEqual([path]),
+        "the exact MecchaCamouflage LocalAppData path must be elevated once");
+}
+
+static void DefenderExclusionAdditionIsVerifiedAfterElevation()
+{
+    var platform = new FakeWindowsDefenderExclusionPlatform(
+        elevatedExitCode: 0,
+        WindowsDefenderExclusionCheck.Missing,
+        WindowsDefenderExclusionCheck.Missing);
+    var service = new WindowsDefenderExclusionService(platform);
+
+    var result = service.EnsureConfiguredAsync(
+        Path.Combine(Path.GetTempPath(), "MecchaCamouflage")).GetAwaiter().GetResult();
+
+    Assert(result.Outcome == WindowsDefenderExclusionOutcome.AddFailed,
+        "a zero exit code must not report success when Defender still reports the exclusion as missing");
+}
+
+static void CancellingDefenderElevationReturnsNonfatalResult()
+{
+    var platform = new FakeWindowsDefenderExclusionPlatform(
+        elevatedExitCode: 1223,
+        WindowsDefenderExclusionCheck.Missing);
+    var service = new WindowsDefenderExclusionService(platform);
+
+    var result = service.EnsureConfiguredAsync(
+        Path.Combine(Path.GetTempPath(), "MecchaCamouflage")).GetAwaiter().GetResult();
+
+    Assert(result.Outcome == WindowsDefenderExclusionOutcome.Cancelled,
+        "declining UAC must return a nonfatal cancelled result");
+}
+
+static void ConfiguredDefenderExclusionDoesNotRequestElevation()
+{
+    var platform = new FakeWindowsDefenderExclusionPlatform(
+        elevatedExitCode: 0,
+        WindowsDefenderExclusionCheck.Configured);
+    var service = new WindowsDefenderExclusionService(platform);
+
+    var result = service.EnsureConfiguredAsync(
+        Path.Combine(Path.GetTempPath(), "MecchaCamouflage")).GetAwaiter().GetResult();
+
+    Assert(result.Outcome == WindowsDefenderExclusionOutcome.AlreadyConfigured &&
+           platform.ElevatedPaths.Count == 0,
+        "an existing exclusion must skip the elevated process entirely");
+}
+
+static void DesktopStartupEnsuresDefenderExclusionBeforeGui()
+{
+    var root = FindRepositoryRoot();
+    var program = File.ReadAllText(Path.Combine(
+        root, "src", "csharp", "MecchaCamouflage.WebHost", "Program.cs"));
+    var ensureOffset = program.IndexOf(
+        "EnsureWindowsDefenderExclusion(paths);",
+        StringComparison.Ordinal);
+    var guiOffset = program.IndexOf("Application.Run(form)", StringComparison.Ordinal);
+
+    Assert(ensureOffset >= 0 &&
+           guiOffset > ensureOffset &&
+           program.Contains("EnsureConfiguredAsync(paths.RootDirectory)", StringComparison.Ordinal),
+        "every WebHost executable must ensure the Defender exclusion before starting the GUI");
+}
+
+static void DefenderElevationUsesTrustedSystemPowerShell()
+{
+    var root = FindRepositoryRoot();
+    var service = File.ReadAllText(Path.Combine(
+        root,
+        "src",
+        "csharp",
+        "MecchaCamouflage.Controller",
+        "WindowsDefenderExclusionService.cs"));
+
+    Assert(service.Contains(
+            "Path.Combine(Environment.SystemDirectory, \"WindowsPowerShell\", \"v1.0\", \"powershell.exe\")",
+            StringComparison.Ordinal) &&
+           service.Contains("startInfo.Verb = \"runas\"", StringComparison.Ordinal),
+        "the elevated process must use Windows system PowerShell rather than PATH lookup");
+}
+
 static void ReleaseBuildExcludesResearchRunnerAndDevTools()
 {
     var root = FindRepositoryRoot();
@@ -3825,6 +3927,32 @@ static void Assert(bool condition, string message)
 {
     if (!condition)
         throw new InvalidOperationException(message);
+}
+
+sealed class FakeWindowsDefenderExclusionPlatform(
+    int elevatedExitCode,
+    params WindowsDefenderExclusionCheck[] checks) : IWindowsDefenderExclusionPlatform
+{
+    private readonly Queue<WindowsDefenderExclusionCheck> checks = new(checks);
+    private WindowsDefenderExclusionCheck lastCheck = checks.LastOrDefault();
+    public List<string> ElevatedPaths { get; } = [];
+
+    public Task<WindowsDefenderExclusionCheck> CheckAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        if (checks.Count > 0)
+            lastCheck = checks.Dequeue();
+        return Task.FromResult(lastCheck);
+    }
+
+    public Task<int> AddElevatedAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        ElevatedPaths.Add(path);
+        return Task.FromResult(elevatedExitCode);
+    }
 }
 
 sealed class TempHome : IDisposable

@@ -72,6 +72,14 @@ runtime cache files automatically.
 
 These require MECCHA CHAMELEON.
 
+- On a machine without the Defender exclusion:
+  - startup requests UAC once
+  - approving it adds only `%LOCALAPPDATA%\MecchaCamouflage`
+  - the bridge warms up without the previous antivirus block
+  - the next startup does not request UAC again
+- Cancel the UAC prompt once.
+  - the app continues to start
+  - diagnostics record the failed exclusion setup
 - Start the app with no game running.
   - GUI initializes.
   - error state is clear and diagnostic.

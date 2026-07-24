@@ -13,6 +13,7 @@ internal static class Program
         var startupCatalog = LocalizationCatalog.Load();
         var startupLocale = LocalizationCatalog.DetectSystemLanguage();
         DiagnosticsState.Initialize(paths, VersionInfo.Current);
+        EnsureWindowsDefenderExclusion(paths);
         var captureBodyType = CaptureReferenceBodyType(args);
         if (captureBodyType is not null)
         {
@@ -59,6 +60,27 @@ internal static class Program
                 startupCatalog.Text(startupLocale, "app.title"),
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
+        }
+    }
+
+    private static void EnsureWindowsDefenderExclusion(AppPaths paths)
+    {
+        try
+        {
+            var service = new WindowsDefenderExclusionService(
+                new PowerShellWindowsDefenderExclusionPlatform());
+            var result = service.EnsureConfiguredAsync(paths.RootDirectory)
+                .GetAwaiter()
+                .GetResult();
+            DiagnosticsState.WriteLine(
+                "windows_security",
+                $"defender_exclusion outcome={result.Outcome} path={paths.RootDirectory} message={result.Message}");
+        }
+        catch (Exception exception)
+        {
+            DiagnosticsState.RecordException(
+                "windows_defender_exclusion_setup_failed",
+                exception);
         }
     }
 
