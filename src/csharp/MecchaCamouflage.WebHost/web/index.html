@@ -180,7 +180,24 @@
               </div>
             </section>
 
-            <section class="settings-tab-panel" data-settings-panel="misc" hidden></section>
+            <section class="settings-tab-panel" data-settings-panel="misc" hidden>
+              <div class="settings-group">
+                <div class="group-title">ESP overlay</div>
+                <div class="setting-grid">
+                  <label class="field app-wide"><div class="checkbox-row"><input id="esp-enabled" class="setting-control" disabled type="checkbox"><span>Enable overlay</span></div></label>
+                  <label class="field app-wide"><div class="checkbox-row"><input id="esp-boxes" class="setting-control" disabled type="checkbox"><span>Player boxes</span></div></label>
+                  <label class="field app-wide"><div class="checkbox-row"><input id="esp-skeletons" class="setting-control" disabled type="checkbox"><span>Skeletons</span></div></label>
+                  <label class="field app-wide"><div class="checkbox-row"><input id="esp-names" class="setting-control" disabled type="checkbox"><span>Player names</span></div></label>
+                  <label class="field app-wide"><div class="checkbox-row"><input id="esp-distance" class="setting-control" disabled type="checkbox"><span>Distance</span></div></label>
+                  <label class="field app-wide"><div class="checkbox-row"><input id="esp-snaplines" class="setting-control" disabled type="checkbox"><span>Snaplines</span></div></label>
+                  <label class="field app-wide"><span>Overlay color</span><div class="color-row"><input id="esp-color-picker" class="setting-control color-picker" disabled type="color" value="#00FF88"><input id="esp-color" class="setting-control mono-input" disabled type="text" spellcheck="false" placeholder="#00FF88"></div></label>
+                </div>
+              </div>
+              <div class="settings-group">
+                <div class="group-title">Behavior</div>
+                <p class="field-help">The overlay follows the game window and stays click-through. Skeletons are only drawn when the game exposes a valid live bone array.</p>
+              </div>
+            </section>
 
             <section class="settings-tab-panel" data-settings-panel="application" hidden>
               <div class="settings-group app-general-section">
@@ -275,6 +292,12 @@
           <button class="primary" type="button" disabled data-settings-action="save" data-i18n="button.save">Save</button>
         </div>
         <div class="action-bar" data-settings-actions="image" hidden>
+          <button class="danger-action" type="button" disabled data-settings-action="reset" data-i18n="button.reset">Reset</button>
+          <button type="button" data-settings-action="edit" data-i18n="button.edit">Edit</button>
+          <button type="button" disabled data-settings-action="cancel" data-i18n="button.cancel">Cancel</button>
+          <button class="primary" type="button" disabled data-settings-action="save" data-i18n="button.save">Save</button>
+        </div>
+        <div class="action-bar" data-settings-actions="misc" hidden>
           <button class="danger-action" type="button" disabled data-settings-action="reset" data-i18n="button.reset">Reset</button>
           <button type="button" data-settings-action="edit" data-i18n="button.edit">Edit</button>
           <button type="button" disabled data-settings-action="cancel" data-i18n="button.cancel">Cancel</button>

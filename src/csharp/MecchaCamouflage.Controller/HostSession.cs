@@ -32,6 +32,13 @@ public sealed class HostSession
         "paint.fillMetallic",
         "paint.fillRoughness",
         "paint.fillEmissive",
+        "esp.enabled",
+        "esp.boxes",
+        "esp.skeletons",
+        "esp.names",
+        "esp.distance",
+        "esp.snaplines",
+        "esp.color",
         "app.processName",
         "app.alwaysOnTop",
         "app.opacity",
@@ -652,6 +659,10 @@ public sealed class HostSession
                 break;
             case "image":
                 next.Image = defaults.Image;
+                break;
+            case "misc":
+            case "esp":
+                next.Esp = defaults.Esp;
                 break;
             case "app":
                 next.GameProcessName = defaults.GameProcessName;
@@ -1576,7 +1587,15 @@ public sealed class HostSession
                 settings.Image.FillRoughness,
                 settings.Image.FillEmissive,
                 settings.Image.Layers.Count,
-                !string.IsNullOrWhiteSpace(settings.Image.CanvasRgbaBase64)));
+                !string.IsNullOrWhiteSpace(settings.Image.CanvasRgbaBase64)),
+            new EspSnapshot(
+                settings.Esp.Enabled,
+                settings.Esp.Boxes,
+                settings.Esp.Skeletons,
+                settings.Esp.Names,
+                settings.Esp.Distance,
+                settings.Esp.Snaplines,
+                settings.Esp.Color.ToHex()));
     }
 
     private static ResetSnapshot BuildResetSnapshot(AppSettings settings, AppSettings defaults)
@@ -1589,6 +1608,8 @@ public sealed class HostSession
             ["regions"] = map["paint.frontRegionMode"] || map["paint.sideRegionMode"] || map["paint.backRegionMode"],
             ["fill.material"] = map["paint.fillColor"] || map["paint.fillMetallic"] || map["paint.fillRoughness"] || map["paint.fillEmissive"],
             ["image"] = settings.Image.Enabled != defaults.Image.Enabled || settings.Image.Revision != defaults.Image.Revision,
+            ["misc"] = map["esp.enabled"] || map["esp.boxes"] || map["esp.skeletons"] ||
+                       map["esp.names"] || map["esp.distance"] || map["esp.snaplines"] || map["esp.color"],
             ["app"] = map["app.processName"] || map["app.alwaysOnTop"] || map["app.opacity"] || map["app.themeColor"] ||
                     map["app.startHotkey"] || map["app.previewHotkey"] || map["app.unpreviewHotkey"] || map["app.stopHotkey"] ||
                     map["app.imageStartHotkey"] || map["app.imagePreviewHotkey"] || map["app.imageUnpreviewHotkey"] || map["app.imageStopHotkey"]
@@ -1611,6 +1632,13 @@ public sealed class HostSession
         "paint.fillRoughness" => Nearly(left.Paint.FillRoughness, right.Paint.FillRoughness),
         "paint.fillEmissive" => Nearly(left.Paint.FillEmissive, right.Paint.FillEmissive),
         "paint.colorCompressionTolerance" => Nearly(left.Paint.ColorCompressionTolerance, right.Paint.ColorCompressionTolerance),
+        "esp.enabled" => left.Esp.Enabled == right.Esp.Enabled,
+        "esp.boxes" => left.Esp.Boxes == right.Esp.Boxes,
+        "esp.skeletons" => left.Esp.Skeletons == right.Esp.Skeletons,
+        "esp.names" => left.Esp.Names == right.Esp.Names,
+        "esp.distance" => left.Esp.Distance == right.Esp.Distance,
+        "esp.snaplines" => left.Esp.Snaplines == right.Esp.Snaplines,
+        "esp.color" => left.Esp.Color == right.Esp.Color,
         "app.processName" => left.GameProcessName == right.GameProcessName,
         "app.alwaysOnTop" => left.AlwaysOnTop == right.AlwaysOnTop,
         "app.opacity" => Nearly(left.Opacity, right.Opacity),
@@ -1643,6 +1671,13 @@ public sealed class HostSession
             case "paint.fillRoughness": settings.Paint.FillRoughness = defaults.Paint.FillRoughness; break;
             case "paint.fillEmissive": settings.Paint.FillEmissive = defaults.Paint.FillEmissive; break;
             case "paint.colorCompressionTolerance": settings.Paint.ColorCompressionTolerance = defaults.Paint.ColorCompressionTolerance; break;
+            case "esp.enabled": settings.Esp.Enabled = defaults.Esp.Enabled; break;
+            case "esp.boxes": settings.Esp.Boxes = defaults.Esp.Boxes; break;
+            case "esp.skeletons": settings.Esp.Skeletons = defaults.Esp.Skeletons; break;
+            case "esp.names": settings.Esp.Names = defaults.Esp.Names; break;
+            case "esp.distance": settings.Esp.Distance = defaults.Esp.Distance; break;
+            case "esp.snaplines": settings.Esp.Snaplines = defaults.Esp.Snaplines; break;
+            case "esp.color": settings.Esp.Color = defaults.Esp.Color; break;
             case "app.processName": settings.GameProcessName = defaults.GameProcessName; break;
             case "app.alwaysOnTop": settings.AlwaysOnTop = defaults.AlwaysOnTop; break;
             case "app.opacity": settings.Opacity = defaults.Opacity; break;
@@ -1680,6 +1715,17 @@ public sealed class HostSession
             case "paint.fillRoughness": settings.Paint.FillRoughness = value.GetDouble(); break;
             case "paint.fillEmissive": settings.Paint.FillEmissive = value.GetDouble(); break;
             case "paint.colorCompressionTolerance": settings.Paint.ColorCompressionTolerance = value.GetDouble(); break;
+            case "esp.enabled": settings.Esp.Enabled = value.GetBoolean(); break;
+            case "esp.boxes": settings.Esp.Boxes = value.GetBoolean(); break;
+            case "esp.skeletons": settings.Esp.Skeletons = value.GetBoolean(); break;
+            case "esp.names": settings.Esp.Names = value.GetBoolean(); break;
+            case "esp.distance": settings.Esp.Distance = value.GetBoolean(); break;
+            case "esp.snaplines": settings.Esp.Snaplines = value.GetBoolean(); break;
+            case "esp.color":
+                if (!RgbColor.TryParse(value.GetString(), out var espColor))
+                    throw new ArgumentException("ESP color must be #RRGGBB.");
+                settings.Esp.Color = espColor;
+                break;
             case "app.language": settings.Language = value.GetString() ?? settings.Language; break;
             case "app.processName": settings.GameProcessName = value.GetString() ?? settings.GameProcessName; break;
             case "app.alwaysOnTop": settings.AlwaysOnTop = value.GetBoolean(); break;

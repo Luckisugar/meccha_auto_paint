@@ -31,7 +31,7 @@ public sealed record RuntimeSnapshot(
     bool ProgressVisible,
     DiagnosticsSnapshot Diagnostics);
 
-public sealed record SettingsSnapshot(PaintSnapshot Paint, AppSnapshot App, ImageSnapshot Image);
+public sealed record SettingsSnapshot(PaintSnapshot Paint, AppSnapshot App, ImageSnapshot Image, EspSnapshot Esp);
 
 public sealed record PaintSnapshot(
     double BrushSizeTexels,
@@ -62,6 +62,15 @@ public sealed record AppSnapshot(
     string ImagePreviewHotkey,
     string ImageUnPreviewHotkey,
     string ImageStopHotkey);
+
+public sealed record EspSnapshot(
+    bool Enabled,
+    bool Boxes,
+    bool Skeletons,
+    bool Names,
+    bool Distance,
+    bool Snaplines,
+    string Color);
 
 /// <summary>
 /// Snapshot metadata deliberately omits large source image blobs. The web

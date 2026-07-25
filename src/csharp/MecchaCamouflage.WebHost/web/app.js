@@ -462,6 +462,14 @@ function renderSettings(snapshot) {
   setValue("image-preview-hotkey", app.imagePreviewHotkey);
   setValue("image-unpreview-hotkey", app.imageUnPreviewHotkey);
   setValue("image-stop-hotkey", app.imageStopHotkey);
+  const esp = snapshot.settings.esp;
+  setChecked("esp-enabled", esp.enabled);
+  setChecked("esp-boxes", esp.boxes);
+  setChecked("esp-skeletons", esp.skeletons);
+  setChecked("esp-names", esp.names);
+  setChecked("esp-distance", esp.distance);
+  setChecked("esp-snaplines", esp.snaplines);
+  setColorPair("esp-color-picker", "esp-color", esp.color);
 
   const language = byId("language");
   if (language.options.length === 0) {
@@ -697,6 +705,8 @@ async function resetDraft() {
       applyCachedImageGuide(imageEditor);
       await setImageDesignDraftState(true);
     }
+  } else if (activeSettingsTab === "misc") {
+    draftSnapshot.settings.esp = clone(liveSnapshot.defaults.esp);
   } else if (activeSettingsTab === "application") {
     const currentProcessName = liveSnapshot.settings.app.processName;
     draftSnapshot.settings.app = clone(liveSnapshot.defaults.app);
@@ -848,6 +858,13 @@ function diffSnapshots(before, after) {
     "paint.fillMetallic",
     "paint.fillRoughness",
     "paint.fillEmissive",
+    "esp.enabled",
+    "esp.boxes",
+    "esp.skeletons",
+    "esp.names",
+    "esp.distance",
+    "esp.snaplines",
+    "esp.color",
     "app.alwaysOnTop",
     "app.opacity",
     "app.themeColor",
@@ -2533,6 +2550,13 @@ document.addEventListener("DOMContentLoaded", () => {
   bindRangePair("fill-metallic", "fill-metallic-number", "paint.fillMetallic");
   bindRangePair("fill-roughness", "fill-roughness-number", "paint.fillRoughness");
   bindRangePair("fill-emissive", "fill-emissive-number", "paint.fillEmissive");
+  bindCheckbox("esp-enabled", "esp.enabled");
+  bindCheckbox("esp-boxes", "esp.boxes");
+  bindCheckbox("esp-skeletons", "esp.skeletons");
+  bindCheckbox("esp-names", "esp.names");
+  bindCheckbox("esp-distance", "esp.distance");
+  bindCheckbox("esp-snaplines", "esp.snaplines");
+  bindColorPair("esp-color-picker", "esp-color", "esp.color");
   bindCheckbox("always-on-top", "app.alwaysOnTop");
   bindRangePair("opacity", "opacity-number", "app.opacity", value => value / 100);
   bindColorPair("theme-color-picker", "theme-color", "app.themeColor");

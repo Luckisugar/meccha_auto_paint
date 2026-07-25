@@ -62,6 +62,7 @@ public sealed class MainForm : Form
     };
 
     private readonly HostSession session;
+    private readonly EspOverlayForm espOverlay;
     private readonly WebViewStartupLifecycle webViewStartup = new();
     private WebView2? webView;
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 2000 };
@@ -105,6 +106,7 @@ public sealed class MainForm : Form
     public MainForm(HostSession session)
     {
         this.session = session;
+        espOverlay = new EspOverlayForm(session);
         Text = UiText("app.title");
         Icon = LoadWindowIcon();
         MinimumSize = new Size(960, 640);
@@ -124,6 +126,7 @@ public sealed class MainForm : Form
 
         Shown += async (_, _) =>
         {
+            espOverlay.Start();
             try
             {
                 ApplyWindowSettings("shown");
@@ -181,6 +184,7 @@ public sealed class MainForm : Form
         webReady = false;
         CancelUiReadyTimeout();
         statusTimer.Stop();
+        espOverlay.Dispose();
         PersistWindowSnapshot();
         UnregisterRawKeyboardInput();
         hotkeyKeyState.Clear();
