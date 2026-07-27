@@ -160,6 +160,7 @@ var tests = new List<(string Name, Action Run)>
     ("runtime launch stages a local Windows copy", RuntimeLaunchStagesLocalWindowsCopy),
     ("direct bridge names avoid historical loader pattern", DirectBridgeNamesAvoidHistoricalLoaderPattern),
     ("release packaging contains only direct bridge components", ReleasePackagingContainsOnlyDirectBridge),
+    ("required submodules are declared and checked out", RequiredSubmodulesAreDeclaredAndCheckedOut),
     ("missing Defender exclusion is added with elevation", MissingDefenderExclusionIsAddedWithElevation),
     ("Defender exclusion marker prevents repeated elevation", DefenderExclusionMarkerPreventsRepeatedElevation),
     ("cancelling Defender elevation returns a nonfatal result", CancellingDefenderElevationReturnsNonfatalResult),
@@ -4456,6 +4457,33 @@ static void ReleasePackagingContainsOnlyDirectBridge()
     var release = File.ReadAllText(Path.Combine(root, "scripts", "release.ps1"));
     Assert(release.Contains("Release output directory contains debug artifacts", StringComparison.Ordinal),
         "release packaging must reject a package directory containing debug sidecars");
+}
+
+static void RequiredSubmodulesAreDeclaredAndCheckedOut()
+{
+    var root = FindRepositoryRoot();
+    var modules = File.ReadAllText(Path.Combine(root, ".gitmodules"));
+    var ci = File.ReadAllText(Path.Combine(root, ".github", "workflows", "ci.yml"));
+    var release = File.ReadAllText(Path.Combine(root, ".github", "workflows", "release.yml"));
+    var readme = File.ReadAllText(Path.Combine(root, "README.md"));
+    var contributing = File.ReadAllText(Path.Combine(root, "CONTRIBUTING.md"));
+    var thirdPartyDocs = File.ReadAllText(Path.Combine(root, "docs", "research-tools.md"));
+
+    Assert(modules.Contains("[submodule \"third_party/minhook\"]", StringComparison.Ordinal) &&
+           modules.Contains("path = third_party/minhook", StringComparison.Ordinal) &&
+           modules.Contains("https://github.com/TsudaKageyu/minhook.git", StringComparison.Ordinal),
+        "the required MinHook gitlink must have a public submodule mapping");
+    Assert(ci.Contains("submodules: recursive", StringComparison.Ordinal) &&
+           release.Contains("submodules: recursive", StringComparison.Ordinal),
+        "CI and release builds must initialize required submodules");
+    Assert(readme.Contains("git clone --recurse-submodules", StringComparison.Ordinal) &&
+           contributing.Contains("git clone --recurse-submodules", StringComparison.Ordinal) &&
+           contributing.Contains("git submodule update --init --recursive", StringComparison.Ordinal),
+        "developer setup must initialize pinned dependencies");
+    Assert(thirdPartyDocs.Contains("## MinHook", StringComparison.Ordinal) &&
+           thirdPartyDocs.Contains("BSD 2-Clause", StringComparison.Ordinal) &&
+           thirdPartyDocs.Contains("third_party/minhook", StringComparison.Ordinal),
+        "third-party documentation must identify MinHook's purpose, license, and pinned path");
 }
 
 static void MissingDefenderExclusionIsAddedWithElevation()

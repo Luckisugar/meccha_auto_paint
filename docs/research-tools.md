@@ -1,13 +1,14 @@
 # Research Tools
 
-This project pins OSS game-research tools as git submodules under
-`third_party/`. They are used only when a game update requires asset, mapping,
-or SDK investigation.
+This project pins third-party source dependencies as git submodules under
+`third_party/`. MinHook is required by the normal runtime build. CUE4Parse and
+UnrealMappingsDumper are used when a game update requires asset, mapping, or SDK
+investigation.
 
 The normal runtime build requires the WebView2 controller host, the native bridge and
-injector, and the reviewed mesh profile artifacts under `resources/mesh-profiles/`.
-The tools below are for update recovery and profile regeneration, not normal
-app builds.
+injector, MinHook, and the reviewed mesh profile artifacts under
+`resources/mesh-profiles/`. The research tools below are for update recovery
+and profile regeneration.
 
 Runtime bridge probes for multiplayer paint replication are documented in
 [`runtime-paint-replication-research.md`](runtime-paint-replication-research.md)
@@ -22,11 +23,18 @@ the local build output for package/debug runs. After game updates, initialize th
 submodules and run `make mesh MAPPINGS=<path-to-usmap>` to regenerate the
 reviewed shipping profile.
 
-Initialize the research tools with:
+Initialize all pinned dependencies with:
 
 ```bash
 git submodule update --init --recursive
 ```
+
+## MinHook
+
+- Upstream: https://github.com/TsudaKageyu/minhook
+- License: BSD 2-Clause; see `third_party/minhook/LICENSE.txt`
+- Purpose: provide the native function hooks used by the in-game renderer.
+- Pinned path used by `make build`: `third_party/minhook`
 
 ## CUE4Parse
 

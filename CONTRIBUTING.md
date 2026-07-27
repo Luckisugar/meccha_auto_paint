@@ -25,9 +25,15 @@ needs:
 Clone the repository, then build it:
 
 ```bash
-git clone https://github.com/acentrist/MecchaCamouflage.git
+git clone --recurse-submodules https://github.com/acentrist/MecchaCamouflage.git
 cd MecchaCamouflage
 make build
+```
+
+For an existing checkout, initialize the pinned dependencies before building:
+
+```bash
+git submodule update --init --recursive
 ```
 
 Without GNU Make, run the equivalent from PowerShell:

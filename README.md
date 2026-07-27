@@ -75,7 +75,7 @@ Defender exclusion:
 ## Development
 
 ```bash
-git clone https://github.com/acentrist/MecchaCamouflage.git
+git clone --recurse-submodules https://github.com/acentrist/MecchaCamouflage.git
 cd MecchaCamouflage
 make run
 ```
