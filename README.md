@@ -1,39 +1,63 @@
 <p align="center">
-  <img src="docs/assets/meccha-camouflage-readme-banner-v151-1600w.jpg" alt="Meccha Camouflage demo" width="900" />
+  <img
+    src="docs/assets/meccha-camouflage-readme-banner-v151-1600w.jpg"
+    alt="Meccha Camouflage demo"
+    width="900"
+  />
 </p>
 
 <p align="center">
-  <a href="LICENSE.txt"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg" alt="License: GPL-3.0-or-later" /></a>
-  <a href="#download"><img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%20Windows%2011-0078D4?logo=windows&amp;logoColor=white" alt="Platform: Windows 10 and Windows 11" /></a>
+  <a href="https://github.com/acentrist/MecchaCamouflage/releases/latest">
+    <img
+      src="https://img.shields.io/github/v/release/acentrist/MecchaCamouflage"
+      alt="Latest release"
+    />
+  </a>
+  <a href="https://github.com/acentrist/MecchaCamouflage/releases">
+    <img
+      src="https://img.shields.io/github/downloads/acentrist/MecchaCamouflage/total"
+      alt="Total downloads"
+    />
+  </a>
+  <a href="https://github.com/acentrist/MecchaCamouflage">
+    <img
+      src="https://img.shields.io/github/stars/acentrist/MecchaCamouflage"
+      alt="GitHub stars"
+    />
+  </a>
+    <a href="LICENSE.txt">
+    <img
+      src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg"
+      alt="License: GPL-3.0-or-later"
+    />
+  </a>
 </p>
 
 <h1>
-  <img src="resources/app-icons/icon.png" alt="Meccha Camouflage icon" width="36" />
+  <img
+    src="resources/app-icons/icon.png"
+    alt="Meccha Camouflage icon"
+    width="36"
+  />
   Meccha Camouflage
 </h1>
 
-A standalone Windows desktop tool for MECCHA CHAMELEON camouflage experiments.
+A Windows desktop app for MECCHA CHAMELEON.
 
 ## Download
 
-Download the latest `meccha-camouflage.exe` from GitHub Releases:
-
-- https://github.com/acentrist/MecchaCamouflage/releases/latest
+Download the latest <code>meccha-camouflage.exe</code> from <a href="https://github.com/acentrist/MecchaCamouflage/releases/latest">GitHub Releases</a>.
 
 ## Usage
 
 1. Start MECCHA CHAMELEON.
 2. Start `meccha-camouflage.exe`.
-3. Confirm the target process and bridge state in the app.
-4. Press the saved paint hotkey.
 
 Logs are written under:
 
 ```text
 %LOCALAPPDATA%\MecchaCamouflage\versions\<version>\logs\
 ```
-
-## Windows Security
 
 If Windows asks, approve the UAC prompt at startup to add this Microsoft
 Defender exclusion:
