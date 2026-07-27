@@ -64,10 +64,16 @@ public sealed class SettingsStore
         settings.Esp.Names = ReadBool(root, "esp_names", settings.Esp.Names);
         settings.Esp.Distance = ReadBool(root, "esp_distance", settings.Esp.Distance);
         settings.Esp.Snaplines = ReadBool(root, "esp_snaplines", settings.Esp.Snaplines);
-        if (RgbColor.TryParse(ReadString(root, "esp_color", settings.Esp.Color.ToHex()), out var espColor))
-            settings.Esp.Color = espColor;
-        if (RgbColor.TryParse(ReadString(root, "esp_enemy_color", settings.Esp.EnemyColor.ToHex()), out var enemyColor))
-            settings.Esp.EnemyColor = enemyColor;
+        var hiderColorText = root.ContainsKey("esp_hider_color")
+            ? ReadString(root, "esp_hider_color", settings.Esp.HiderColor.ToHex())
+            : ReadString(root, "esp_color", settings.Esp.HiderColor.ToHex());
+        if (RgbColor.TryParse(hiderColorText, out var hiderColor))
+            settings.Esp.HiderColor = hiderColor;
+        var hunterColorText = root.ContainsKey("esp_hunter_color")
+            ? ReadString(root, "esp_hunter_color", settings.Esp.HunterColor.ToHex())
+            : ReadString(root, "esp_enemy_color", settings.Esp.HunterColor.ToHex());
+        if (RgbColor.TryParse(hunterColorText, out var hunterColor))
+            settings.Esp.HunterColor = hunterColor;
 
         if (root.TryGetPropertyValue("image", out var imageNode) && imageNode is JsonObject)
         {
@@ -216,8 +222,8 @@ public sealed class SettingsStore
         esp_names = settings.Esp.Names,
         esp_distance = settings.Esp.Distance,
         esp_snaplines = settings.Esp.Snaplines,
-        esp_color = settings.Esp.Color.ToHex(),
-        esp_enemy_color = settings.Esp.EnemyColor.ToHex(),
+        esp_hider_color = settings.Esp.HiderColor.ToHex(),
+        esp_hunter_color = settings.Esp.HunterColor.ToHex(),
         brush_size_texels = settings.Paint.BrushSizeTexels,
         side_source_max_uv = settings.Paint.SideSourceMaxUv,
         front_back_source_max_uv = settings.Paint.FrontBackSourceMaxUv,
@@ -238,8 +244,8 @@ public sealed class SettingsStore
     private static string NormalizeEspTargetScope(string? value) =>
         value?.Trim().ToLowerInvariant() switch
         {
-            "enemy" => "enemy",
-            "ally" => "ally",
+            "hider" => "hider",
+            "hunter" => "hunter",
             _ => "all"
         };
 

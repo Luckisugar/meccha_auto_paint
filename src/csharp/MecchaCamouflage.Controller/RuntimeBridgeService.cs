@@ -172,13 +172,6 @@ public sealed class RuntimeBridgeService
     public Task<BridgeReply> SendPaintAsync(string payload, CancellationToken cancellationToken = default) =>
         RequestActiveAsync(client => client.RequestAsync(payload, cancellationToken));
 
-    /// <summary>Returns the game's current Hider/Hunter/Spectator roster without mutating it.</summary>
-    public Task<BridgeReply> GetEspRolesAsync(CancellationToken cancellationToken = default) =>
-        RequestActiveAsync(client => client.RequestAsync(
-            "{\"type\":\"esp_roles\"}",
-            cancellationToken,
-            TimeSpan.FromMilliseconds(250)));
-
     /// <summary>
     /// Configures the in-process D3D12 Present compositor. The host supplies
     /// settings only; it never reads game memory or owns an overlay window.
@@ -205,12 +198,12 @@ public sealed class RuntimeBridgeService
             names = settings.Names,
             distance = settings.Distance,
             snaplines = settings.Snaplines,
-            ally_r = settings.Color.R,
-            ally_g = settings.Color.G,
-            ally_b = settings.Color.B,
-            enemy_r = settings.EnemyColor.R,
-            enemy_g = settings.EnemyColor.G,
-            enemy_b = settings.EnemyColor.B,
+            hider_r = settings.HiderColor.R,
+            hider_g = settings.HiderColor.G,
+            hider_b = settings.HiderColor.B,
+            hunter_r = settings.HunterColor.R,
+            hunter_g = settings.HunterColor.G,
+            hunter_b = settings.HunterColor.B,
             force_rebind = forceRebind
         });
         return RequestActiveAsync(client => client.RequestAsync(

@@ -39,8 +39,8 @@ public sealed class HostSession
         "esp.names",
         "esp.distance",
         "esp.snaplines",
-        "esp.color",
-        "esp.enemyColor",
+        "esp.hiderColor",
+        "esp.hunterColor",
         "app.processName",
         "app.alwaysOnTop",
         "app.opacity",
@@ -89,9 +89,6 @@ public sealed class HostSession
     public RuntimeBridgeService Runtime { get; }
     public AppSettings Settings { get; private set; }
     public bool PaintRunning { get; private set; }
-
-    public Task<BridgeReply> GetEspRolesAsync(CancellationToken cancellationToken = default) =>
-        Runtime.GetEspRolesAsync(cancellationToken);
 
     public Task<BridgeReply> ConfigureNativePresentEspAsync(
         EspSettings settings,
@@ -1625,8 +1622,8 @@ public sealed class HostSession
                 settings.Esp.Names,
                 settings.Esp.Distance,
                 settings.Esp.Snaplines,
-                settings.Esp.Color.ToHex(),
-                settings.Esp.EnemyColor.ToHex()));
+                settings.Esp.HiderColor.ToHex(),
+                settings.Esp.HunterColor.ToHex()));
     }
 
     private static ResetSnapshot BuildResetSnapshot(AppSettings settings, AppSettings defaults)
@@ -1640,8 +1637,8 @@ public sealed class HostSession
             ["fill.material"] = map["paint.fillColor"] || map["paint.fillMetallic"] || map["paint.fillRoughness"] || map["paint.fillEmissive"],
             ["image"] = settings.Image.Enabled != defaults.Image.Enabled || settings.Image.Revision != defaults.Image.Revision,
             ["misc"] = map["esp.enabled"] || map["esp.scope"] || map["esp.boxes"] || map["esp.skeletons"] ||
-                       map["esp.names"] || map["esp.distance"] || map["esp.snaplines"] || map["esp.color"] ||
-                       map["esp.enemyColor"],
+                       map["esp.names"] || map["esp.distance"] || map["esp.snaplines"] || map["esp.hiderColor"] ||
+                       map["esp.hunterColor"],
             ["app"] = map["app.processName"] || map["app.alwaysOnTop"] || map["app.opacity"] || map["app.themeColor"] ||
                     map["app.startHotkey"] || map["app.previewHotkey"] || map["app.unpreviewHotkey"] || map["app.stopHotkey"] ||
                     map["app.imageStartHotkey"] || map["app.imagePreviewHotkey"] || map["app.imageUnpreviewHotkey"] || map["app.imageStopHotkey"]
@@ -1671,8 +1668,8 @@ public sealed class HostSession
         "esp.names" => left.Esp.Names == right.Esp.Names,
         "esp.distance" => left.Esp.Distance == right.Esp.Distance,
         "esp.snaplines" => left.Esp.Snaplines == right.Esp.Snaplines,
-        "esp.color" => left.Esp.Color == right.Esp.Color,
-        "esp.enemyColor" => left.Esp.EnemyColor == right.Esp.EnemyColor,
+        "esp.hiderColor" => left.Esp.HiderColor == right.Esp.HiderColor,
+        "esp.hunterColor" => left.Esp.HunterColor == right.Esp.HunterColor,
         "app.processName" => left.GameProcessName == right.GameProcessName,
         "app.alwaysOnTop" => left.AlwaysOnTop == right.AlwaysOnTop,
         "app.opacity" => Nearly(left.Opacity, right.Opacity),
@@ -1712,8 +1709,8 @@ public sealed class HostSession
             case "esp.names": settings.Esp.Names = defaults.Esp.Names; break;
             case "esp.distance": settings.Esp.Distance = defaults.Esp.Distance; break;
             case "esp.snaplines": settings.Esp.Snaplines = defaults.Esp.Snaplines; break;
-            case "esp.color": settings.Esp.Color = defaults.Esp.Color; break;
-            case "esp.enemyColor": settings.Esp.EnemyColor = defaults.Esp.EnemyColor; break;
+            case "esp.hiderColor": settings.Esp.HiderColor = defaults.Esp.HiderColor; break;
+            case "esp.hunterColor": settings.Esp.HunterColor = defaults.Esp.HunterColor; break;
             case "app.processName": settings.GameProcessName = defaults.GameProcessName; break;
             case "app.alwaysOnTop": settings.AlwaysOnTop = defaults.AlwaysOnTop; break;
             case "app.opacity": settings.Opacity = defaults.Opacity; break;
@@ -1758,15 +1755,15 @@ public sealed class HostSession
             case "esp.names": settings.Esp.Names = value.GetBoolean(); break;
             case "esp.distance": settings.Esp.Distance = value.GetBoolean(); break;
             case "esp.snaplines": settings.Esp.Snaplines = value.GetBoolean(); break;
-            case "esp.color":
-                if (!RgbColor.TryParse(value.GetString(), out var espColor))
-                    throw new ArgumentException("ESP color must be #RRGGBB.");
-                settings.Esp.Color = espColor;
+            case "esp.hiderColor":
+                if (!RgbColor.TryParse(value.GetString(), out var hiderColor))
+                    throw new ArgumentException("Hider ESP color must be #RRGGBB.");
+                settings.Esp.HiderColor = hiderColor;
                 break;
-            case "esp.enemyColor":
-                if (!RgbColor.TryParse(value.GetString(), out var enemyColor))
-                    throw new ArgumentException("Enemy ESP color must be #RRGGBB.");
-                settings.Esp.EnemyColor = enemyColor;
+            case "esp.hunterColor":
+                if (!RgbColor.TryParse(value.GetString(), out var hunterColor))
+                    throw new ArgumentException("Hunter ESP color must be #RRGGBB.");
+                settings.Esp.HunterColor = hunterColor;
                 break;
             case "app.language": settings.Language = value.GetString() ?? settings.Language; break;
             case "app.processName": settings.GameProcessName = value.GetString() ?? settings.GameProcessName; break;

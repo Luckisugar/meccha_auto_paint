@@ -472,8 +472,8 @@ function renderSettings(snapshot) {
   setChecked("esp-names", esp.names);
   setChecked("esp-distance", esp.distance);
   setChecked("esp-snaplines", esp.snaplines);
-  setColorPair("esp-color-picker", "esp-color", esp.color);
-  setColorPair("esp-enemy-color-picker", "esp-enemy-color", esp.enemyColor);
+  setColorPair("esp-hider-color-picker", "esp-hider-color", esp.hiderColor);
+  setColorPair("esp-hunter-color-picker", "esp-hunter-color", esp.hunterColor);
 
   const language = byId("language");
   if (language.options.length === 0) {
@@ -599,7 +599,7 @@ function renderRegionButtons(selector, key, current, editable) {
 function renderEspScopeButtons(current, editable) {
   for (const container of document.querySelectorAll("[data-esp-scope]")) {
     container.replaceChildren();
-    for (const scope of ["all", "enemy", "ally"]) {
+    for (const scope of ["all", "hider", "hunter"]) {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = scope[0].toUpperCase() + scope.slice(1);
@@ -858,8 +858,8 @@ function previewEspDraft() {
       names: Boolean(esp.names),
       distance: Boolean(esp.distance),
       snaplines: Boolean(esp.snaplines),
-      allyColor: normalizeColor(esp.color),
-      enemyColor: normalizeColor(esp.enemyColor)
+      hiderColor: normalizeColor(esp.hiderColor),
+      hunterColor: normalizeColor(esp.hunterColor)
     }).catch(error => showError(error.message || String(error)));
   });
 }
@@ -927,8 +927,8 @@ function diffSnapshots(before, after) {
     "esp.names",
     "esp.distance",
     "esp.snaplines",
-    "esp.color",
-    "esp.enemyColor",
+    "esp.hiderColor",
+    "esp.hunterColor",
     "app.alwaysOnTop",
     "app.opacity",
     "app.themeColor",
@@ -2620,8 +2620,8 @@ document.addEventListener("DOMContentLoaded", () => {
   bindCheckbox("esp-names", "esp.names");
   bindCheckbox("esp-distance", "esp.distance");
   bindCheckbox("esp-snaplines", "esp.snaplines");
-  bindColorPair("esp-color-picker", "esp-color", "esp.color");
-  bindColorPair("esp-enemy-color-picker", "esp-enemy-color", "esp.enemyColor");
+  bindColorPair("esp-hider-color-picker", "esp-hider-color", "esp.hiderColor");
+  bindColorPair("esp-hunter-color-picker", "esp-hunter-color", "esp.hunterColor");
   bindCheckbox("always-on-top", "app.alwaysOnTop");
   bindRangePair("opacity", "opacity-number", "app.opacity", value => value / 100);
   bindColorPair("theme-color-picker", "theme-color", "app.themeColor");

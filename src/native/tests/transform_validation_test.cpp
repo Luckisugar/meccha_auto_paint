@@ -210,6 +210,19 @@ int main()
     {
         return 40;
     }
+    using EspRole = runtime_contract::EspRole;
+    using EspScope = runtime_contract::EspScope;
+    if (!runtime_contract::esp_role_scope_matches(EspScope::All, EspRole::Unknown) ||
+        !runtime_contract::esp_role_scope_matches(EspScope::Hider, EspRole::Hider) ||
+        runtime_contract::esp_role_scope_matches(EspScope::Hider, EspRole::Hunter) ||
+        !runtime_contract::esp_role_scope_matches(EspScope::Hunter, EspRole::Hunter) ||
+        runtime_contract::esp_role_scope_matches(EspScope::Hunter, EspRole::Unknown) ||
+        runtime_contract::esp_role_color(EspRole::Hider, 0x010203u, 0x040506u) != 0x010203u ||
+        runtime_contract::esp_role_color(EspRole::Hunter, 0x010203u, 0x040506u) != 0x040506u ||
+        runtime_contract::esp_role_color(EspRole::Unknown, 0x010203u, 0x040506u) != 0xFFFFFFu)
+    {
+        return 41;
+    }
 
     const runtime_contract::ImageAtlasMappingInput round_front{
         false, runtime_contract::ImageAtlasRegion::Front, false,

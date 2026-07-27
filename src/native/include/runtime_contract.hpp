@@ -1011,6 +1011,37 @@ namespace runtime_contract
                    : cached_world_valid ? cached_world : 0;
     }
 
+    enum class EspRole : int
+    {
+        Unknown = 0,
+        Hider = 1,
+        Hunter = 2,
+        Spectator = 3,
+    };
+
+    enum class EspScope : int
+    {
+        All = 0,
+        Hider = 1,
+        Hunter = 2,
+    };
+
+    constexpr bool esp_role_scope_matches(EspScope scope, EspRole role)
+    {
+        return scope == EspScope::All ||
+               (scope == EspScope::Hider && role == EspRole::Hider) ||
+               (scope == EspScope::Hunter && role == EspRole::Hunter);
+    }
+
+    constexpr auto esp_role_color(EspRole role,
+                                  std::uint32_t hider_color,
+                                  std::uint32_t hunter_color) -> std::uint32_t
+    {
+        return role == EspRole::Hider
+                   ? hider_color
+                   : role == EspRole::Hunter ? hunter_color : 0xFFFFFFu;
+    }
+
     constexpr bool esp_native_renderer_configuration_is_reusable(
         bool requested_enabled,
         bool same_configuration,

@@ -71,8 +71,8 @@ public sealed record EspSnapshot(
     bool Names,
     bool Distance,
     bool Snaplines,
-    string Color,
-    string EnemyColor);
+    string HiderColor,
+    string HunterColor);
 
 /// <summary>
 /// Snapshot metadata deliberately omits large source image blobs. The web

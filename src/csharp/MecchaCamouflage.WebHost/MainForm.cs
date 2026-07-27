@@ -504,8 +504,8 @@ public sealed class MainForm : Form
         Names = settings.Names,
         Distance = settings.Distance,
         Snaplines = settings.Snaplines,
-        Color = settings.Color,
-        EnemyColor = settings.EnemyColor
+        HiderColor = settings.HiderColor,
+        HunterColor = settings.HunterColor
     };
 
     private static string NativeEspSignature(EspSettings settings) => string.Join('|',
@@ -516,8 +516,8 @@ public sealed class MainForm : Form
         settings.Names,
         settings.Distance,
         settings.Snaplines,
-        settings.Color.ToHex(),
-        settings.EnemyColor.ToHex());
+        settings.HiderColor.ToHex(),
+        settings.HunterColor.ToHex());
 
     /// <summary>
     /// The desktop host owns only configuration. It deliberately has no ESP
@@ -1532,10 +1532,10 @@ public sealed class MainForm : Form
             !TryReadBoolean(payload, "names", out var names) ||
             !TryReadBoolean(payload, "distance", out var distance) ||
             !TryReadBoolean(payload, "snaplines", out var snaplines) ||
-            !TryReadColor(payload, "allyColor", out var allyColor) ||
-            !TryReadColor(payload, "enemyColor", out var enemyColor) ||
+            !TryReadColor(payload, "hiderColor", out var hiderColor) ||
+            !TryReadColor(payload, "hunterColor", out var hunterColor) ||
             !TryReadNonnegativeInt64(payload, "generation", out var generation) ||
-            scope is not ("all" or "enemy" or "ally"))
+            scope is not ("all" or "hider" or "hunter"))
         {
             return new { success = false, message = "ESP draft preview is invalid." };
         }
@@ -1552,8 +1552,8 @@ public sealed class MainForm : Form
             Names = names,
             Distance = distance,
             Snaplines = snaplines,
-            Color = allyColor,
-            EnemyColor = enemyColor
+            HiderColor = hiderColor,
+            HunterColor = hunterColor
         };
         nativeEspConfigurationSignature = "";
         QueueNativePresentEspConfiguration(nativeEspPreview);

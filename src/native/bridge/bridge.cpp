@@ -80,7 +80,6 @@ namespace
     // measurable receiver queue makes no forward progress for this interval.
     constexpr int LocalQueueDrainIdleTimeoutMs = 120000;
     constexpr UINT EspHudRebindMessage = WM_APP + 0x4D44;
-    constexpr std::uint64_t HudLineProbeMaxCalls = 300;
     constexpr bool MeshFirstPostImportTextureSyncEnabled = false;
     constexpr double MeshFirstRuntimeCoordinateMaxAvgErrorCm = 50.0;
     // [DEBUG-d3dinit] Keep the 11on12 acquire/release/Flush path intact while
@@ -137,62 +136,8 @@ namespace
         RunningCancelRequested = 4,
     };
 
-    struct EspHudCanvasVec2
-    {
-        // UE 5.6 enables large-world coordinates in this game, so FVector2D
-        // is two doubles (not the old float pair).  Keep this ABI explicit:
-        // the preceding reflection gate rejects any future layout mismatch.
-        double x{0.0};
-        double y{0.0};
-    };
-
-    struct EspHudCanvasColor
-    {
-        float r{0.0f};
-        float g{0.0f};
-        float b{0.0f};
-        float a{1.0f};
-    };
-
-    // A one-shot calibration request deliberately contains no render state.
-    // It is armed by the authenticated bridge listener and completed only
-    // after the game's own DrawHUD callback has returned.  That lets the
-    // external overlay compare its raw CameraCache projection with UE's
-    // authoritative screen projection without drawing or modifying a UObject.
-    struct EspProjectionProbeJob
-    {
-        std::uint64_t generation{0};
-        bool pending{false};
-        bool completed{false};
-        sdk::FVector world{};
-        std::uintptr_t controller{0};
-        std::string response{};
-    };
-
-    struct EspProjectionProbeRawView
-    {
-        sdk::FVector location{};
-        sdk::FRotator rotation{};
-        float fov{0.0f};
-        float desired_fov{0.0f};
-    };
-    static_assert(sizeof(EspProjectionProbeRawView) == 0x38,
-                  "ESP projection probe raw view layout mismatch");
-
-    enum class EspHudRendererRole : int
-    {
-        Unknown = 0,
-        Hider = 1,
-        Hunter = 2,
-        Spectator = 3,
-    };
-
-    enum class EspHudRendererScope : int
-    {
-        All = 0,
-        Enemy = 1,
-        Ally = 2,
-    };
+    using EspNativeRole = runtime_contract::EspRole;
+    using EspNativeScope = runtime_contract::EspScope;
 
     HMODULE g_module = nullptr;
     std::atomic<bool> g_running{false};
@@ -269,69 +214,6 @@ namespace
     std::atomic<std::uintptr_t> g_esp_hud_observed_canvas{0};
     std::atomic<std::uintptr_t> g_esp_hud_observed_debug_canvas{0};
     std::atomic<std::uint64_t> g_esp_hud_callback_hits{0};
-    std::mutex g_esp_projection_probe_mutex;
-    std::condition_variable g_esp_projection_probe_cv;
-    EspProjectionProbeJob g_esp_projection_probe{};
-    std::atomic<bool> g_esp_projection_probe_armed{false};
-    // Pre-resolved K2_DrawLine ABI for the one short HUD-path validation
-    // marker. The game-thread callback writes only a fixed stack buffer and
-    // calls the original ProcessEvent target; it never performs reflection.
-    std::atomic<bool> g_esp_hud_line_probe_enabled{false};
-    std::atomic<std::uintptr_t> g_esp_hud_line_function{0};
-    std::atomic<int> g_esp_hud_line_params_size{0};
-    std::atomic<int> g_esp_hud_line_start_offset{-1};
-    std::atomic<int> g_esp_hud_line_end_offset{-1};
-    std::atomic<int> g_esp_hud_line_thickness_offset{-1};
-    std::atomic<int> g_esp_hud_line_color_offset{-1};
-    std::atomic<std::uint64_t> g_esp_hud_line_calls{0};
-    std::atomic<std::uint64_t> g_esp_hud_line_failures{0};
-    // The resident renderer draws on the game's own Canvas.  Its complete
-    // schema is resolved off the draw callback, then the callback performs
-    // only fixed-layout reads and calls to the original ProcessEvent target.
-    // This keeps all ESP primitives in the game's frame rather than on a
-    // separately presented transparent WinForms surface.
-    std::atomic<bool> g_esp_hud_renderer_enabled{false};
-    std::atomic<bool> g_esp_hud_renderer_boxes{true};
-    std::atomic<bool> g_esp_hud_renderer_skeletons{true};
-    std::atomic<bool> g_esp_hud_renderer_names{true};
-    std::atomic<bool> g_esp_hud_renderer_distance{true};
-    std::atomic<bool> g_esp_hud_renderer_snaplines{true};
-    std::atomic<std::uint32_t> g_esp_hud_renderer_color{0x00FF88u};
-    std::atomic<std::uint32_t> g_esp_hud_renderer_enemy_color{0xFF0000u};
-    std::atomic<int> g_esp_hud_renderer_scope{static_cast<int>(EspHudRendererScope::All)};
-    std::atomic<int> g_esp_hud_renderer_local_role{static_cast<int>(EspHudRendererRole::Unknown)};
-    std::mutex g_esp_hud_renderer_roles_mutex;
-    std::unordered_map<std::uintptr_t, EspHudRendererRole> g_esp_hud_renderer_roles;
-    std::mutex g_esp_hud_renderer_labels_mutex;
-    std::unordered_map<std::uintptr_t, std::shared_ptr<const std::wstring>> g_esp_hud_renderer_labels;
-    std::atomic<std::uintptr_t> g_esp_hud_renderer_world{0};
-    std::atomic<std::uintptr_t> g_esp_hud_renderer_controller{0};
-    std::atomic<std::uintptr_t> g_esp_hud_renderer_local_pawn{0};
-    // Canvas coordinates are not guaranteed to equal the client-window
-    // rectangle (DPI, screen percentage and viewport scaling can differ).
-    // These reflected offsets make projection and Canvas drawing use exactly
-    // the same coordinate system.
-    std::atomic<int> g_esp_hud_renderer_canvas_size_x_offset{-1};
-    std::atomic<int> g_esp_hud_renderer_canvas_size_y_offset{-1};
-    std::atomic<std::uintptr_t> g_esp_hud_text_function{0};
-    std::atomic<std::uintptr_t> g_esp_hud_text_font{0};
-    std::atomic<int> g_esp_hud_text_params_size{0};
-    std::atomic<int> g_esp_hud_text_font_offset{-1};
-    std::atomic<int> g_esp_hud_text_string_offset{-1};
-    std::atomic<int> g_esp_hud_text_position_offset{-1};
-    std::atomic<int> g_esp_hud_text_scale_offset{-1};
-    std::atomic<int> g_esp_hud_text_color_offset{-1};
-    std::atomic<int> g_esp_hud_text_kerning_offset{-1};
-    std::atomic<int> g_esp_hud_text_shadow_color_offset{-1};
-    std::atomic<int> g_esp_hud_text_shadow_offset{-1};
-    std::atomic<int> g_esp_hud_text_center_x_offset{-1};
-    std::atomic<std::uint8_t> g_esp_hud_text_center_x_mask{0};
-    std::atomic<std::uint64_t> g_esp_hud_renderer_frames{0};
-    std::atomic<std::uint64_t> g_esp_hud_renderer_source_players{0};
-    std::atomic<std::uint64_t> g_esp_hud_renderer_drawn_players{0};
-    std::atomic<std::uint64_t> g_esp_hud_renderer_draw_calls{0};
-    std::atomic<std::uint64_t> g_esp_hud_renderer_failures{0};
-    std::atomic<std::uint64_t> g_esp_hud_renderer_generation{0};
     std::mutex g_hook_mutex;
     std::mutex g_auto_event_watch_sample_mutex;
     std::mutex g_auto_event_watch_lifecycle_mutex;
@@ -424,7 +306,6 @@ namespace
                                                                              IDXGIOutput*,
                                                                              IDXGISwapChain1**);
 
-    void esp_hud_renderer_draw_frame(void* hud, void* params);
     void esp_native_present_capture_snapshot(void* hud);
     auto install_esp_present_sync() -> bool;
     void esp_native_uninstall_present_sync();
@@ -576,9 +457,9 @@ namespace
     std::atomic<bool> g_esp_native_names{true};
     std::atomic<bool> g_esp_native_distance{true};
     std::atomic<bool> g_esp_native_snaplines{true};
-    std::atomic<std::uint32_t> g_esp_native_ally_color{0x00FF00u};
-    std::atomic<std::uint32_t> g_esp_native_enemy_color{0xFF0000u};
-    std::atomic<int> g_esp_native_scope{static_cast<int>(EspHudRendererScope::All)};
+    std::atomic<std::uint32_t> g_esp_native_hider_color{0x00FF88u};
+    std::atomic<std::uint32_t> g_esp_native_hunter_color{0xFF0000u};
+    std::atomic<int> g_esp_native_scope{static_cast<int>(EspNativeScope::All)};
     std::atomic<int> g_esp_native_state{static_cast<int>(EspNativePresentState::Disabled)};
     // Updated immediately before every potentially faulting native render
     // boundary.  The SEH guard publishes it as status without touching a
@@ -3579,42 +3460,6 @@ namespace
         g_esp_hud_observed_canvas.store(0, std::memory_order_release);
         g_esp_hud_observed_debug_canvas.store(0, std::memory_order_release);
         g_esp_hud_callback_hits.store(0, std::memory_order_release);
-        g_esp_hud_line_probe_enabled.store(false, std::memory_order_release);
-        g_esp_hud_line_function.store(0, std::memory_order_release);
-        g_esp_hud_line_params_size.store(0, std::memory_order_release);
-        g_esp_hud_line_start_offset.store(-1, std::memory_order_release);
-        g_esp_hud_line_end_offset.store(-1, std::memory_order_release);
-        g_esp_hud_line_thickness_offset.store(-1, std::memory_order_release);
-        g_esp_hud_line_color_offset.store(-1, std::memory_order_release);
-        g_esp_hud_line_calls.store(0, std::memory_order_release);
-        g_esp_hud_line_failures.store(0, std::memory_order_release);
-        g_esp_hud_renderer_enabled.store(false, std::memory_order_release);
-        g_esp_hud_renderer_world.store(0, std::memory_order_release);
-        g_esp_hud_renderer_controller.store(0, std::memory_order_release);
-        g_esp_hud_renderer_local_pawn.store(0, std::memory_order_release);
-        g_esp_hud_renderer_canvas_size_x_offset.store(-1, std::memory_order_release);
-        g_esp_hud_renderer_canvas_size_y_offset.store(-1, std::memory_order_release);
-        g_esp_hud_text_function.store(0, std::memory_order_release);
-        g_esp_hud_text_font.store(0, std::memory_order_release);
-        g_esp_hud_text_params_size.store(0, std::memory_order_release);
-        g_esp_hud_text_font_offset.store(-1, std::memory_order_release);
-        g_esp_hud_text_string_offset.store(-1, std::memory_order_release);
-        g_esp_hud_text_position_offset.store(-1, std::memory_order_release);
-        g_esp_hud_text_scale_offset.store(-1, std::memory_order_release);
-        g_esp_hud_text_color_offset.store(-1, std::memory_order_release);
-        g_esp_hud_text_kerning_offset.store(-1, std::memory_order_release);
-        g_esp_hud_text_shadow_color_offset.store(-1, std::memory_order_release);
-        g_esp_hud_text_shadow_offset.store(-1, std::memory_order_release);
-        g_esp_hud_text_center_x_offset.store(-1, std::memory_order_release);
-        g_esp_hud_text_center_x_mask.store(0, std::memory_order_release);
-        {
-            std::lock_guard<std::mutex> role_lock(g_esp_hud_renderer_roles_mutex);
-            g_esp_hud_renderer_roles.clear();
-        }
-        {
-            std::lock_guard<std::mutex> label_lock(g_esp_hud_renderer_labels_mutex);
-            g_esp_hud_renderer_labels.clear();
-        }
         g_process_event_hook_installed.store(false);
     }
 
@@ -18345,322 +18190,6 @@ namespace
         }
     }
 
-    auto esp_projection_probe_finite(const sdk::FVector& value) -> bool
-    {
-        return std::isfinite(value.X) && std::isfinite(value.Y) && std::isfinite(value.Z) &&
-               std::abs(value.X) < 1.0e8 && std::abs(value.Y) < 1.0e8 && std::abs(value.Z) < 1.0e8;
-    }
-
-    auto esp_projection_probe_normalize(const sdk::FVector& value) -> sdk::FVector
-    {
-        const auto length = std::sqrt(value.X * value.X + value.Y * value.Y + value.Z * value.Z);
-        return !std::isfinite(length) || length <= 0.000001
-                   ? sdk::FVector{}
-                   : sdk::FVector{value.X / length, value.Y / length, value.Z / length};
-    }
-
-    auto esp_projection_probe_dot(const sdk::FVector& left, const sdk::FVector& right) -> double
-    {
-        return left.X * right.X + left.Y * right.Y + left.Z * right.Z;
-    }
-
-    // This intentionally mirrors the external reader's current formula.  The
-    // offset remains an explicit input so this one-shot diagnostic can compare
-    // the legacy 89.8-degree approximation with UE's exact 90-degree basis;
-    // neither result is ever used to draw game geometry.
-    auto esp_projection_probe_raw_project(const EspProjectionProbeRawView& view,
-                                          const sdk::FVector& world,
-                                          int width,
-                                          int height,
-                                          double axis_offset_degrees,
-                                          double& x,
-                                          double& y) -> bool
-    {
-        x = 0.0;
-        y = 0.0;
-        if (width <= 0 || height <= 0 || !esp_projection_probe_finite(view.location) ||
-            !esp_projection_probe_finite(world) || !std::isfinite(view.rotation.Pitch) ||
-            !std::isfinite(view.rotation.Yaw) || !std::isfinite(view.fov) ||
-            view.fov < 20.0f || view.fov > 170.0f)
-        {
-            return false;
-        }
-        constexpr double radians = 3.14159265358979323846 / 180.0;
-        const auto pitch = view.rotation.Pitch * radians;
-        const auto yaw = view.rotation.Yaw * radians;
-        const auto yaw_y = (view.rotation.Yaw + axis_offset_degrees) * radians;
-        const auto pitch_z = (view.rotation.Pitch + axis_offset_degrees) * radians;
-        const auto axis_x = esp_projection_probe_normalize(
-            {std::cos(yaw) * std::cos(pitch), std::sin(yaw) * std::cos(pitch), std::sin(pitch)});
-        const auto axis_y = esp_projection_probe_normalize({std::cos(yaw_y), std::sin(yaw_y), 0.0});
-        const auto axis_z = esp_projection_probe_normalize(
-            {std::cos(yaw) * std::cos(pitch_z), std::sin(yaw) * std::cos(pitch_z), std::sin(pitch_z)});
-        const sdk::FVector delta{world.X - view.location.X, world.Y - view.location.Y, world.Z - view.location.Z};
-        const auto transformed_x = esp_projection_probe_dot(delta, axis_y);
-        const auto transformed_y = esp_projection_probe_dot(delta, axis_z);
-        const auto transformed_z = esp_projection_probe_dot(delta, axis_x);
-        if (!std::isfinite(transformed_z) || transformed_z < 1.0)
-        {
-            return false;
-        }
-        const auto tangent = std::tan(static_cast<double>(view.fov) * radians / 2.0);
-        if (!std::isfinite(tangent) || std::abs(tangent) < 0.0001)
-        {
-            return false;
-        }
-        const auto focal = (static_cast<double>(width) / 2.0) / tangent;
-        x = static_cast<double>(width) / 2.0 + transformed_x * focal / transformed_z;
-        y = static_cast<double>(height) / 2.0 - transformed_y * focal / transformed_z;
-        return std::isfinite(x) && std::isfinite(y);
-    }
-
-    auto esp_projection_probe_canvas_dimension(Reflection& ref,
-                                                std::uintptr_t canvas,
-                                                const char* first,
-                                                const char* second) -> int
-    {
-        if (!live_uobject(canvas))
-        {
-            return 0;
-        }
-        auto prop = find_object_property(ref, canvas, first);
-        if (!prop && second)
-        {
-            prop = find_object_property(ref, canvas, second);
-        }
-        const auto offset = prop ? prop_offset(prop) : -1;
-        const auto value = offset >= 0
-                               ? safe_read<int>(canvas + static_cast<std::uintptr_t>(offset), 0)
-                               : 0;
-        return value > 0 && value <= 16384 ? value : 0;
-    }
-
-    auto esp_projection_probe_execute(const EspProjectionProbeJob& request) -> std::string
-    {
-        Reflection ref{};
-        std::string failure{};
-        if (!ref.init(failure))
-        {
-            return response_json(false,
-                                 "esp_projection_probe_reflection_unavailable",
-                                 0,
-                                 1,
-                                 failure.empty() ? "UE reflection is unavailable in the HUD callback" : failure,
-                                 "\"mutation_performed\":false,\"callback_phase\":\"post_drawhud\"");
-        }
-        if (!live_uobject(request.controller) || !esp_projection_probe_finite(request.world))
-        {
-            return response_json(false,
-                                 "esp_projection_probe_context_unavailable",
-                                 0,
-                                 1,
-                                 "the local PlayerController or requested world point is unavailable",
-                                 "\"mutation_performed\":false,\"callback_phase\":\"post_drawhud\"");
-        }
-
-        SdkContext context{};
-        context.ok = true;
-        context.controller = request.controller;
-        const auto viewport = sdk_get_viewport_info(ref, context);
-        const auto canvas = g_esp_hud_observed_canvas.load(std::memory_order_acquire);
-        const auto canvas_width = esp_projection_probe_canvas_dimension(ref, canvas, "SizeX", "ClipX");
-        const auto canvas_height = esp_projection_probe_canvas_dimension(ref, canvas, "SizeY", "ClipY");
-
-        const auto raw_camera_manager = safe_read<std::uintptr_t>(
-            request.controller + sdk::FieldOffsets::PlayerController_PlayerCameraManager,
-            0);
-        EspProjectionProbeRawView raw_view{};
-        const bool raw_view_ok = live_uobject(raw_camera_manager) &&
-                                 safe_copy(&raw_view,
-                                           reinterpret_cast<const void*>(raw_camera_manager + 0x1540),
-                                           sizeof(raw_view));
-        double raw_x = 0.0;
-        double raw_y = 0.0;
-        const bool raw_project_ok = raw_view_ok &&
-                                    esp_projection_probe_raw_project(raw_view,
-                                                                     request.world,
-                                                                     viewport.width,
-                                                                     viewport.height,
-                                                                     89.8,
-                                                                     raw_x,
-                                                                     raw_y);
-        double exact_axes_x = 0.0;
-        double exact_axes_y = 0.0;
-        const bool exact_axes_project_ok = raw_view_ok &&
-                                           esp_projection_probe_raw_project(raw_view,
-                                                                            request.world,
-                                                                            viewport.width,
-                                                                            viewport.height,
-                                                                            90.0,
-                                                                            exact_axes_x,
-                                                                            exact_axes_y);
-
-        double engine_x = 0.0;
-        double engine_y = 0.0;
-        const bool engine_project_ok = viewport.width > 0 && viewport.height > 0 &&
-                                       sdk_project_world_to_screen(ref, context, request.world, engine_x, engine_y);
-
-        std::string camera_failure{};
-        auto api_camera_manager = sdk_call_no_params_return_object(
-            ref, request.controller, "GetPlayerCameraManager", camera_failure);
-        if (!live_uobject(api_camera_manager))
-        {
-            api_camera_manager = raw_camera_manager;
-        }
-        sdk::FVector api_camera_location{};
-        sdk::FRotator api_camera_rotation{};
-        double api_camera_fov = 0.0;
-        const bool api_camera_location_ok = live_uobject(api_camera_manager) &&
-                                            sdk_call_no_params_return_vector3(
-                                                ref, api_camera_manager, "GetCameraLocation", api_camera_location);
-        const bool api_camera_rotation_ok = live_uobject(api_camera_manager) &&
-                                            sdk_call_no_params_return_rotator(
-                                                ref, api_camera_manager, "GetCameraRotation", api_camera_rotation);
-        const bool api_camera_fov_ok = live_uobject(api_camera_manager) &&
-                                       sdk_call_no_params_return_number(
-                                           ref, api_camera_manager, "GetFOVAngle", api_camera_fov) &&
-                                       std::isfinite(api_camera_fov);
-        EspProjectionProbeRawView api_view{};
-        api_view.location = api_camera_location;
-        api_view.rotation = api_camera_rotation;
-        api_view.fov = static_cast<float>(api_camera_fov);
-        double api_x = 0.0;
-        double api_y = 0.0;
-        const bool api_project_ok = api_camera_location_ok && api_camera_rotation_ok && api_camera_fov_ok &&
-                                    esp_projection_probe_raw_project(api_view,
-                                                                     request.world,
-                                                                     viewport.width,
-                                                                     viewport.height,
-                                                                     89.8,
-                                                                     api_x,
-                                                                     api_y);
-        const auto center_ray = viewport.width > 0 && viewport.height > 0
-                                    ? sdk_deproject_screen_position(
-                                          ref,
-                                          context,
-                                          static_cast<double>(viewport.width) * 0.5,
-                                          static_cast<double>(viewport.height) * 0.5)
-                                    : SdkDeprojectRay{};
-
-        const auto engine_raw_delta = engine_project_ok && raw_project_ok
-                                          ? std::hypot(engine_x - raw_x, engine_y - raw_y)
-                                          : -1.0;
-        const auto engine_api_delta = engine_project_ok && api_project_ok
-                                          ? std::hypot(engine_x - api_x, engine_y - api_y)
-                                          : -1.0;
-        const auto engine_exact_axes_delta = engine_project_ok && exact_axes_project_ok
-                                                 ? std::hypot(engine_x - exact_axes_x, engine_y - exact_axes_y)
-                                                 : -1.0;
-        const auto raw_api_location_delta = raw_view_ok && api_camera_location_ok
-                                                ? std::sqrt(
-                                                      std::pow(raw_view.location.X - api_camera_location.X, 2) +
-                                                      std::pow(raw_view.location.Y - api_camera_location.Y, 2) +
-                                                      std::pow(raw_view.location.Z - api_camera_location.Z, 2))
-                                                : -1.0;
-        const auto raw_api_pitch_delta = raw_view_ok && api_camera_rotation_ok
-                                             ? std::remainder(raw_view.rotation.Pitch - api_camera_rotation.Pitch, 360.0)
-                                             : std::numeric_limits<double>::quiet_NaN();
-        const auto raw_api_yaw_delta = raw_view_ok && api_camera_rotation_ok
-                                           ? std::remainder(raw_view.rotation.Yaw - api_camera_rotation.Yaw, 360.0)
-                                           : std::numeric_limits<double>::quiet_NaN();
-        std::string metadata =
-            "\"mutation_performed\":false" +
-            std::string(",\"callback_phase\":\"post_drawhud\"") +
-            ",\"callback_hits\":" +
-            std::to_string(g_esp_hud_callback_hits.load(std::memory_order_acquire)) +
-            ",\"controller\":\"" + hex_address(request.controller) + "\"" +
-            ",\"world_x\":" + std::to_string(request.world.X) +
-            ",\"world_y\":" + std::to_string(request.world.Y) +
-            ",\"world_z\":" + std::to_string(request.world.Z) +
-            ",\"viewport_width\":" + std::to_string(viewport.width) +
-            ",\"viewport_height\":" + std::to_string(viewport.height) +
-            ",\"canvas_width\":" + std::to_string(canvas_width) +
-            ",\"canvas_height\":" + std::to_string(canvas_height) +
-            ",\"raw_camera_valid\":" + std::string(json_bool(raw_view_ok)) +
-            ",\"raw_camera_manager\":\"" + hex_address(raw_camera_manager) + "\"" +
-            ",\"raw_location_x\":" + std::to_string(raw_view.location.X) +
-            ",\"raw_location_y\":" + std::to_string(raw_view.location.Y) +
-            ",\"raw_location_z\":" + std::to_string(raw_view.location.Z) +
-            ",\"raw_pitch\":" + std::to_string(raw_view.rotation.Pitch) +
-            ",\"raw_yaw\":" + std::to_string(raw_view.rotation.Yaw) +
-            ",\"raw_fov\":" + std::to_string(raw_view.fov) +
-            ",\"raw_project_ok\":" + std::string(json_bool(raw_project_ok)) +
-            ",\"raw_x\":" + std::to_string(raw_x) +
-            ",\"raw_y\":" + std::to_string(raw_y) +
-            ",\"exact_axes_project_ok\":" + std::string(json_bool(exact_axes_project_ok)) +
-            ",\"exact_axes_x\":" + std::to_string(exact_axes_x) +
-            ",\"exact_axes_y\":" + std::to_string(exact_axes_y) +
-            ",\"engine_project_ok\":" + std::string(json_bool(engine_project_ok)) +
-            ",\"engine_x\":" + std::to_string(engine_x) +
-            ",\"engine_y\":" + std::to_string(engine_y) +
-            ",\"engine_raw_delta_px\":" + std::to_string(engine_raw_delta) +
-            ",\"engine_exact_axes_delta_px\":" + std::to_string(engine_exact_axes_delta) +
-            ",\"api_camera_manager\":\"" + hex_address(api_camera_manager) + "\"" +
-            ",\"api_camera_location_ok\":" + std::string(json_bool(api_camera_location_ok)) +
-            ",\"api_location_x\":" + std::to_string(api_camera_location.X) +
-            ",\"api_location_y\":" + std::to_string(api_camera_location.Y) +
-            ",\"api_location_z\":" + std::to_string(api_camera_location.Z) +
-            ",\"api_camera_rotation_ok\":" + std::string(json_bool(api_camera_rotation_ok)) +
-            ",\"api_pitch\":" + std::to_string(api_camera_rotation.Pitch) +
-            ",\"api_yaw\":" + std::to_string(api_camera_rotation.Yaw) +
-            ",\"api_camera_fov_ok\":" + std::string(json_bool(api_camera_fov_ok)) +
-            ",\"api_fov\":" + std::to_string(api_camera_fov) +
-            ",\"api_project_ok\":" + std::string(json_bool(api_project_ok)) +
-            ",\"api_x\":" + std::to_string(api_x) +
-            ",\"api_y\":" + std::to_string(api_y) +
-            ",\"engine_api_delta_px\":" + std::to_string(engine_api_delta) +
-            ",\"raw_api_location_delta\":" + std::to_string(raw_api_location_delta) +
-            ",\"raw_api_pitch_delta\":" + std::to_string(raw_api_pitch_delta) +
-            ",\"raw_api_yaw_delta\":" + std::to_string(raw_api_yaw_delta) +
-            ",\"center_deproject_ok\":" + std::string(json_bool(center_ray.ok)) +
-            ",\"center_location_x\":" + std::to_string(center_ray.location.X) +
-            ",\"center_location_y\":" + std::to_string(center_ray.location.Y) +
-            ",\"center_location_z\":" + std::to_string(center_ray.location.Z) +
-            ",\"center_direction_x\":" + std::to_string(center_ray.direction.X) +
-            ",\"center_direction_y\":" + std::to_string(center_ray.direction.Y) +
-            ",\"center_direction_z\":" + std::to_string(center_ray.direction.Z);
-        return response_json(engine_project_ok,
-                             engine_project_ok ? "esp_projection_probe" : "esp_projection_probe_engine_unavailable",
-                             engine_project_ok ? 1 : 0,
-                             engine_project_ok ? 0 : 1,
-                             engine_project_ok
-                                 ? "UE game-thread projection sample captured"
-                                 : "UE game-thread projection was unavailable for the requested point",
-                             metadata);
-    }
-
-    void esp_projection_probe_on_hud_callback()
-    {
-        if (!g_esp_projection_probe_armed.load(std::memory_order_acquire))
-        {
-            return;
-        }
-        EspProjectionProbeJob request{};
-        {
-            std::lock_guard<std::mutex> lock(g_esp_projection_probe_mutex);
-            if (!g_esp_projection_probe.pending)
-            {
-                g_esp_projection_probe_armed.store(false, std::memory_order_release);
-                return;
-            }
-            request = g_esp_projection_probe;
-        }
-
-        const auto response = esp_projection_probe_execute(request);
-        {
-            std::lock_guard<std::mutex> lock(g_esp_projection_probe_mutex);
-            if (g_esp_projection_probe.pending &&
-                g_esp_projection_probe.generation == request.generation)
-            {
-                g_esp_projection_probe.response = response;
-                g_esp_projection_probe.pending = false;
-                g_esp_projection_probe.completed = true;
-                g_esp_projection_probe_armed.store(false, std::memory_order_release);
-            }
-        }
-        g_esp_projection_probe_cv.notify_all();
-    }
-
     void __fastcall hooked_process_event(void* object, void* function, void* params)
     {
         g_active_hook_callbacks.fetch_add(1);
@@ -18761,73 +18290,6 @@ namespace
             }
             __except (EXCEPTION_EXECUTE_HANDLER)
             {
-            }
-        }
-        if (is_esp_hud_draw_callback)
-        {
-            // One authenticated calibration sample is executed after DrawHUD
-            // has populated Canvas. It never draws, writes a UObject, or
-            // remains active after completing its single response.
-            __try
-            {
-                esp_projection_probe_on_hud_callback();
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                // The waiting bridge request reports a bounded callback
-                // timeout instead of risking a fault propagating into DrawHUD.
-            }
-        }
-        if (is_esp_hud_draw_callback &&
-            g_esp_hud_line_probe_enabled.load(std::memory_order_acquire))
-        {
-            const auto canvas = g_esp_hud_observed_canvas.load(std::memory_order_acquire);
-            const auto line_function = g_esp_hud_line_function.load(std::memory_order_acquire);
-            const int params_size = g_esp_hud_line_params_size.load(std::memory_order_acquire);
-            const int start_offset = g_esp_hud_line_start_offset.load(std::memory_order_acquire);
-            const int end_offset = g_esp_hud_line_end_offset.load(std::memory_order_acquire);
-            const int thickness_offset = g_esp_hud_line_thickness_offset.load(std::memory_order_acquire);
-            const int color_offset = g_esp_hud_line_color_offset.load(std::memory_order_acquire);
-            if (live_uobject(canvas) && line_function && params_size > 0 && params_size <= 256 &&
-                start_offset >= 0 && end_offset >= 0 && thickness_offset >= 0 && color_offset >= 0)
-            {
-                __try
-                {
-                    std::uint8_t params[256]{};
-                    const EspHudCanvasVec2 start{24.0, 24.0};
-                    const EspHudCanvasVec2 end{88.0, 24.0};
-                    const EspHudCanvasColor color{0.0f, 1.0f, 0.55f, 1.0f};
-                    const float thickness = 2.0f;
-                    std::memcpy(params + start_offset, &start, sizeof(start));
-                    std::memcpy(params + end_offset, &end, sizeof(end));
-                    std::memcpy(params + thickness_offset, &thickness, sizeof(thickness));
-                    std::memcpy(params + color_offset, &color, sizeof(color));
-                    const auto original_line_target = g_original_process_event.load(std::memory_order_acquire);
-                    if (original_line_target)
-                    {
-                        reinterpret_cast<ProcessEventFn>(original_line_target)(
-                            reinterpret_cast<void*>(canvas),
-                            reinterpret_cast<void*>(line_function),
-                            params);
-                        const auto calls =
-                            g_esp_hud_line_calls.fetch_add(1, std::memory_order_relaxed) + 1;
-                        // The marker exists only to make the renderer route
-                        // visible while we validate it.  Do not leave a
-                        // permanent diagnostic primitive in the player's HUD.
-                        if (calls >= HudLineProbeMaxCalls)
-                        {
-                            g_esp_hud_line_probe_enabled.store(false, std::memory_order_release);
-                        }
-                    }
-                    else
-                    {
-                        g_esp_hud_line_failures.fetch_add(1, std::memory_order_relaxed);
-                    }
-                }
-                __except (EXCEPTION_EXECUTE_HANDLER)
-                {
-                    g_esp_hud_line_failures.fetch_add(1, std::memory_order_relaxed);
-                }
             }
         }
         if (is_esp_hud_draw_callback &&
@@ -19395,9 +18857,9 @@ namespace
         return paint_pipeline_is_quiescent();
     }
 
-    // ESP role classification deliberately has no renderer, ProcessEvent call,
-    // or write path.  The external overlay owns every pixel; this bridge
-    // snapshot only exposes the game's authoritative roster membership.
+    // ESP role classification is independent of rendering. PlayerArray owns
+    // target existence; game-specific role rosters only attach Hider/Hunter
+    // metadata used by the native Present compositor.
     enum class EspSnapshotRole
     {
         Unknown,
@@ -19428,7 +18890,6 @@ namespace
         bool initialized{false};
         std::uintptr_t cached_game_engine{0};
         std::uintptr_t cached_world{0};
-        std::uintptr_t cached_controller{0};
         int game_viewport_offset{-2};
         int viewport_world_offset{-2};
     };
@@ -19442,22 +18903,6 @@ namespace
         case EspSnapshotRole::Spectator: return "spectator";
         default: return "unknown";
         }
-    }
-
-    auto esp_snapshot_role_for_object(Reflection& ref, std::uintptr_t object) -> EspSnapshotRole
-    {
-        if (!live_uobject(object))
-        {
-            return EspSnapshotRole::Unknown;
-        }
-        const auto identity = lower_copy(ref.class_name(object) + "." + ref.object_name(object));
-        const bool hider = contains_text(identity, "hider");
-        const bool hunter = contains_text(identity, "hunter");
-        if (hider == hunter)
-        {
-            return EspSnapshotRole::Unknown;
-        }
-        return hider ? EspSnapshotRole::Hider : EspSnapshotRole::Hunter;
     }
 
     auto esp_snapshot_read_bool_property(Reflection& ref,
@@ -19776,7 +19221,6 @@ namespace
             out.local_pawn = read_object_property_by_names(
                 ref, controller, {"AcknowledgedPawn", "Pawn", "Character"});
             resolver.cached_world = world;
-            resolver.cached_controller = controller;
             return true;
         };
 
@@ -19833,11 +19277,7 @@ namespace
         return true;
     }
 
-    // This is deliberately an inventory only.  It does not install a hook,
-    // call ProcessEvent, create a UCanvas, or write an Unreal property.  The
-    // external overlay has a frame-phase problem; before replacing it with a
-    // game-side renderer we must first prove that this build exposes a stable
-    // HUD/Canvas callback that can own the final-frame draw.
+    // Shared callback metadata used while binding the current DrawHUD route.
     auto esp_hud_probe_object_metadata(Reflection& ref,
                                        std::uintptr_t object,
                                        const char* prefix,
@@ -19874,88 +19314,6 @@ namespace
             }
         }
         return metadata;
-    }
-
-    auto esp_hud_probe_native() -> std::string
-    {
-        static std::mutex resolver_mutex{};
-        static EspSnapshotResolver resolver{};
-        std::lock_guard<std::mutex> lock(resolver_mutex);
-
-        std::string failure{};
-        if (!resolver.initialized)
-        {
-            if (!resolver.reflection.init(failure))
-            {
-                return response_json(false, "esp_hud_probe_reflection_unavailable", 0, 1, failure);
-            }
-            resolver.initialized = true;
-        }
-
-        EspSnapshotContext context{};
-        if (!esp_snapshot_resolve_context(resolver, context, failure))
-        {
-            return response_json(false, "esp_hud_probe_context_unavailable", 0, 1, failure);
-        }
-
-        auto& ref = resolver.reflection;
-        // MyHUD is the standard PlayerController member.  The aliases cover
-        // game subclasses without assuming a particular controller class.
-        const auto hud = read_object_property_by_names(
-            ref, context.controller, {"MyHUD", "HUD", "PlayerHUD"});
-        const auto canvas = read_object_property_by_names(ref, hud, {"Canvas", "DebugCanvas"});
-        const auto debug_canvas = read_object_property_by_names(ref, hud, {"DebugCanvas", "Canvas"});
-        const auto viewport = read_object_property_by_names(
-            ref, context.world, {"GameViewport", "GameViewportClient"});
-
-        int available_functions{};
-        std::string metadata =
-            "\"pid\":" + std::to_string(GetCurrentProcessId()) +
-            ",\"mutation_performed\":false" +
-            ",\"renderer_installed\":false" +
-            ",\"context_world_available\":" + std::string(json_bool(live_uobject(context.world))) +
-            ",\"context_controller_available\":" + std::string(json_bool(live_uobject(context.controller)));
-        metadata += esp_hud_probe_object_metadata(
-            ref, context.controller, "controller", {"GetHUD"}, available_functions);
-        metadata += esp_hud_probe_object_metadata(
-            ref,
-            hud,
-            "hud",
-            {"ReceiveDrawHUD", "DrawHUD", "PostRender", "ReceivePostRender"},
-            available_functions);
-        metadata += esp_hud_probe_object_metadata(
-            ref,
-            canvas,
-            "canvas",
-            {"K2_DrawLine", "K2_DrawText", "DrawLine", "DrawText", "Project"},
-            available_functions);
-        metadata += esp_hud_probe_object_metadata(
-            ref,
-            debug_canvas,
-            "debug_canvas",
-            {"K2_DrawLine", "K2_DrawText", "DrawLine", "DrawText", "Project"},
-            available_functions);
-        metadata += esp_hud_probe_object_metadata(
-            ref, viewport, "viewport", {"Draw", "PostRender"}, available_functions);
-        metadata += ",\"available_functions\":" + std::to_string(available_functions);
-
-        const bool render_callback_available =
-            live_uobject(hud) &&
-            (ref.find_function(hud, "ReceiveDrawHUD") ||
-             ref.find_function(hud, "DrawHUD") ||
-             ref.find_function(hud, "PostRender") ||
-             ref.find_function(hud, "ReceivePostRender"));
-        metadata += ",\"render_callback_available\":" +
-                    std::string(json_bool(render_callback_available));
-
-        return response_json(true,
-                             "esp_hud_probe",
-                             available_functions,
-                             0,
-                             render_callback_available
-                                 ? "HUD draw route inventory complete"
-                                 : "HUD draw route is not available yet",
-                             metadata);
     }
 
     auto esp_hud_callback_probe_native() -> std::string
@@ -20084,1182 +19442,6 @@ namespace
                                  ? "HUD callback Canvas observed"
                                  : "HUD callback hook installed; waiting for Canvas",
                              metadata);
-    }
-
-    auto esp_projection_probe_native(const std::string& request) -> std::string
-    {
-        const auto missing = std::numeric_limits<double>::quiet_NaN();
-        const sdk::FVector world{
-            json_number_field(request, "world_x", missing),
-            json_number_field(request, "world_y", missing),
-            json_number_field(request, "world_z", missing)};
-        if (!esp_projection_probe_finite(world))
-        {
-            return response_json(false,
-                                 "esp_projection_probe_world_invalid",
-                                 0,
-                                 1,
-                                 "ESP projection probe requires one finite world-space point",
-                                 "\"mutation_performed\":false");
-        }
-
-        // Resolve the exact local controller before arming the callback. This
-        // has no renderer side effect; it only makes the existing HUD callback
-        // observable long enough to capture one post-DrawHUD sample.
-        std::uintptr_t controller{};
-        {
-            static std::mutex resolver_mutex{};
-            static EspSnapshotResolver resolver{};
-            std::lock_guard<std::mutex> lock(resolver_mutex);
-            std::string failure{};
-            if (!resolver.initialized)
-            {
-                if (!resolver.reflection.init(failure))
-                {
-                    return response_json(false,
-                                         "esp_projection_probe_reflection_unavailable",
-                                         0,
-                                         1,
-                                         failure.empty() ? "UE reflection is unavailable" : failure,
-                                         "\"mutation_performed\":false");
-                }
-                resolver.initialized = true;
-            }
-            EspSnapshotContext context{};
-            if (!esp_snapshot_resolve_context(resolver, context, failure) ||
-                !live_uobject(context.controller))
-            {
-                return response_json(false,
-                                     "esp_projection_probe_context_unavailable",
-                                     0,
-                                     1,
-                                     failure.empty() ? "the local PlayerController is unavailable" : failure,
-                                     "\"mutation_performed\":false");
-            }
-            controller = context.controller;
-        }
-
-        // The callback setup installs no renderer and does not draw the HUD.
-        // It is idempotent and refreshes naturally when a map replaces AHUD.
-        (void)esp_hud_callback_probe_native();
-        if (!g_esp_hud_callback_target.load(std::memory_order_acquire) ||
-            !g_esp_hud_callback_function.load(std::memory_order_acquire))
-        {
-            return response_json(false,
-                                 "esp_projection_probe_callback_unavailable",
-                                 0,
-                                 1,
-                                 "the current HUD DrawHUD callback is unavailable",
-                                 "\"mutation_performed\":false");
-        }
-
-        std::unique_lock<std::mutex> lock(g_esp_projection_probe_mutex);
-        if (g_esp_projection_probe.pending)
-        {
-            return response_json(false,
-                                 "esp_projection_probe_busy",
-                                 0,
-                                 1,
-                                 "a previous ESP projection sample is still waiting for DrawHUD",
-                                 "\"mutation_performed\":false");
-        }
-        const auto generation = g_esp_projection_probe.generation + 1;
-        g_esp_projection_probe = {};
-        g_esp_projection_probe.generation = generation;
-        g_esp_projection_probe.pending = true;
-        g_esp_projection_probe.world = world;
-        g_esp_projection_probe.controller = controller;
-        g_esp_projection_probe_armed.store(true, std::memory_order_release);
-
-        const bool completed = g_esp_projection_probe_cv.wait_for(
-            lock,
-            std::chrono::seconds(2),
-            [generation]() {
-                return g_esp_projection_probe.generation == generation &&
-                       g_esp_projection_probe.completed;
-            });
-        if (!completed)
-        {
-            if (g_esp_projection_probe.generation == generation)
-            {
-                g_esp_projection_probe.pending = false;
-                g_esp_projection_probe_armed.store(false, std::memory_order_release);
-            }
-            return response_json(false,
-                                 "esp_projection_probe_callback_timeout",
-                                 0,
-                                 1,
-                                 "DrawHUD did not provide a projection sample within two seconds",
-                                 "\"mutation_performed\":false,\"callback_phase\":\"post_drawhud\"");
-        }
-        return g_esp_projection_probe.response;
-    }
-
-    auto esp_hud_line_param_offset(Reflection& ref,
-                                   std::uintptr_t function,
-                                   std::initializer_list<const char*> names,
-                                   int expected_size) -> int
-    {
-        for (auto prop = safe_read<std::uintptr_t>(function + OffChildProperties);
-             prop;
-             prop = safe_read<std::uintptr_t>(prop + OffFFieldNext))
-        {
-            const auto property_name = lower_copy(ref.names.resolve(safe_read<std::uint32_t>(prop + OffFFieldName)));
-            if (property_name == "returnvalue" || prop_element_size(prop) != expected_size)
-            {
-                continue;
-            }
-            for (const auto* candidate : names)
-            {
-                if (candidate && property_name == lower_copy(candidate))
-                {
-                    return prop_offset(prop);
-                }
-            }
-        }
-        return -1;
-    }
-
-    auto esp_hud_line_probe_native() -> std::string
-    {
-        static std::mutex resolver_mutex{};
-        static EspSnapshotResolver resolver{};
-        std::lock_guard<std::mutex> lock(resolver_mutex);
-
-        std::string failure{};
-        if (!resolver.initialized)
-        {
-            if (!resolver.reflection.init(failure))
-            {
-                return response_json(false, "esp_hud_line_probe_reflection_unavailable", 0, 1, failure);
-            }
-            resolver.initialized = true;
-        }
-
-        const auto canvas = g_esp_hud_observed_canvas.load(std::memory_order_acquire);
-        if (!live_uobject(canvas))
-        {
-            return response_json(false,
-                                 "esp_hud_line_probe_canvas_unavailable",
-                                 0,
-                                 1,
-                                 "HUD Canvas has not been observed in a draw callback");
-        }
-
-        auto& ref = resolver.reflection;
-        const auto function = ref.find_function(canvas, "K2_DrawLine");
-        if (!function)
-        {
-            return response_json(false,
-                                 "esp_hud_line_probe_function_unavailable",
-                                 0,
-                                 1,
-                                 "Canvas has no K2_DrawLine function");
-        }
-        const int params_size = safe_read<int>(function + OffPropertiesSize, 0);
-        const int start_offset = esp_hud_line_param_offset(
-            ref, function, {"ScreenPositionA", "PositionA", "Start"}, static_cast<int>(sizeof(EspHudCanvasVec2)));
-        const int end_offset = esp_hud_line_param_offset(
-            ref, function, {"ScreenPositionB", "PositionB", "End"}, static_cast<int>(sizeof(EspHudCanvasVec2)));
-        const int thickness_offset = esp_hud_line_param_offset(
-            ref, function, {"Thickness"}, static_cast<int>(sizeof(float)));
-        const int color_offset = esp_hud_line_param_offset(
-            ref, function, {"RenderColor", "Color"}, static_cast<int>(sizeof(EspHudCanvasColor)));
-        constexpr int MaxHudLineParams = 256;
-        const auto range_valid = [params_size](int offset, int size) {
-            return offset >= 0 && offset <= params_size - size;
-        };
-        if (params_size <= 0 || params_size > MaxHudLineParams ||
-            !range_valid(start_offset, static_cast<int>(sizeof(EspHudCanvasVec2))) ||
-            !range_valid(end_offset, static_cast<int>(sizeof(EspHudCanvasVec2))) ||
-            !range_valid(thickness_offset, static_cast<int>(sizeof(float))) ||
-            !range_valid(color_offset, static_cast<int>(sizeof(EspHudCanvasColor))))
-        {
-            return response_json(false,
-                                 "esp_hud_line_probe_schema_unavailable",
-                                 0,
-                                 1,
-                                 "Canvas K2_DrawLine schema is not safe for a fixed marker");
-        }
-
-        g_esp_hud_line_function.store(function, std::memory_order_release);
-        g_esp_hud_line_params_size.store(params_size, std::memory_order_release);
-        g_esp_hud_line_start_offset.store(start_offset, std::memory_order_release);
-        g_esp_hud_line_end_offset.store(end_offset, std::memory_order_release);
-        g_esp_hud_line_thickness_offset.store(thickness_offset, std::memory_order_release);
-        g_esp_hud_line_color_offset.store(color_offset, std::memory_order_release);
-        g_esp_hud_line_probe_enabled.store(true, std::memory_order_release);
-
-        const auto calls = g_esp_hud_line_calls.load(std::memory_order_acquire);
-        const auto failures = g_esp_hud_line_failures.load(std::memory_order_acquire);
-        return response_json(true,
-                             "esp_hud_line_probe",
-                             static_cast<int>(std::min<std::uint64_t>(calls, INT_MAX)),
-                             0,
-                             calls > 0 ? "HUD Canvas fixed marker was dispatched" : "HUD Canvas fixed marker is armed",
-                             "\"pid\":" + std::to_string(GetCurrentProcessId()) +
-                                 ",\"renderer_installed\":false" +
-                                 ",\"line_probe_enabled\":true" +
-                                 ",\"line_calls\":" + std::to_string(calls) +
-                                 ",\"line_failures\":" + std::to_string(failures) +
-                                 ",\"marker\":\"green_line_24_24_to_88_24\"");
-    }
-
-    // Native HUD geometry uses the same verified camera and skeleton layouts
-    // as the old reader, but samples and renders inside AHUD's draw callback.
-    // There is consequently no external-window Present phase to drift from.
-    struct EspHudRendererView
-    {
-        sdk::FVector location{};
-        sdk::FRotator rotation{};
-        float fov{0.0f};
-        float desired_fov{0.0f};
-    };
-    static_assert(sizeof(EspHudRendererView) == 0x38, "ESP view layout mismatch");
-
-    struct EspHudRendererPoint
-    {
-        double x{0.0};
-        double y{0.0};
-    };
-
-    constexpr std::array<std::pair<int, int>, 20> EspHudSkeletonPairs{{
-        {2, 3}, {3, 4}, {4, 5}, {5, 6},
-        {5, 8}, {8, 9}, {9, 10}, {10, 11},
-        {5, 13}, {13, 14}, {14, 15}, {15, 16},
-        {2, 18}, {18, 19}, {19, 20}, {20, 21},
-        {2, 23}, {23, 24}, {24, 25}, {25, 26},
-    }};
-    constexpr int EspHudBoneCount = 28;
-    constexpr int EspHudSpine1Bone = 2;
-    constexpr int EspHudChestBone = 5;
-    constexpr int EspHudHeadBone = 6;
-
-    auto esp_hud_renderer_finite(const sdk::FVector& value) -> bool
-    {
-        return std::isfinite(value.X) && std::isfinite(value.Y) && std::isfinite(value.Z) &&
-               std::abs(value.X) < 1.0e8 && std::abs(value.Y) < 1.0e8 && std::abs(value.Z) < 1.0e8;
-    }
-
-    auto esp_hud_renderer_normalize(const sdk::FVector& value) -> sdk::FVector
-    {
-        const auto length = std::sqrt(value.X * value.X + value.Y * value.Y + value.Z * value.Z);
-        return !std::isfinite(length) || length <= 0.000001
-                   ? sdk::FVector{}
-                   : sdk::FVector{value.X / length, value.Y / length, value.Z / length};
-    }
-
-    auto esp_hud_renderer_dot(const sdk::FVector& left, const sdk::FVector& right) -> double
-    {
-        return left.X * right.X + left.Y * right.Y + left.Z * right.Z;
-    }
-
-    auto esp_hud_renderer_project(const EspHudRendererView& view,
-                                  const sdk::FVector& world,
-                                  int width,
-                                  int height,
-                                  EspHudRendererPoint& screen) -> bool
-    {
-        screen = {};
-        if (width <= 0 || height <= 0 || !esp_hud_renderer_finite(view.location) ||
-            !esp_hud_renderer_finite(world) || !std::isfinite(view.rotation.Pitch) ||
-            !std::isfinite(view.rotation.Yaw) || !std::isfinite(view.fov) ||
-            view.fov < 20.0f || view.fov > 170.0f)
-        {
-            return false;
-        }
-        constexpr double radians = 3.14159265358979323846 / 180.0;
-        const auto pitch = view.rotation.Pitch * radians;
-        const auto yaw = view.rotation.Yaw * radians;
-        const auto yaw_y = (view.rotation.Yaw + 89.8) * radians;
-        const auto pitch_z = (view.rotation.Pitch + 89.8) * radians;
-        const auto axis_x = esp_hud_renderer_normalize(
-            {std::cos(yaw) * std::cos(pitch), std::sin(yaw) * std::cos(pitch), std::sin(pitch)});
-        const auto axis_y = esp_hud_renderer_normalize({std::cos(yaw_y), std::sin(yaw_y), 0.0});
-        const auto axis_z = esp_hud_renderer_normalize(
-            {std::cos(yaw) * std::cos(pitch_z), std::sin(yaw) * std::cos(pitch_z), std::sin(pitch_z)});
-        const sdk::FVector delta{world.X - view.location.X, world.Y - view.location.Y, world.Z - view.location.Z};
-        const auto transformed_x = esp_hud_renderer_dot(delta, axis_y);
-        const auto transformed_y = esp_hud_renderer_dot(delta, axis_z);
-        const auto transformed_z = esp_hud_renderer_dot(delta, axis_x);
-        if (!std::isfinite(transformed_z) || transformed_z < 1.0)
-        {
-            return false;
-        }
-        const auto tangent = std::tan(static_cast<double>(view.fov) * radians / 2.0);
-        if (!std::isfinite(tangent) || std::abs(tangent) < 0.0001)
-        {
-            return false;
-        }
-        const auto focal = (static_cast<double>(width) / 2.0) / tangent;
-        screen = {static_cast<double>(width) / 2.0 + transformed_x * focal / transformed_z,
-                  static_cast<double>(height) / 2.0 - transformed_y * focal / transformed_z};
-        return std::isfinite(screen.x) && std::isfinite(screen.y);
-    }
-
-    auto esp_hud_renderer_color() -> EspHudCanvasColor
-    {
-        const auto rgb = g_esp_hud_renderer_color.load(std::memory_order_acquire);
-        return {static_cast<float>((rgb >> 16) & 0xFFu) / 255.0f,
-                static_cast<float>((rgb >> 8) & 0xFFu) / 255.0f,
-                static_cast<float>(rgb & 0xFFu) / 255.0f,
-                1.0f};
-    }
-
-    auto esp_hud_renderer_color(std::uint32_t rgb) -> EspHudCanvasColor
-    {
-        return {static_cast<float>((rgb >> 16) & 0xFFu) / 255.0f,
-                static_cast<float>((rgb >> 8) & 0xFFu) / 255.0f,
-                static_cast<float>(rgb & 0xFFu) / 255.0f,
-                1.0f};
-    }
-
-    auto esp_hud_renderer_role_from_name(const std::string& value) -> EspHudRendererRole
-    {
-        const auto normalized = lower_copy(value);
-        if (normalized == "hider") return EspHudRendererRole::Hider;
-        if (normalized == "hunter") return EspHudRendererRole::Hunter;
-        if (normalized == "spectator") return EspHudRendererRole::Spectator;
-        return EspHudRendererRole::Unknown;
-    }
-
-    auto esp_hud_renderer_scope_from_name(const std::string& value) -> EspHudRendererScope
-    {
-        const auto normalized = lower_copy(value);
-        if (normalized == "enemy") return EspHudRendererScope::Enemy;
-        if (normalized == "ally") return EspHudRendererScope::Ally;
-        return EspHudRendererScope::All;
-    }
-
-    auto esp_hud_renderer_is_enemy(EspHudRendererRole local, EspHudRendererRole target) -> bool
-    {
-        if (local == EspHudRendererRole::Hider)
-        {
-            return target == EspHudRendererRole::Hunter;
-        }
-        if (local == EspHudRendererRole::Hunter)
-        {
-            return target == EspHudRendererRole::Hider;
-        }
-        return target == EspHudRendererRole::Hunter;
-    }
-
-    auto esp_hud_renderer_draw_line(std::uintptr_t canvas,
-                                    const EspHudRendererPoint& start,
-                                    const EspHudRendererPoint& end,
-                                    const EspHudCanvasColor& color,
-                                    float thickness = 1.75f) -> bool
-    {
-        const auto function = g_esp_hud_line_function.load(std::memory_order_acquire);
-        const int params_size = g_esp_hud_line_params_size.load(std::memory_order_acquire);
-        const int start_offset = g_esp_hud_line_start_offset.load(std::memory_order_acquire);
-        const int end_offset = g_esp_hud_line_end_offset.load(std::memory_order_acquire);
-        const int thickness_offset = g_esp_hud_line_thickness_offset.load(std::memory_order_acquire);
-        const int color_offset = g_esp_hud_line_color_offset.load(std::memory_order_acquire);
-        const auto original = g_original_process_event.load(std::memory_order_acquire);
-        if (!live_uobject(canvas) || !function || !original || params_size <= 0 || params_size > 256 ||
-            start_offset < 0 || end_offset < 0 || thickness_offset < 0 || color_offset < 0 ||
-            start_offset > params_size - static_cast<int>(sizeof(EspHudCanvasVec2)) ||
-            end_offset > params_size - static_cast<int>(sizeof(EspHudCanvasVec2)) ||
-            thickness_offset > params_size - static_cast<int>(sizeof(float)) ||
-            color_offset > params_size - static_cast<int>(sizeof(EspHudCanvasColor)))
-        {
-            return false;
-        }
-        std::uint8_t line_params[256]{};
-        const EspHudCanvasVec2 line_start{start.x, start.y};
-        const EspHudCanvasVec2 line_end{end.x, end.y};
-        std::memcpy(line_params + start_offset, &line_start, sizeof(line_start));
-        std::memcpy(line_params + end_offset, &line_end, sizeof(line_end));
-        std::memcpy(line_params + thickness_offset, &thickness, sizeof(thickness));
-        std::memcpy(line_params + color_offset, &color, sizeof(color));
-        reinterpret_cast<ProcessEventFn>(original)(reinterpret_cast<void*>(canvas),
-                                                   reinterpret_cast<void*>(function),
-                                                   line_params);
-        g_esp_hud_renderer_draw_calls.fetch_add(1, std::memory_order_relaxed);
-        return true;
-    }
-
-    auto esp_hud_renderer_draw_text(std::uintptr_t canvas,
-                                    const EspHudRendererPoint& position,
-                                    const std::wstring& text,
-                                    const EspHudCanvasColor& color) -> bool
-    {
-        constexpr int MaxHudTextParams = 512;
-        const auto function = g_esp_hud_text_function.load(std::memory_order_acquire);
-        const auto font = g_esp_hud_text_font.load(std::memory_order_acquire);
-        const int params_size = g_esp_hud_text_params_size.load(std::memory_order_acquire);
-        const int font_offset = g_esp_hud_text_font_offset.load(std::memory_order_acquire);
-        const int string_offset = g_esp_hud_text_string_offset.load(std::memory_order_acquire);
-        const int position_offset = g_esp_hud_text_position_offset.load(std::memory_order_acquire);
-        const int scale_offset = g_esp_hud_text_scale_offset.load(std::memory_order_acquire);
-        const int color_offset = g_esp_hud_text_color_offset.load(std::memory_order_acquire);
-        const int kerning_offset = g_esp_hud_text_kerning_offset.load(std::memory_order_acquire);
-        const int shadow_color_offset = g_esp_hud_text_shadow_color_offset.load(std::memory_order_acquire);
-        const int shadow_offset = g_esp_hud_text_shadow_offset.load(std::memory_order_acquire);
-        const int center_x_offset = g_esp_hud_text_center_x_offset.load(std::memory_order_acquire);
-        const auto center_x_mask = g_esp_hud_text_center_x_mask.load(std::memory_order_acquire);
-        const auto original = g_original_process_event.load(std::memory_order_acquire);
-        const auto fits = [params_size](int offset, int size) {
-            return offset >= 0 && offset <= params_size - size;
-        };
-        if (!live_uobject(canvas) || !live_uobject(font) || !function || !original || text.empty() ||
-            params_size <= 0 || params_size > MaxHudTextParams ||
-            !fits(font_offset, static_cast<int>(sizeof(std::uintptr_t))) ||
-            !fits(string_offset, static_cast<int>(sizeof(ScriptStringParam))) ||
-            !fits(position_offset, static_cast<int>(sizeof(EspHudCanvasVec2))) ||
-            !fits(scale_offset, static_cast<int>(sizeof(EspHudCanvasVec2))) ||
-            !fits(color_offset, static_cast<int>(sizeof(EspHudCanvasColor))) ||
-            !fits(kerning_offset, static_cast<int>(sizeof(float))) ||
-            !fits(shadow_color_offset, static_cast<int>(sizeof(EspHudCanvasColor))) ||
-            !fits(shadow_offset, static_cast<int>(sizeof(EspHudCanvasVec2))) ||
-            !fits(center_x_offset, static_cast<int>(sizeof(std::uint8_t))) || center_x_mask == 0)
-        {
-            return false;
-        }
-
-        std::uint8_t text_params[MaxHudTextParams]{};
-        const EspHudCanvasVec2 screen_position{position.x, position.y};
-        const EspHudCanvasVec2 scale{1.0, 1.0};
-        const EspHudCanvasVec2 shadow_displacement{1.0, 1.0};
-        const EspHudCanvasColor shadow_color{0.0f, 0.0f, 0.0f, 0.9f};
-        const float kerning = 0.0f;
-        const ScriptStringParam string{const_cast<wchar_t*>(text.data()),
-                                       static_cast<int>(text.size()) + 1,
-                                       static_cast<int>(text.size()) + 1};
-        std::memcpy(text_params + font_offset, &font, sizeof(font));
-        std::memcpy(text_params + string_offset, &string, sizeof(string));
-        std::memcpy(text_params + position_offset, &screen_position, sizeof(screen_position));
-        std::memcpy(text_params + scale_offset, &scale, sizeof(scale));
-        std::memcpy(text_params + color_offset, &color, sizeof(color));
-        std::memcpy(text_params + kerning_offset, &kerning, sizeof(kerning));
-        std::memcpy(text_params + shadow_color_offset, &shadow_color, sizeof(shadow_color));
-        std::memcpy(text_params + shadow_offset, &shadow_displacement, sizeof(shadow_displacement));
-        *(text_params + center_x_offset) |= center_x_mask;
-        reinterpret_cast<ProcessEventFn>(original)(reinterpret_cast<void*>(canvas),
-                                                   reinterpret_cast<void*>(function),
-                                                   text_params);
-        g_esp_hud_renderer_draw_calls.fetch_add(1, std::memory_order_relaxed);
-        return true;
-    }
-
-    auto esp_hud_renderer_read_bones(std::uintptr_t pawn,
-                                     std::array<sdk::FVector, EspHudBoneCount>& bones) -> bool
-    {
-        const auto mesh = safe_read<std::uintptr_t>(pawn + 0x418, 0);
-        if (!live_uobject(mesh))
-        {
-            return false;
-        }
-        auto transforms = safe_read<sdk::TArray<sdk::FTransform>>(mesh + 0x9B8);
-        if (!transforms.Data || transforms.Num < EspHudBoneCount || transforms.Max < transforms.Num || transforms.Max > 256)
-        {
-            transforms = safe_read<sdk::TArray<sdk::FTransform>>(mesh + 0x5F0);
-        }
-        if (!transforms.Data || transforms.Num < EspHudBoneCount || transforms.Max < transforms.Num || transforms.Max > 256)
-        {
-            return false;
-        }
-        sdk::FTransform component{};
-        if (!safe_copy(&component, reinterpret_cast<const void*>(mesh + 0x1E0), sizeof(component)) ||
-            !sdk::transform_is_plausible(component))
-        {
-            return false;
-        }
-        for (int index = 0; index < EspHudBoneCount; ++index)
-        {
-            sdk::FTransform bone{};
-            const auto address = reinterpret_cast<std::uintptr_t>(transforms.Data) +
-                                 static_cast<std::uintptr_t>(index) * sizeof(sdk::FTransform);
-            if (!safe_copy(&bone, reinterpret_cast<const void*>(address), sizeof(bone)) ||
-                !sdk::transform_is_plausible(bone))
-            {
-                return false;
-            }
-            bones[static_cast<std::size_t>(index)] = mesh_first_transform_apply_point(component, bone.Translation);
-            if (!esp_hud_renderer_finite(bones[static_cast<std::size_t>(index)]))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    auto esp_hud_renderer_draw_corner_box(std::uintptr_t canvas,
-                                          const EspHudRendererPoint& pelvis,
-                                          const EspHudRendererPoint& chest,
-                                          const EspHudRendererPoint& head,
-                                          const EspHudCanvasColor& color,
-                                          int width,
-                                          int height) -> bool
-    {
-        const auto distance = [](const EspHudRendererPoint& left, const EspHudRendererPoint& right) {
-            const auto x = left.x - right.x;
-            const auto y = left.y - right.y;
-            return std::sqrt(x * x + y * y);
-        };
-        const auto torso_unit = std::max(distance(pelvis, chest), distance(chest, head));
-        if (!std::isfinite(torso_unit) || torso_unit < 2.0)
-        {
-            return false;
-        }
-        const auto top = std::min(head.y, chest.y) - torso_unit * 0.12;
-        const auto bottom = std::max(pelvis.y, chest.y) + torso_unit * 2.4;
-        const auto box_height = bottom - top;
-        const auto box_width = std::max(6.0, box_height * 0.44);
-        const auto center_x = (pelvis.x + chest.x + head.x) / 3.0;
-        if (!std::isfinite(top) || !std::isfinite(bottom) || !std::isfinite(center_x) ||
-            box_height <= 1.0 || box_width >= width || box_height >= height * 2.0)
-        {
-            return false;
-        }
-        const auto left = center_x - box_width / 2.0;
-        const auto right = center_x + box_width / 2.0;
-        const auto horizontal = std::min(std::max(2.0, std::min(box_width * 0.28, box_height * 0.18)), box_width / 2.0);
-        const auto vertical = std::min(std::max(2.0, std::min(box_height * 0.18, box_width * 0.42)), box_height / 2.0);
-        const auto corner = [&](double x, double y, double horizontal_direction, double vertical_direction) {
-            bool drew = false;
-            drew = esp_hud_renderer_draw_line(canvas, {x + horizontal * horizontal_direction, y}, {x, y}, color) || drew;
-            drew = esp_hud_renderer_draw_line(canvas, {x, y}, {x, y + vertical * vertical_direction}, color) || drew;
-            return drew;
-        };
-        bool drew = false;
-        drew = corner(left, top, 1.0, 1.0) || drew;
-        drew = corner(right, top, -1.0, 1.0) || drew;
-        drew = corner(left, bottom, 1.0, -1.0) || drew;
-        drew = corner(right, bottom, -1.0, -1.0) || drew;
-        return drew;
-    }
-
-    auto esp_roles_snapshot_native() -> std::string
-    {
-        static std::mutex resolver_mutex{};
-        static EspSnapshotResolver resolver{};
-        std::lock_guard<std::mutex> lock(resolver_mutex);
-
-        std::string failure{};
-        if (!resolver.initialized)
-        {
-            if (!resolver.reflection.init(failure))
-            {
-                return response_json(false, "esp_roles_reflection_unavailable", 0, 1, failure);
-            }
-            resolver.initialized = true;
-        }
-
-        EspSnapshotContext context{};
-        if (!esp_snapshot_resolve_context(resolver, context, failure))
-        {
-            return response_json(false, "esp_roles_context_unavailable", 0, 1, failure);
-        }
-        const auto game_state = read_object_property_by_names(
-            resolver.reflection, context.world, {"GameState", "GameStatePrivate"});
-        if (!live_uobject(game_state))
-        {
-            return response_json(false, "esp_roles_game_state_unavailable", 0, 1, "GameState is unavailable");
-        }
-
-        std::vector<EspSnapshotTarget> hiders{};
-        std::vector<EspSnapshotTarget> hunters{};
-        const bool hider_roster = esp_snapshot_collect_roster(
-            resolver.reflection,
-            game_state,
-            EspSnapshotRole::Hider,
-            {"Survivors", "LiveSurvivors_PlayerState", "Hiders", "HiderPlayers", "HiderPlayerStates", "HiderPawns", "HiderCharacters", "CurrentHider"},
-            hiders);
-        const bool hunter_roster = esp_snapshot_collect_roster(
-            resolver.reflection,
-            game_state,
-            EspSnapshotRole::Hunter,
-            {"Hunters", "HuntersPlayerState", "HunterPlayers", "HunterPlayerStates", "HunterPawns", "HunterCharacters", "CurrentHunter"},
-            hunters);
-        const bool lobby_fallback = !hider_roster && !hunter_roster;
-        std::vector<EspSnapshotTarget> targets{};
-        if (lobby_fallback)
-        {
-            (void)esp_snapshot_collect_roster(
-                resolver.reflection, game_state, EspSnapshotRole::Unknown, {"PlayerArray"}, targets);
-        }
-        else
-        {
-            targets.insert(targets.end(), hiders.begin(), hiders.end());
-            targets.insert(targets.end(), hunters.begin(), hunters.end());
-        }
-
-        auto role_for_local = esp_snapshot_role_for_object(resolver.reflection, context.local_pawn);
-        if (role_for_local == EspSnapshotRole::Unknown)
-        {
-            role_for_local = esp_snapshot_role_for_object(resolver.reflection, context.local_player_state);
-        }
-        if (role_for_local == EspSnapshotRole::Unknown)
-        {
-            for (const auto& target : targets)
-            {
-                if (target.player_state == context.local_player_state || target.pawn == context.local_pawn)
-                {
-                    role_for_local = target.role;
-                    break;
-                }
-            }
-        }
-        bool spectator{};
-        const bool spectator_known =
-            esp_snapshot_read_bool_property(resolver.reflection,
-                                            context.local_player_state,
-                                            {"bIsSpectator", "bOnlySpectator", "bIsSpectatorOnly"},
-                                            spectator) ||
-            esp_snapshot_read_bool_property(resolver.reflection,
-                                            context.controller,
-                                            {"bIsSpectator", "bOnlySpectator", "bIsSpectatorOnly"},
-                                            spectator);
-        if (spectator_known && spectator)
-        {
-            role_for_local = EspSnapshotRole::Spectator;
-        }
-
-        std::unordered_map<std::uintptr_t, EspSnapshotTarget> by_player_state{};
-        for (const auto& target : targets)
-        {
-            if (live_uobject(target.player_state))
-            {
-                const auto [found, inserted] = by_player_state.emplace(target.player_state, target);
-                if (!inserted)
-                {
-                    if (found->second.role == EspSnapshotRole::Unknown &&
-                        target.role != EspSnapshotRole::Unknown)
-                    {
-                        found->second.role = target.role;
-                    }
-                    if (found->second.name.empty() && !target.name.empty())
-                    {
-                        found->second.name = target.name;
-                    }
-                }
-            }
-        }
-        std::vector<std::pair<std::uintptr_t, EspSnapshotTarget>> ordered{};
-        ordered.reserve(by_player_state.size());
-        for (const auto& [player_state, target] : by_player_state)
-        {
-            ordered.emplace_back(player_state, target);
-        }
-        std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) {
-            return left.first < right.first;
-        });
-        std::string roles{"["};
-        for (std::size_t index = 0; index < ordered.size(); ++index)
-        {
-            if (index > 0)
-            {
-                roles += ',';
-            }
-            roles += "{\"player_state\":\"" + hex_address(ordered[index].first) +
-                     "\",\"role\":\"" + esp_snapshot_role_name(ordered[index].second.role) +
-                     "\",\"name\":\"" + json_escape(ordered[index].second.name) + "\"}";
-        }
-        roles += ']';
-        const std::string metadata =
-            "\"pid\":" + std::to_string(GetCurrentProcessId()) +
-            ",\"local_role\":\"" + esp_snapshot_role_name(role_for_local) + "\"" +
-            ",\"spectator_known\":" + std::string(json_bool(spectator_known)) +
-            ",\"lobby_fallback\":" + std::string(json_bool(lobby_fallback)) +
-            ",\"roles\":" + roles;
-        return response_json(true,
-                             "esp_roles",
-                             static_cast<int>(ordered.size()),
-                             0,
-                             "ESP roles resolved",
-                             metadata);
-    }
-
-    void esp_hud_renderer_draw_frame_impl(void* hud)
-    {
-        g_esp_hud_renderer_frames.fetch_add(1, std::memory_order_relaxed);
-            const auto world = g_esp_hud_renderer_world.load(std::memory_order_acquire);
-            const auto controller = g_esp_hud_renderer_controller.load(std::memory_order_acquire);
-            const auto canvas_offset = g_esp_hud_canvas_offset.load(std::memory_order_acquire);
-            const auto canvas = canvas_offset >= 0
-                                    ? safe_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(hud) +
-                                                                 static_cast<std::uintptr_t>(canvas_offset),
-                                                                0)
-                                    : 0;
-            const int canvas_size_x_offset =
-                g_esp_hud_renderer_canvas_size_x_offset.load(std::memory_order_acquire);
-            const int canvas_size_y_offset =
-                g_esp_hud_renderer_canvas_size_y_offset.load(std::memory_order_acquire);
-            if (!live_uobject(world) || !live_uobject(controller) || !live_uobject(canvas) ||
-                canvas_size_x_offset < 0 || canvas_size_y_offset < 0)
-            {
-                g_esp_hud_renderer_failures.fetch_add(1, std::memory_order_relaxed);
-                return;
-            }
-            const int width = safe_read<std::int32_t>(
-                canvas + static_cast<std::uintptr_t>(canvas_size_x_offset), 0);
-            const int height = safe_read<std::int32_t>(
-                canvas + static_cast<std::uintptr_t>(canvas_size_y_offset), 0);
-            if (width <= 0 || height <= 0 || width > 16384 || height > 16384)
-            {
-                g_esp_hud_renderer_failures.fetch_add(1, std::memory_order_relaxed);
-                return;
-            }
-            const auto camera_manager = safe_read<std::uintptr_t>(controller + 0x360, 0);
-            EspHudRendererView view{};
-            if (!live_uobject(camera_manager) ||
-                !safe_copy(&view, reinterpret_cast<const void*>(camera_manager + 0x1540), sizeof(view)))
-            {
-                g_esp_hud_renderer_failures.fetch_add(1, std::memory_order_relaxed);
-                return;
-            }
-            const auto game_state = safe_read<std::uintptr_t>(world + 0x1B0, 0);
-            const auto player_array = safe_read<sdk::TArray<std::uintptr_t>>(game_state + 0x2C0);
-            if (!live_uobject(game_state) || !player_array.Data || player_array.Num < 1 || player_array.Num > 128 ||
-                player_array.Max < player_array.Num || player_array.Max > 256)
-            {
-                g_esp_hud_renderer_failures.fetch_add(1, std::memory_order_relaxed);
-                return;
-            }
-            auto local_pawn = safe_read<std::uintptr_t>(controller + 0x350, 0);
-            if (!live_uobject(local_pawn))
-            {
-                local_pawn = safe_read<std::uintptr_t>(controller + 0x2E8, 0);
-            }
-            g_esp_hud_renderer_local_pawn.store(local_pawn, std::memory_order_release);
-            const bool draw_boxes = g_esp_hud_renderer_boxes.load(std::memory_order_acquire);
-            const bool draw_skeletons = g_esp_hud_renderer_skeletons.load(std::memory_order_acquire);
-            const bool draw_names = g_esp_hud_renderer_names.load(std::memory_order_acquire);
-            const bool draw_distance = g_esp_hud_renderer_distance.load(std::memory_order_acquire);
-            const bool draw_snaplines = g_esp_hud_renderer_snaplines.load(std::memory_order_acquire);
-            const auto local_role = static_cast<EspHudRendererRole>(
-                g_esp_hud_renderer_local_role.load(std::memory_order_acquire));
-            const auto scope = static_cast<EspHudRendererScope>(
-                g_esp_hud_renderer_scope.load(std::memory_order_acquire));
-            for (int index = 0; index < player_array.Num; ++index)
-            {
-                const auto player_state = safe_read<std::uintptr_t>(
-                    reinterpret_cast<std::uintptr_t>(player_array.Data) + static_cast<std::uintptr_t>(index) * sizeof(std::uintptr_t),
-                    0);
-                const auto pawn = safe_read<std::uintptr_t>(player_state + 0x320, 0);
-                if (!live_uobject(player_state) || !live_uobject(pawn) || pawn == local_pawn)
-                {
-                    continue;
-                }
-                EspHudRendererRole target_role{EspHudRendererRole::Unknown};
-                std::shared_ptr<const std::wstring> label{};
-                {
-                    std::lock_guard<std::mutex> role_lock(g_esp_hud_renderer_roles_mutex);
-                    if (const auto found = g_esp_hud_renderer_roles.find(player_state);
-                        found != g_esp_hud_renderer_roles.end())
-                    {
-                        target_role = found->second;
-                    }
-                }
-                if (draw_names)
-                {
-                    std::lock_guard<std::mutex> label_lock(g_esp_hud_renderer_labels_mutex);
-                    if (const auto found = g_esp_hud_renderer_labels.find(player_state);
-                        found != g_esp_hud_renderer_labels.end())
-                    {
-                        label = found->second;
-                    }
-                }
-                const bool enemy = esp_hud_renderer_is_enemy(local_role, target_role);
-                if ((scope == EspHudRendererScope::Enemy && !enemy) ||
-                    (scope == EspHudRendererScope::Ally &&
-                     (target_role == EspHudRendererRole::Unknown || enemy)))
-                {
-                    continue;
-                }
-                const auto color = esp_hud_renderer_color(
-                    enemy ? g_esp_hud_renderer_enemy_color.load(std::memory_order_acquire)
-                          : g_esp_hud_renderer_color.load(std::memory_order_acquire));
-                g_esp_hud_renderer_source_players.fetch_add(1, std::memory_order_relaxed);
-                std::array<sdk::FVector, EspHudBoneCount> bones{};
-                if (!esp_hud_renderer_read_bones(pawn, bones))
-                {
-                    continue;
-                }
-                bool drew_player = false;
-                EspHudRendererPoint pelvis{};
-                EspHudRendererPoint chest{};
-                EspHudRendererPoint head{};
-                const bool torso_projected =
-                    esp_hud_renderer_project(view, bones[EspHudSpine1Bone], width, height, pelvis) &&
-                    esp_hud_renderer_project(view, bones[EspHudChestBone], width, height, chest) &&
-                    esp_hud_renderer_project(view, bones[EspHudHeadBone], width, height, head);
-                if (draw_skeletons)
-                {
-                    for (const auto& pair : EspHudSkeletonPairs)
-                    {
-                        EspHudRendererPoint start{};
-                        EspHudRendererPoint end{};
-                        if (esp_hud_renderer_project(view, bones[static_cast<std::size_t>(pair.first)], width, height, start) &&
-                            esp_hud_renderer_project(view, bones[static_cast<std::size_t>(pair.second)], width, height, end))
-                        {
-                            drew_player |= esp_hud_renderer_draw_line(canvas, start, end, color);
-                        }
-                    }
-                }
-                if (draw_boxes && torso_projected)
-                {
-                    drew_player |= esp_hud_renderer_draw_corner_box(canvas, pelvis, chest, head, color, width, height);
-                }
-                if (draw_snaplines && torso_projected)
-                {
-                    if (pelvis.x >= 0.0 && pelvis.x <= width && pelvis.y >= 0.0 && pelvis.y <= height)
-                    {
-                        // Camera centre is stable. A local-pawn screen point
-                        // is intentionally never used as the snapline origin.
-                        drew_player |= esp_hud_renderer_draw_line(
-                            canvas,
-                            {static_cast<double>(width) / 2.0, static_cast<double>(height) / 2.0},
-                            pelvis,
-                            color,
-                            1.5f);
-                    }
-                }
-                if ((draw_names || draw_distance) && torso_projected)
-                {
-                    std::wstring text{};
-                    if (draw_names && label && !label->empty())
-                    {
-                        text = *label;
-                    }
-                    if (draw_distance)
-                    {
-                        const auto dx = bones[EspHudSpine1Bone].X - view.location.X;
-                        const auto dy = bones[EspHudSpine1Bone].Y - view.location.Y;
-                        const auto dz = bones[EspHudSpine1Bone].Z - view.location.Z;
-                        const auto meters = std::sqrt(dx * dx + dy * dy + dz * dz) / 100.0;
-                        if (std::isfinite(meters) && meters >= 0.0 && meters < 100000.0)
-                        {
-                            if (!text.empty())
-                            {
-                                text += L"  ";
-                            }
-                            text += std::to_wstring(static_cast<long long>(std::llround(meters)));
-                            text += L" m";
-                        }
-                    }
-                    if (!text.empty())
-                    {
-                        drew_player |= esp_hud_renderer_draw_text(
-                            canvas,
-                            {head.x, std::max(12.0, head.y - 14.0)},
-                            text,
-                            color);
-                    }
-                }
-                if (drew_player)
-                {
-                    g_esp_hud_renderer_drawn_players.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
-    }
-
-    void esp_hud_renderer_draw_frame(void* hud, void*)
-    {
-        // Keep SEH at a non-unwinding wrapper. The implementation contains
-        // lock guards and fixed containers, which MSVC correctly refuses to
-        // place inside a __try block.
-        __try
-        {
-            esp_hud_renderer_draw_frame_impl(hud);
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            g_esp_hud_renderer_failures.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-
-    auto esp_hud_renderer_config_native(const std::string& request) -> std::string
-    {
-        // A map can rebuild AHUD. Re-enter the idempotent discovery route on
-        // each configuration update so the callback target is refreshed first.
-        (void)esp_hud_callback_probe_native();
-        const auto canvas = g_esp_hud_observed_canvas.load(std::memory_order_acquire);
-        const auto unavailable = [&](const char* stage, const std::string& message) {
-            // Do not keep drawing against an old world/canvas after a map has
-            // replaced either. The external fallback will stay visible until
-            // this renderer has a complete, current schema again.
-            g_esp_hud_renderer_enabled.store(false, std::memory_order_release);
-            return response_json(false, stage, 0, 1, message);
-        };
-        if (!live_uobject(canvas))
-        {
-            return unavailable("esp_hud_renderer_canvas_unavailable",
-                               "HUD Canvas has not been observed in a draw callback");
-        }
-        static std::mutex resolver_mutex{};
-        static EspSnapshotResolver resolver{};
-        std::lock_guard<std::mutex> lock(resolver_mutex);
-        std::string failure{};
-        if (!resolver.initialized)
-        {
-            if (!resolver.reflection.init(failure))
-            {
-                return unavailable("esp_hud_renderer_reflection_unavailable", failure);
-            }
-            resolver.initialized = true;
-        }
-        EspSnapshotContext context{};
-        if (!esp_snapshot_resolve_context(resolver, context, failure))
-        {
-            return unavailable("esp_hud_renderer_context_unavailable", failure);
-        }
-        auto& ref = resolver.reflection;
-        const auto function = ref.find_function(canvas, "K2_DrawLine");
-        const int params_size = function ? safe_read<int>(function + OffPropertiesSize, 0) : 0;
-        const int start_offset = function ? esp_hud_line_param_offset(
-            ref, function, {"ScreenPositionA", "PositionA", "Start"}, static_cast<int>(sizeof(EspHudCanvasVec2))) : -1;
-        const int end_offset = function ? esp_hud_line_param_offset(
-            ref, function, {"ScreenPositionB", "PositionB", "End"}, static_cast<int>(sizeof(EspHudCanvasVec2))) : -1;
-        const int thickness_offset = function ? esp_hud_line_param_offset(
-            ref, function, {"Thickness"}, static_cast<int>(sizeof(float))) : -1;
-        const int color_offset = function ? esp_hud_line_param_offset(
-            ref, function, {"RenderColor", "Color"}, static_cast<int>(sizeof(EspHudCanvasColor))) : -1;
-        const auto range_valid = [params_size](int offset, int size) {
-            return offset >= 0 && offset <= params_size - size;
-        };
-        if (!function || params_size <= 0 || params_size > 256 ||
-            !range_valid(start_offset, static_cast<int>(sizeof(EspHudCanvasVec2))) ||
-            !range_valid(end_offset, static_cast<int>(sizeof(EspHudCanvasVec2))) ||
-            !range_valid(thickness_offset, static_cast<int>(sizeof(float))) ||
-            !range_valid(color_offset, static_cast<int>(sizeof(EspHudCanvasColor))))
-        {
-            return unavailable("esp_hud_renderer_line_schema_unavailable",
-                               "Canvas K2_DrawLine schema is not safe for HUD geometry");
-        }
-        const auto canvas_size_x_property = find_object_property(ref, canvas, "SizeX");
-        const auto canvas_size_y_property = find_object_property(ref, canvas, "SizeY");
-        const int canvas_size_x_offset = canvas_size_x_property ? prop_offset(canvas_size_x_property) : -1;
-        const int canvas_size_y_offset = canvas_size_y_property ? prop_offset(canvas_size_y_property) : -1;
-        const auto engine = ref.find_first_instance("GameEngine");
-        const auto font = read_object_property_by_names(
-            ref, engine, {"SmallFont", "MediumFont", "TinyFont", "LargeFont"});
-        const auto text_function = ref.find_function(canvas, "K2_DrawText");
-        const int text_params_size = text_function ? safe_read<int>(text_function + OffPropertiesSize, 0) : 0;
-        const auto text_offset = [&](const char* name, int expected_size) {
-            return text_function ? esp_hud_line_param_offset(ref, text_function, {name}, expected_size) : -1;
-        };
-        const int text_font_offset = text_offset("RenderFont", static_cast<int>(sizeof(std::uintptr_t)));
-        const int text_string_offset = text_offset("RenderText", static_cast<int>(sizeof(ScriptStringParam)));
-        const int text_position_offset = text_offset("ScreenPosition", static_cast<int>(sizeof(EspHudCanvasVec2)));
-        const int text_scale_offset = text_offset("Scale", static_cast<int>(sizeof(EspHudCanvasVec2)));
-        const int text_color_offset = text_offset("RenderColor", static_cast<int>(sizeof(EspHudCanvasColor)));
-        const int text_kerning_offset = text_offset("Kerning", static_cast<int>(sizeof(float)));
-        const int text_shadow_color_offset = text_offset("ShadowColor", static_cast<int>(sizeof(EspHudCanvasColor)));
-        const int text_shadow_offset = text_offset("ShadowOffset", static_cast<int>(sizeof(EspHudCanvasVec2)));
-        const auto text_center_x_property = text_function ? ref.find_property(text_function, "bCentreX") : 0;
-        const int text_center_x_offset = text_center_x_property ? prop_offset(text_center_x_property) : -1;
-        const auto text_center_x_mask = text_center_x_property
-                                           ? safe_read<std::uint8_t>(text_center_x_property + OffFBoolPropertyByteMask, 0)
-                                           : 0;
-        const auto text_range_valid = [text_params_size](int offset, int size) {
-            return offset >= 0 && offset <= text_params_size - size;
-        };
-        if (canvas_size_x_offset < 0 || canvas_size_y_offset < 0 ||
-            prop_element_size(canvas_size_x_property) != static_cast<int>(sizeof(std::int32_t)) ||
-            prop_element_size(canvas_size_y_property) != static_cast<int>(sizeof(std::int32_t)))
-        {
-            return unavailable("esp_hud_renderer_canvas_dimensions_unavailable",
-                               "Canvas SizeX/SizeY reflection is unavailable");
-        }
-        if (!live_uobject(font) || !text_function || text_params_size <= 0 || text_params_size > 512 ||
-            !text_range_valid(text_font_offset, static_cast<int>(sizeof(std::uintptr_t))) ||
-            !text_range_valid(text_string_offset, static_cast<int>(sizeof(ScriptStringParam))) ||
-            !text_range_valid(text_position_offset, static_cast<int>(sizeof(EspHudCanvasVec2))) ||
-            !text_range_valid(text_scale_offset, static_cast<int>(sizeof(EspHudCanvasVec2))) ||
-            !text_range_valid(text_color_offset, static_cast<int>(sizeof(EspHudCanvasColor))) ||
-            !text_range_valid(text_kerning_offset, static_cast<int>(sizeof(float))) ||
-            !text_range_valid(text_shadow_color_offset, static_cast<int>(sizeof(EspHudCanvasColor))) ||
-            !text_range_valid(text_shadow_offset, static_cast<int>(sizeof(EspHudCanvasVec2))) ||
-            !text_range_valid(text_center_x_offset, static_cast<int>(sizeof(std::uint8_t))) ||
-            text_center_x_mask == 0)
-        {
-            return unavailable("esp_hud_renderer_text_schema_unavailable",
-                               "Canvas K2_DrawText schema or engine font is unavailable");
-        }
-        const auto channel = [&](const char* key, int fallback) {
-            return static_cast<std::uint32_t>(json_int_field(request, key, fallback, 0, 255));
-        };
-        const auto color = (channel("ally_r", 0) << 16) |
-                           (channel("ally_g", 255) << 8) |
-                           channel("ally_b", 136);
-        const auto enemy_color = (channel("enemy_r", 255) << 16) |
-                                 (channel("enemy_g", 0) << 8) |
-                                 channel("enemy_b", 0);
-        g_esp_hud_line_function.store(function, std::memory_order_release);
-        g_esp_hud_line_params_size.store(params_size, std::memory_order_release);
-        g_esp_hud_line_start_offset.store(start_offset, std::memory_order_release);
-        g_esp_hud_line_end_offset.store(end_offset, std::memory_order_release);
-        g_esp_hud_line_thickness_offset.store(thickness_offset, std::memory_order_release);
-        g_esp_hud_line_color_offset.store(color_offset, std::memory_order_release);
-        g_esp_hud_line_probe_enabled.store(false, std::memory_order_release);
-        g_esp_hud_renderer_boxes.store(json_bool_field(request, "boxes", true), std::memory_order_release);
-        g_esp_hud_renderer_skeletons.store(json_bool_field(request, "skeletons", true), std::memory_order_release);
-        g_esp_hud_renderer_names.store(json_bool_field(request, "names", true), std::memory_order_release);
-        g_esp_hud_renderer_distance.store(json_bool_field(request, "distance", true), std::memory_order_release);
-        g_esp_hud_renderer_snaplines.store(json_bool_field(request, "snaplines", true), std::memory_order_release);
-        g_esp_hud_renderer_color.store(color, std::memory_order_release);
-        g_esp_hud_renderer_enemy_color.store(enemy_color, std::memory_order_release);
-        g_esp_hud_renderer_scope.store(
-            static_cast<int>(esp_hud_renderer_scope_from_name(json_string_field(request, "scope", "all"))),
-            std::memory_order_release);
-        g_esp_hud_renderer_canvas_size_x_offset.store(canvas_size_x_offset, std::memory_order_release);
-        g_esp_hud_renderer_canvas_size_y_offset.store(canvas_size_y_offset, std::memory_order_release);
-        g_esp_hud_text_function.store(text_function, std::memory_order_release);
-        g_esp_hud_text_font.store(font, std::memory_order_release);
-        g_esp_hud_text_params_size.store(text_params_size, std::memory_order_release);
-        g_esp_hud_text_font_offset.store(text_font_offset, std::memory_order_release);
-        g_esp_hud_text_string_offset.store(text_string_offset, std::memory_order_release);
-        g_esp_hud_text_position_offset.store(text_position_offset, std::memory_order_release);
-        g_esp_hud_text_scale_offset.store(text_scale_offset, std::memory_order_release);
-        g_esp_hud_text_color_offset.store(text_color_offset, std::memory_order_release);
-        g_esp_hud_text_kerning_offset.store(text_kerning_offset, std::memory_order_release);
-        g_esp_hud_text_shadow_color_offset.store(text_shadow_color_offset, std::memory_order_release);
-        g_esp_hud_text_shadow_offset.store(text_shadow_offset, std::memory_order_release);
-        g_esp_hud_text_center_x_offset.store(text_center_x_offset, std::memory_order_release);
-        g_esp_hud_text_center_x_mask.store(text_center_x_mask, std::memory_order_release);
-        g_esp_hud_renderer_world.store(context.world, std::memory_order_release);
-        g_esp_hud_renderer_controller.store(context.controller, std::memory_order_release);
-        g_esp_hud_renderer_local_pawn.store(context.local_pawn, std::memory_order_release);
-        g_esp_hud_renderer_generation.fetch_add(1, std::memory_order_acq_rel);
-        g_esp_hud_renderer_enabled.store(json_bool_field(request, "enabled", false), std::memory_order_release);
-        return response_json(true,
-                             "esp_hud_renderer",
-                             static_cast<int>(std::min<std::uint64_t>(
-                                 g_esp_hud_renderer_drawn_players.load(std::memory_order_acquire), INT_MAX)),
-                             0,
-                             "HUD geometry renderer configured",
-                             std::string("\"renderer\":\"hud_canvas_in_process_geometry\"") +
-                                 ",\"enabled\":" + std::string(json_bool(g_esp_hud_renderer_enabled.load(std::memory_order_acquire))) +
-                                 ",\"frame_callbacks\":" + std::to_string(g_esp_hud_renderer_frames.load(std::memory_order_acquire)) +
-                                 ",\"source_players\":" + std::to_string(g_esp_hud_renderer_source_players.load(std::memory_order_acquire)) +
-                                 ",\"drawn_players\":" + std::to_string(g_esp_hud_renderer_drawn_players.load(std::memory_order_acquire)) +
-                                 ",\"draw_calls\":" + std::to_string(g_esp_hud_renderer_draw_calls.load(std::memory_order_acquire)) +
-                                 ",\"failures\":" + std::to_string(g_esp_hud_renderer_failures.load(std::memory_order_acquire)) +
-                                 ",\"text_renderer\":true" +
-                                 ",\"role_colors\":true");
-    }
-
-    auto esp_hud_renderer_decode_label(const std::string& encoded, std::wstring& label) -> bool
-    {
-        label.clear();
-        std::vector<std::uint8_t> bytes{};
-        std::string failure{};
-        if (!base64_to_bytes(encoded, bytes, failure) || bytes.empty() || bytes.size() > 256)
-        {
-            return false;
-        }
-        const auto length = MultiByteToWideChar(CP_UTF8,
-                                                MB_ERR_INVALID_CHARS,
-                                                reinterpret_cast<const char*>(bytes.data()),
-                                                static_cast<int>(bytes.size()),
-                                                nullptr,
-                                                0);
-        if (length <= 0 || length > 96)
-        {
-            return false;
-        }
-        label.resize(static_cast<std::size_t>(length));
-        return MultiByteToWideChar(CP_UTF8,
-                                   MB_ERR_INVALID_CHARS,
-                                   reinterpret_cast<const char*>(bytes.data()),
-                                   static_cast<int>(bytes.size()),
-                                   label.data(),
-                                   length) == length;
-    }
-
-    auto esp_hud_renderer_roles_native(const std::string& request) -> std::string
-    {
-        std::unordered_map<std::uintptr_t, EspHudRendererRole> next{};
-        std::unordered_map<std::uintptr_t, std::shared_ptr<const std::wstring>> next_labels{};
-        const auto encoded = json_string_field(request, "roles", "");
-        std::size_t begin = 0;
-        while (begin < encoded.size())
-        {
-            const auto end = encoded.find(',', begin);
-            const auto token = encoded.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
-            const auto separator = token.find(':');
-            if (separator != std::string::npos && separator > 0 && separator + 1 < token.size())
-            {
-                const auto address_text = token.substr(0, separator);
-                char* parsed_end = nullptr;
-                const auto address = std::strtoull(address_text.c_str(), &parsed_end, 16);
-                const auto role = esp_hud_renderer_role_from_name(token.substr(separator + 1));
-                if (parsed_end && *parsed_end == '\0' && address >= 0x10000 && role != EspHudRendererRole::Unknown)
-                {
-                    next.emplace(static_cast<std::uintptr_t>(address), role);
-                }
-            }
-            if (end == std::string::npos)
-            {
-                break;
-            }
-            begin = end + 1;
-        }
-        const auto encoded_labels = json_string_field(request, "labels", "");
-        begin = 0;
-        while (begin < encoded_labels.size())
-        {
-            const auto end = encoded_labels.find(',', begin);
-            const auto token = encoded_labels.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
-            const auto separator = token.find(':');
-            if (separator != std::string::npos && separator > 0 && separator + 1 < token.size())
-            {
-                const auto address_text = token.substr(0, separator);
-                char* parsed_end = nullptr;
-                const auto address = std::strtoull(address_text.c_str(), &parsed_end, 16);
-                std::wstring label{};
-                if (parsed_end && *parsed_end == '\0' && address >= 0x10000 &&
-                    esp_hud_renderer_decode_label(token.substr(separator + 1), label))
-                {
-                    next_labels.emplace(static_cast<std::uintptr_t>(address),
-                                        std::make_shared<const std::wstring>(std::move(label)));
-                }
-            }
-            if (end == std::string::npos)
-            {
-                break;
-            }
-            begin = end + 1;
-        }
-        const auto channel = [&](const char* key, int fallback) {
-            return static_cast<std::uint32_t>(json_int_field(request, key, fallback, 0, 255));
-        };
-        const auto ally_color = (channel("ally_r", 0) << 16) |
-                                (channel("ally_g", 255) << 8) |
-                                channel("ally_b", 136);
-        const auto enemy_color = (channel("enemy_r", 255) << 16) |
-                                 (channel("enemy_g", 0) << 8) |
-                                 channel("enemy_b", 0);
-        const auto role_entries = next.size();
-        {
-            std::lock_guard<std::mutex> lock(g_esp_hud_renderer_roles_mutex);
-            g_esp_hud_renderer_roles.swap(next);
-        }
-        const auto label_entries = next_labels.size();
-        {
-            std::lock_guard<std::mutex> lock(g_esp_hud_renderer_labels_mutex);
-            g_esp_hud_renderer_labels.swap(next_labels);
-        }
-        g_esp_hud_renderer_local_role.store(
-            static_cast<int>(esp_hud_renderer_role_from_name(json_string_field(request, "local_role", "unknown"))),
-            std::memory_order_release);
-        g_esp_hud_renderer_scope.store(
-            static_cast<int>(esp_hud_renderer_scope_from_name(json_string_field(request, "scope", "all"))),
-            std::memory_order_release);
-        g_esp_hud_renderer_color.store(ally_color, std::memory_order_release);
-        g_esp_hud_renderer_enemy_color.store(enemy_color, std::memory_order_release);
-        return response_json(true,
-                             "esp_hud_renderer_roles",
-                             static_cast<int>(role_entries),
-                             0,
-                             "HUD renderer roles updated",
-                             "\"role_entries\":" + std::to_string(role_entries) +
-                                 ",\"label_entries\":" + std::to_string(label_entries) +
-                                 ",\"scope\":\"" + json_escape(json_string_field(request, "scope", "all")) + "\"" +
-                                 ",\"local_role\":\"" + json_escape(json_string_field(request, "local_role", "unknown")) + "\"");
     }
 
     template <typename T>
@@ -23362,6 +21544,12 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         }
     }
 
+    struct EspNativePoint
+    {
+        double x{0.0};
+        double y{0.0};
+    };
+
     struct EspNativeView
     {
         sdk::FVector location{};
@@ -23414,7 +21602,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                                 const sdk::FVector& world,
                                 int width,
                                 int height,
-                                EspHudRendererPoint& screen) -> bool
+                                EspNativePoint& screen) -> bool
     {
         screen = {};
         if (width <= 0 || height <= 0 || !esp_native_finite(view.location) || !esp_native_finite(world) ||
@@ -23463,7 +21651,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                             const sdk::FVector& world,
                             int width,
                             int height,
-                            EspHudRendererPoint& screen) -> bool
+                            EspNativePoint& screen) -> bool
     {
         if (!esp_native_project_raw(view, world, width, height, screen))
         {
@@ -23515,7 +21703,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                 view.location.X + forward.X * 1000.0 + lateral.X * 100.0,
                 view.location.Y + forward.Y * 1000.0 + lateral.Y * 100.0,
                 view.location.Z + forward.Z * 1000.0 + lateral.Z * 100.0};
-            EspHudRendererPoint raw{};
+            EspNativePoint raw{};
             double engine_x{};
             double engine_y{};
             if (!esp_native_project_raw(
@@ -23562,8 +21750,8 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
     }
 
     auto esp_native_add_line(EspNativeSnapshot& snapshot,
-                             const EspHudRendererPoint& start,
-                             const EspHudRendererPoint& end,
+                             const EspNativePoint& start,
+                             const EspNativePoint& end,
                              const EspNativeColor& color,
                              float thickness = 1.75f) -> bool
     {
@@ -23579,7 +21767,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
     }
 
     auto esp_native_add_text(EspNativeSnapshot& snapshot,
-                             const EspHudRendererPoint& position,
+                             const EspNativePoint& position,
                              const std::wstring& value,
                              const EspNativeColor& color) -> bool
     {
@@ -24143,7 +22331,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         bool any{};
         for (int index = 0; index < count; ++index)
         {
-            EspHudRendererPoint point{};
+            EspNativePoint point{};
             if (!esp_native_project(view, samples[static_cast<std::size_t>(index)], width, height, point))
             {
                 continue;
@@ -24198,7 +22386,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                     continue;
                 }
                 included[static_cast<std::size_t>(index)] = true;
-                EspHudRendererPoint screen{};
+                EspNativePoint screen{};
                 if (!esp_native_project(
                         view,
                         bones[static_cast<std::size_t>(index)],
@@ -24228,15 +22416,23 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         return true;
     }
 
-    auto esp_native_role_from_snapshot(EspSnapshotRole role) -> EspHudRendererRole
+    auto esp_native_role_from_snapshot(EspSnapshotRole role) -> EspNativeRole
     {
         switch (role)
         {
-        case EspSnapshotRole::Hider: return EspHudRendererRole::Hider;
-        case EspSnapshotRole::Hunter: return EspHudRendererRole::Hunter;
-        case EspSnapshotRole::Spectator: return EspHudRendererRole::Spectator;
-        default: return EspHudRendererRole::Unknown;
+        case EspSnapshotRole::Hider: return EspNativeRole::Hider;
+        case EspSnapshotRole::Hunter: return EspNativeRole::Hunter;
+        case EspSnapshotRole::Spectator: return EspNativeRole::Spectator;
+        default: return EspNativeRole::Unknown;
         }
+    }
+
+    auto esp_native_scope_from_name(const std::string& value) -> EspNativeScope
+    {
+        const auto normalized = lower_copy(value);
+        if (normalized == "hider") return EspNativeScope::Hider;
+        if (normalized == "hunter") return EspNativeScope::Hunter;
+        return EspNativeScope::All;
     }
 
     auto esp_native_display_name(const std::string& utf8, std::wstring& output) -> bool
@@ -24406,29 +22602,6 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                 targets.push_back(role_target);
             }
         }
-        EspSnapshotRole local_snapshot_role = esp_snapshot_role_for_object(resolver.reflection, context.local_pawn);
-        if (local_snapshot_role == EspSnapshotRole::Unknown)
-        {
-            local_snapshot_role = esp_snapshot_role_for_object(resolver.reflection, context.local_player_state);
-        }
-        for (const auto& target : targets)
-        {
-            if ((target.pawn == context.local_pawn || target.player_state == context.local_player_state) &&
-                target.role != EspSnapshotRole::Unknown)
-            {
-                local_snapshot_role = target.role;
-                break;
-            }
-        }
-        bool local_spectator{};
-        if ((esp_snapshot_read_bool_property(resolver.reflection, context.local_player_state,
-                                             {"bIsSpectator", "bOnlySpectator", "bIsSpectatorOnly"}, local_spectator) ||
-             esp_snapshot_read_bool_property(resolver.reflection, context.controller,
-                                             {"bIsSpectator", "bOnlySpectator", "bIsSpectatorOnly"}, local_spectator)) &&
-            local_spectator)
-        {
-            local_snapshot_role = EspSnapshotRole::Spectator;
-        }
         const auto token = g_esp_native_snapshot_token.load(std::memory_order_acquire);
         const auto current_slot = static_cast<std::uint32_t>(token & 1u);
         const auto target_slot = g_esp_native_snapshot_ready.load(std::memory_order_acquire) ? current_slot ^ 1u : 0u;
@@ -24444,8 +22617,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         snapshot.roster_source = player_array_roster && !targets.empty() ? 1u : 2u;
         snapshot.roster_count = static_cast<std::uint32_t>(
             std::min<std::size_t>(targets.size(), std::numeric_limits<std::uint32_t>::max()));
-        const auto local_role = esp_native_role_from_snapshot(local_snapshot_role);
-        const auto scope = static_cast<EspHudRendererScope>(g_esp_native_scope.load(std::memory_order_acquire));
+        const auto scope = static_cast<EspNativeScope>(g_esp_native_scope.load(std::memory_order_acquire));
         const bool draw_boxes = g_esp_native_boxes.load(std::memory_order_acquire);
         const bool draw_skeletons = g_esp_native_skeletons.load(std::memory_order_acquire);
         const bool draw_names = g_esp_native_names.load(std::memory_order_acquire);
@@ -24487,16 +22659,15 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                 continue;
             }
             const auto target_role = esp_native_role_from_snapshot(target.role);
-            const bool enemy = esp_hud_renderer_is_enemy(local_role, target_role);
-            if ((scope == EspHudRendererScope::Enemy && !enemy) ||
-                (scope == EspHudRendererScope::Ally && (target_role == EspHudRendererRole::Unknown || enemy)))
+            if (!runtime_contract::esp_role_scope_matches(scope, target_role))
             {
                 ++snapshot.filtered_scope;
                 continue;
             }
-            const auto color = esp_native_color(enemy
-                                                    ? g_esp_native_enemy_color.load(std::memory_order_acquire)
-                                                    : g_esp_native_ally_color.load(std::memory_order_acquire));
+            const auto color = esp_native_color(runtime_contract::esp_role_color(
+                target_role,
+                g_esp_native_hider_color.load(std::memory_order_acquire),
+                g_esp_native_hunter_color.load(std::memory_order_acquire)));
             const auto capsule = read_object_property_by_names(
                 resolver.reflection, target.pawn, {"CapsuleComponent", "Capsule", "CollisionCylinder", "RootComponent"});
             if (live_uobject(capsule))
@@ -24638,8 +22809,8 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                     {
                         continue;
                     }
-                    EspHudRendererPoint start{};
-                    EspHudRendererPoint end{};
+                    EspNativePoint start{};
+                    EspNativePoint end{};
                     if (esp_native_project(
                             view,
                             bones[static_cast<std::size_t>(
@@ -24744,8 +22915,8 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         const auto channel = [&](const char* key, int fallback) {
             return static_cast<std::uint32_t>(json_int_field(request, key, fallback, 0, 255));
         };
-        const auto ally = (channel("ally_r", 0) << 16) | (channel("ally_g", 255) << 8) | channel("ally_b", 0);
-        const auto enemy = (channel("enemy_r", 255) << 16) | (channel("enemy_g", 0) << 8) | channel("enemy_b", 0);
+        const auto hider = (channel("hider_r", 0) << 16) | (channel("hider_g", 255) << 8) | channel("hider_b", 136);
+        const auto hunter = (channel("hunter_r", 255) << 16) | (channel("hunter_g", 0) << 8) | channel("hunter_b", 0);
         const auto signature =
             std::string(enabled ? "1|" : "0|") + scope_name +
             "|" + (boxes ? "1" : "0") +
@@ -24753,8 +22924,8 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
             "|" + (names ? "1" : "0") +
             "|" + (distance ? "1" : "0") +
             "|" + (snaplines ? "1" : "0") +
-            "|" + std::to_string(ally) +
-            "|" + std::to_string(enemy);
+            "|" + std::to_string(hider) +
+            "|" + std::to_string(hunter);
         bool same_configuration{};
         {
             std::lock_guard<std::mutex> lock(g_esp_native_config_mutex);
@@ -24801,10 +22972,10 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         g_esp_native_names.store(names, std::memory_order_release);
         g_esp_native_distance.store(distance, std::memory_order_release);
         g_esp_native_snaplines.store(snaplines, std::memory_order_release);
-        g_esp_native_scope.store(static_cast<int>(esp_hud_renderer_scope_from_name(
+        g_esp_native_scope.store(static_cast<int>(esp_native_scope_from_name(
                                      scope_name)), std::memory_order_release);
-        g_esp_native_ally_color.store(ally, std::memory_order_release);
-        g_esp_native_enemy_color.store(enemy, std::memory_order_release);
+        g_esp_native_hider_color.store(hider, std::memory_order_release);
+        g_esp_native_hunter_color.store(hunter, std::memory_order_release);
         if (!enabled)
         {
             if (same_configuration && current_state == EspNativePresentState::Disabled)
@@ -25651,7 +23822,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         }
         if (line.find("\"type\":\"capabilities\"") != std::string::npos)
         {
-            std::string commands = "[\"ping\",\"capabilities\",\"esp_roles\",\"esp_native_present\",\"esp_native_present_status\",\"esp_native_present_probe\",\"paint_full_route\",\"image_guide\",\"cancel_paint\",\"detach\",\"shutdown\"]";
+            std::string commands = "[\"ping\",\"capabilities\",\"esp_native_present\",\"esp_native_present_status\",\"esp_native_present_probe\",\"paint_full_route\",\"image_guide\",\"cancel_paint\",\"detach\",\"shutdown\"]";
             return std::string("{\"success\":true,\"stage\":\"capabilities\",\"applied\":0,\"failures\":0,") +
                    "\"message\":\"ok\",\"timing_ms\":{}," +
                    "\"metadata\":{\"commands\":" + commands + "," +
@@ -25749,10 +23920,6 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                                      std::string(json_bool(paint_request_was_in_progress)) +
                                      ",\"active_paint_quiescent\":true" +
                                      ",\"hook_callbacks_quiescent\":true");
-        }
-        if (request_type == "esp_roles")
-        {
-            return esp_roles_snapshot_native();
         }
         if (request_type == "esp_native_present")
         {
