@@ -4442,7 +4442,10 @@ static void ReleasePackagingContainsOnlyDirectBridge()
 
     Assert(!build.Contains("bridge-loader.dll", StringComparison.OrdinalIgnoreCase), "build must not produce a loader DLL");
     Assert(!project.Contains("bridge-loader.dll", StringComparison.OrdinalIgnoreCase), "single EXE must not embed a loader DLL");
-    Assert(workflow.Contains("bridge loader must not be packaged", StringComparison.OrdinalIgnoreCase), "CI must reject a packaged loader DLL");
+    Assert(workflow.Contains("BUILD_VERSION: ci-${{ github.run_number }}-${{ github.run_attempt }}", StringComparison.Ordinal) &&
+           workflow.Contains(".build/obj/$env:BUILD_VERSION/package-native", StringComparison.Ordinal) &&
+           workflow.Contains("bridge loader must not be packaged", StringComparison.OrdinalIgnoreCase),
+        "CI must inspect the version-scoped native output and reject a packaged loader DLL");
     Assert(!File.Exists(oldLoaderSource), "obsolete loader source must be removed");
     Assert(!File.Exists(oldLoaderAbi), "obsolete loader ABI must be removed");
     Assert(File.Exists(directDoc), "direct bridge injection must have one authoritative design document");
