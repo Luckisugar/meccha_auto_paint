@@ -591,6 +591,8 @@ public sealed class MainForm : Form
                 var captureStatus = metadata.TryGetProperty("capture_status", out var captureStatusValue) ? captureStatusValue.GetString() ?? "unknown" : "unknown";
                 var captureAge = metadata.TryGetProperty("capture_age_ms", out var captureAgeValue) ? captureAgeValue.GetUInt64() : 0;
                 var rebinds = metadata.TryGetProperty("hud_rebinds", out var rebindsValue) ? rebindsValue.GetUInt64() : 0;
+                var hiderRoster = metadata.TryGetProperty("hider_roster_count", out var hiderRosterValue) ? hiderRosterValue.GetUInt32() : 0;
+                var hunterRoster = metadata.TryGetProperty("hunter_roster_count", out var hunterRosterValue) ? hunterRosterValue.GetUInt32() : 0;
                 var rosterSource = metadata.TryGetProperty("roster_source", out var rosterSourceValue) ? rosterSourceValue.GetString() ?? "unknown" : "unknown";
                 var roster = metadata.TryGetProperty("roster_count", out var rosterValue) ? rosterValue.GetUInt32() : 0;
                 var pawns = metadata.TryGetProperty("valid_pawns", out var pawnsValue) ? pawnsValue.GetUInt32() : 0;
@@ -623,6 +625,8 @@ public sealed class MainForm : Form
                     CaptureStatus = captureStatus,
                     CaptureAgeMs = captureAge,
                     HudRebinds = rebinds,
+                    HiderRosterCount = hiderRoster,
+                    HunterRosterCount = hunterRoster,
                     RosterSource = rosterSource,
                     RosterCount = roster,
                     ValidPawns = pawns,
@@ -657,6 +661,7 @@ public sealed class MainForm : Form
                 var logMessage =
                     $"ESP: native Present status={status}; format={format}; snapshot_sequence={sequence}; " +
                     $"capture={captureStatus} age_ms={captureAge}; hud_rebinds={rebinds}; " +
+                    $"roles={hiderRoster}/{hunterRoster}; " +
                     $"roster={rosterSource}:{roster}; pawns={pawns}; " +
                     $"capsule={capsuleComponents}/{capsuleTransforms}/{capsuleSizes}/{capsuleProjected}; " +
                     $"pose=contracts:{skeletonContracts} profiles:{poseProfiles} " +

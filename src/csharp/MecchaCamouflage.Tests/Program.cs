@@ -1026,6 +1026,8 @@ static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
         CaptureStatus = "active",
         CaptureAgeMs = 16,
         HudRebinds = 0,
+        HiderRosterCount = 5,
+        HunterRosterCount = 5,
         RosterSource = "player_array",
         RosterCount = 10,
         ValidPawns = 9,

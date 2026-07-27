@@ -395,6 +395,8 @@ namespace
         std::uint64_t sequence{0};
         std::uint32_t viewport_width{0};
         std::uint32_t viewport_height{0};
+        std::uint32_t hider_roster_count{0};
+        std::uint32_t hunter_roster_count{0};
         std::uint32_t roster_source{0}; // 1=PlayerArray, 2=role-roster fallback
         std::uint32_t roster_count{0};
         std::uint32_t valid_player_states{0};
@@ -21005,6 +21007,8 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
     struct EspNativeSnapshotDiagnostics
     {
         bool available{false};
+        std::uint32_t hider_roster_count{0};
+        std::uint32_t hunter_roster_count{0};
         std::uint32_t roster_source{0};
         std::uint32_t roster_count{0};
         std::uint32_t valid_player_states{0};
@@ -21038,6 +21042,8 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         }
         EspNativeSnapshotDiagnostics result{
             true,
+            snapshot->hider_roster_count,
+            snapshot->hunter_roster_count,
             snapshot->roster_source,
             snapshot->roster_count,
             snapshot->valid_player_states,
@@ -22627,6 +22633,10 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         snapshot = {};
         snapshot.viewport_width = static_cast<std::uint32_t>(width);
         snapshot.viewport_height = static_cast<std::uint32_t>(height);
+        snapshot.hider_roster_count = static_cast<std::uint32_t>(
+            std::min<std::size_t>(hiders.size(), std::numeric_limits<std::uint32_t>::max()));
+        snapshot.hunter_roster_count = static_cast<std::uint32_t>(
+            std::min<std::size_t>(hunters.size(), std::numeric_limits<std::uint32_t>::max()));
         snapshot.roster_source = player_array_roster && !targets.empty() ? 1u : 2u;
         snapshot.roster_count = static_cast<std::uint32_t>(
             std::min<std::size_t>(targets.size(), std::numeric_limits<std::uint32_t>::max()));
@@ -23137,6 +23147,8 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                                  ",\"present_calls\":" + std::to_string(g_esp_native_present_calls.load()) +
                                  ",\"hud_rebind_attempts\":" + std::to_string(g_esp_native_hud_rebind_attempts.load()) +
                                  ",\"hud_rebinds\":" + std::to_string(g_esp_native_hud_rebind_successes.load()) +
+                                 ",\"hider_roster_count\":" + std::to_string(diagnostics.hider_roster_count) +
+                                 ",\"hunter_roster_count\":" + std::to_string(diagnostics.hunter_roster_count) +
                                  ",\"roster_source\":\"" + roster_source + "\"" +
                                  ",\"roster_count\":" + std::to_string(diagnostics.roster_count) +
                                  ",\"valid_player_states\":" + std::to_string(diagnostics.valid_player_states) +

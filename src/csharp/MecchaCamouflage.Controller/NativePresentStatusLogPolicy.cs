@@ -8,6 +8,8 @@ public sealed record NativePresentStatusLogSample
     public string CaptureStatus { get; init; } = "unknown";
     public ulong CaptureAgeMs { get; init; }
     public ulong HudRebinds { get; init; }
+    public uint HiderRosterCount { get; init; }
+    public uint HunterRosterCount { get; init; }
     public string RosterSource { get; init; } = "unknown";
     public uint RosterCount { get; init; }
     public uint ValidPawns { get; init; }
@@ -46,6 +48,7 @@ public static class NativePresentStatusLogPolicy
             sample.Format,
             sample.CaptureStatus,
             sample.HudRebinds,
+            Presence((ulong)sample.HiderRosterCount + sample.HunterRosterCount),
             sample.RosterSource,
             Presence(sample.RosterCount),
             Coverage(sample.ValidPawns, sample.RosterCount),
