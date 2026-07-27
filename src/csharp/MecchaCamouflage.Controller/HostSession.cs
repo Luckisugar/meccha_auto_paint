@@ -258,7 +258,7 @@ public sealed class HostSession
 
     public async Task<ImageGuideSnapshot> GetImageGuideAsync(string bodyType, CancellationToken cancellationToken = default)
     {
-        var normalizedBodyType = string.Equals(bodyType, "cube", StringComparison.OrdinalIgnoreCase) ? "cube" : "round";
+        var normalizedBodyType = ImagePaintSettings.NormalizeBodyType(bodyType);
         lock (paintStateGate)
         {
             if (PaintRunning || nativePaintMayBeRunning)
@@ -354,7 +354,7 @@ public sealed class HostSession
         string bodyType,
         CancellationToken cancellationToken = default)
     {
-        var normalizedBodyType = string.Equals(bodyType, "cube", StringComparison.OrdinalIgnoreCase) ? "cube" : "round";
+        var normalizedBodyType = ImagePaintSettings.NormalizeBodyType(bodyType);
         lock (paintStateGate)
         {
             if (PaintRunning || nativePaintMayBeRunning)
@@ -495,7 +495,7 @@ public sealed class HostSession
         try
         {
             Directory.CreateDirectory(Paths.DebugDirectory);
-            var stem = "image-guide-" + (bodyType == "cube" ? "cube" : "round") + "-latest";
+            var stem = "image-guide-" + ImagePaintSettings.NormalizeBodyType(bodyType) + "-latest";
             var jsonPath = Path.Combine(Paths.DebugDirectory, stem + ".json");
             var svgPath = Path.Combine(Paths.DebugDirectory, stem + ".svg");
             File.WriteAllText(jsonPath, rawResponse);

@@ -86,6 +86,8 @@ internal static class Program
 
     private static string? CaptureReferenceBodyType(string[] args)
     {
+        if (args.Any(argument => string.Equals(argument, "--capture-fukuyoka-reference-pose", StringComparison.Ordinal)))
+            return "fukuyoka";
         if (args.Any(argument => string.Equals(argument, "--capture-cube-reference-pose", StringComparison.Ordinal)))
             return "cube";
         if (args.Any(argument => string.Equals(argument, "--capture-round-reference-pose", StringComparison.Ordinal)))

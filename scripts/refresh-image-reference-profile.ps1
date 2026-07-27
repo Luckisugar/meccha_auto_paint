@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("round", "cube")]
+    [ValidateSet("round", "cube", "fukuyoka")]
     [string]$BodyType = "round",
     [string]$PaksPath = "",
     [string]$MappingsPath = "",
@@ -26,9 +26,38 @@ function Invoke-Step {
 
 function Read-CaptureSnapshot {
     param([string]$CaptureExecutable, [string]$CaptureArgument)
-    $output = @(& $CaptureExecutable $CaptureArgument 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw ("Image reference pose capture failed with exit code $LASTEXITCODE." + [Environment]::NewLine + ($output -join [Environment]::NewLine))
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo.FileName = $CaptureExecutable
+    $process.StartInfo.Arguments = $CaptureArgument
+    $process.StartInfo.UseShellExecute = $false
+    $process.StartInfo.CreateNoWindow = $true
+    $process.StartInfo.RedirectStandardOutput = $true
+    $process.StartInfo.RedirectStandardError = $true
+    try {
+        if (-not $process.Start()) {
+            throw "Image reference pose capture process did not start."
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        $exitCode = $process.ExitCode
+    }
+    finally {
+        $process.Dispose()
+    }
+
+    $output = @()
+    if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+        $output += @($stdout -split "\r?\n")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+        $output += @($stderr -split "\r?\n")
+    }
+    if ($exitCode -ne 0) {
+        throw ("Image reference pose capture failed with exit code $exitCode." + [Environment]::NewLine + ($output -join [Environment]::NewLine))
     }
     $json = $output |
         ForEach-Object { [string]$_ } |
@@ -47,25 +76,39 @@ if (-not $CaptureNeutralPose) {
 $repoRoot = [System.IO.Path]::GetFullPath(
     (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).ProviderPath
 )
-$configuration = if ($BodyType -eq "cube") {
-    [PSCustomObject]@{
-        AssetPath = "Chameleon/Content/3Dmodel/cLeon/charactor/paintman/skeltal_cube/paintman_cube.uasset"
-        ExportName = "paintman_cube"
-        RawProfileFile = "paintman_cube.mesh-profile-v2.json"
-        ImageProfileFile = "paintman_cube.image-profile-v2.json"
-        ExpectedVertices = 452
-        ExpectedIndices = 1080
-        ExpectedBones = 28
+$configuration = switch ($BodyType) {
+    "cube" {
+        [PSCustomObject]@{
+            AssetPath = "Chameleon/Content/3Dmodel/cLeon/charactor/paintman/skeltal_cube/paintman_cube.uasset"
+            ExportName = "paintman_cube"
+            RawProfileFile = "paintman_cube.mesh-profile-v2.json"
+            ImageProfileFile = "paintman_cube.image-profile-v2.json"
+            ExpectedVertices = 452
+            ExpectedIndices = 1080
+            ExpectedBones = 28
+        }
     }
-} else {
-    [PSCustomObject]@{
-        AssetPath = "Chameleon/Content/3Dmodel/cLeon/charactor/paintman/skeltal/paintman.uasset"
-        ExportName = "paintman"
-        RawProfileFile = "paintman.mesh-profile-v2.json"
-        ImageProfileFile = "paintman.image-profile-v2.json"
-        ExpectedVertices = 1660
-        ExpectedIndices = 8352
-        ExpectedBones = 28
+    "fukuyoka" {
+        [PSCustomObject]@{
+            AssetPath = "Chameleon/Content/3Dmodel/cLeon/charactor/paintman/skeltal/paintman_hukuyoka.uasset"
+            ExportName = "paintman_hukuyoka"
+            RawProfileFile = "paintman_hukuyoka.mesh-profile-v2.json"
+            ImageProfileFile = "paintman_hukuyoka.image-profile-v2.json"
+            ExpectedVertices = 1508
+            ExpectedIndices = 7584
+            ExpectedBones = 28
+        }
+    }
+    default {
+        [PSCustomObject]@{
+            AssetPath = "Chameleon/Content/3Dmodel/cLeon/charactor/paintman/skeltal/paintman.uasset"
+            ExportName = "paintman"
+            RawProfileFile = "paintman.mesh-profile-v2.json"
+            ImageProfileFile = "paintman.image-profile-v2.json"
+            ExpectedVertices = 1660
+            ExpectedIndices = 8352
+            ExpectedBones = 28
+        }
     }
 }
 $rawProfilePath = Join-Path $repoRoot (Join-Path "resources\mesh-profiles" $configuration.RawProfileFile)

@@ -6837,11 +6837,25 @@ namespace
         return true;
     }
 
+    auto mesh_first_profile_body_type(const MeshFirstProfile& profile) -> std::string
+    {
+        const auto identity = lower_copy(
+            profile.profile_id + "\n" + profile.source_path + "\n" + profile.export_name);
+        if (identity.find("fukuyoka") != std::string::npos ||
+            identity.find("hukuyoka") != std::string::npos)
+        {
+            return "fukuyoka";
+        }
+        if (identity.find("cube") != std::string::npos)
+        {
+            return "cube";
+        }
+        return "round";
+    }
+
     auto mesh_first_is_cube_profile(const MeshFirstProfile& profile) -> bool
     {
-        return lower_copy(profile.profile_id).find("cube") != std::string::npos ||
-               lower_copy(profile.source_path).find("cube") != std::string::npos ||
-               lower_copy(profile.export_name).find("cube") != std::string::npos;
+        return mesh_first_profile_body_type(profile) == "cube";
     }
 
     auto mesh_first_map_cube_canonical_sample(const MeshFirstProfile& profile,
@@ -11093,13 +11107,13 @@ namespace
     {
         const std::string requested_body = lower_copy(json_string_field(request, "image_paint_body_type", "round"));
         const bool capture_image_reference_pose = json_bool_field(request, "capture_reference_pose", false);
-        if (requested_body != "round" && requested_body != "cube")
+        if (requested_body != "round" && requested_body != "cube" && requested_body != "fukuyoka")
         {
             return response_json(false,
                                  "image_guide_body_type_invalid",
                                  0,
                                  1,
-                                 "Image guide body type must be round or cube.");
+                                 "Image guide body type must be round, cube, or fukuyoka.");
         }
 
         Reflection ref{};
@@ -11161,9 +11175,6 @@ namespace
                                  "The live mesh does not match a usable image guide profile.",
                                  metadata + ",\"profile_failure\":\"" + json_escape(profile_failure) + "\"");
         }
-        const auto profile_is_cube = [](const MeshFirstProfile& candidate) {
-            return candidate.profile_id.rfind("paintman_cube:", 0) == 0;
-        };
         const auto shares_skeleton = [](const MeshFirstProfile& a, const MeshFirstProfile& b) {
             if (a.bone_count <= 0 || a.bone_count != b.bone_count ||
                 a.bones.size() != b.bones.size())
@@ -11200,8 +11211,8 @@ namespace
             }
             return true;
         };
-        const bool live_profile_is_cube = profile_is_cube(live_profile);
-        const bool cross_profile_pose_transfer = live_profile_is_cube != (requested_body == "cube");
+        const std::string live_profile_body_type = mesh_first_profile_body_type(live_profile);
+        const bool cross_profile_pose_transfer = live_profile_body_type != requested_body;
         bool guide_bind_valid = !cross_profile_pose_transfer;
         MeshFirstProfile guide_profile = live_profile;
         if (cross_profile_pose_transfer)
@@ -11209,7 +11220,7 @@ namespace
             bool found_target = false;
             for (const auto& candidate : profile_catalog)
             {
-                if (profile_is_cube(candidate) == (requested_body == "cube") &&
+                if (mesh_first_profile_body_type(candidate) == requested_body &&
                     shares_skeleton(live_profile, candidate))
                 {
                     guide_profile = candidate;
@@ -11237,7 +11248,7 @@ namespace
         if (capture_image_reference_pose)
         {
             metadata += "," + mesh_first_profile_metadata(live_profile);
-            if (live_profile_is_cube != (requested_body == "cube") || cross_profile_pose_transfer)
+            if (live_profile_body_type != requested_body || cross_profile_pose_transfer)
             {
                 return response_json(false,
                                      "image_reference_pose_wrong_live_mesh",
@@ -12153,7 +12164,10 @@ namespace
             std::string image_decode_failure{};
             const bool image_dimensions_valid = image_paint_width == 1024 && image_paint_height == 512;
             const bool image_alpha_valid = image_paint_alpha_mode == "skip" || image_paint_alpha_mode == "background";
-            const bool image_body_valid = image_paint_body_type == "round" || image_paint_body_type == "cube";
+            const bool image_body_valid =
+                image_paint_body_type == "round" ||
+                image_paint_body_type == "cube" ||
+                image_paint_body_type == "fukuyoka";
             const bool image_decoded = base64_to_bytes(
                 image_paint_rgba_base64, image_paint_rgba, image_decode_failure);
             const std::size_t expected_image_paint_bytes =
@@ -12506,10 +12520,9 @@ namespace
         }
         if (image_paint_enabled)
         {
-            const bool profile_is_cube = mesh_first_is_cube_profile(profile);
-            const bool requested_cube = image_paint_body_type == "cube";
-            const std::string live_image_paint_body_type = profile_is_cube ? "cube" : "round";
-            const bool image_paint_body_type_auto_corrected = profile_is_cube != requested_cube;
+            const std::string live_image_paint_body_type = mesh_first_profile_body_type(profile);
+            const bool image_paint_body_type_auto_corrected =
+                live_image_paint_body_type != image_paint_body_type;
             // The body selector controls the editor guide, not which live mesh receives paint.
             // A job must always use the verified live profile and its matching immutable
             // reference profile.  Rejecting a stale selector merely made Paint/Preview fail
@@ -12519,7 +12532,7 @@ namespace
             metadata += ",\"image_paint_body_type_source\":\"live_profile\"";
             metadata += ",\"image_paint_body_type_auto_corrected\":" +
                         std::string(json_bool(image_paint_body_type_auto_corrected));
-            metadata += ",\"image_paint_profile_kind\":\"" + std::string(profile_is_cube ? "cube" : "round") + "\"";
+            metadata += ",\"image_paint_profile_kind\":\"" + live_image_paint_body_type + "\"";
 
             const auto image_reference_catalog = load_mesh_first_image_reference_profile_catalog();
             metadata += ",\"image_paint_reference_profile_catalog_count\":" +

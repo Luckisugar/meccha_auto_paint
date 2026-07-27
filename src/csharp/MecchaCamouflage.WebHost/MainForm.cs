@@ -277,7 +277,8 @@ public sealed class MainForm : Form
                      "app.js",
                      "styles.css",
                      Path.Combine("mesh-profiles", "paintman.image-profile-v2.json"),
-                     Path.Combine("mesh-profiles", "paintman_cube.image-profile-v2.json")
+                     Path.Combine("mesh-profiles", "paintman_cube.image-profile-v2.json"),
+                     Path.Combine("mesh-profiles", "paintman_hukuyoka.image-profile-v2.json")
                  })
         {
             var path = Path.Combine(webRoot, fileName);
@@ -1102,13 +1103,10 @@ public sealed class MainForm : Form
 
     private async Task<object> HandleGetImageGuideAsync(JsonElement payload)
     {
-        var bodyType = "round";
-        if (payload.TryGetProperty("bodyType", out var bodyTypePayload) &&
-            bodyTypePayload.ValueKind == JsonValueKind.String &&
-            string.Equals(bodyTypePayload.GetString(), "cube", StringComparison.OrdinalIgnoreCase))
-        {
-            bodyType = "cube";
-        }
+        var bodyType = payload.TryGetProperty("bodyType", out var bodyTypePayload) &&
+                       bodyTypePayload.ValueKind == JsonValueKind.String
+            ? ImagePaintSettings.NormalizeBodyType(bodyTypePayload.GetString())
+            : "round";
         return await session.GetImageGuideAsync(bodyType);
     }
 

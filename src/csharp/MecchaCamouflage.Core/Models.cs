@@ -155,6 +155,17 @@ public sealed class ImagePaintSettings
     public const long MaximumTotalSourceBytes = 64L * 1024 * 1024;
     public const int BackgroundPbrCanvasEncodingVersion = 2;
 
+    public static bool IsSupportedBodyType(string? bodyType) =>
+        bodyType is "round" or "cube" or "fukuyoka";
+
+    public static string NormalizeBodyType(string? bodyType) =>
+        bodyType?.Trim().ToLowerInvariant() switch
+        {
+            "cube" => "cube",
+            "fukuyoka" => "fukuyoka",
+            _ => "round"
+        };
+
     public bool Enabled { get; set; }
     public int Revision { get; set; }
     // Version 2 reserves alpha 254 for Background pixels. Earlier imported
@@ -209,9 +220,9 @@ public sealed class ImagePaintSettings
             message = "Image canvas encoding version is invalid.";
             return false;
         }
-        if (BodyType is not ("round" or "cube"))
+        if (!IsSupportedBodyType(BodyType))
         {
-            message = "Image body type must be round or cube.";
+            message = "Image body type must be round, cube, or fukuyoka.";
             return false;
         }
         if (AlphaMode is not ("skip" or "background"))
@@ -280,7 +291,7 @@ public sealed class ImagePaintSettings
         CanvasEncodingVersion = CanvasEncodingVersion == BackgroundPbrCanvasEncodingVersion
             ? BackgroundPbrCanvasEncodingVersion
             : 0;
-        BodyType = BodyType is "cube" ? "cube" : "round";
+        BodyType = NormalizeBodyType(BodyType);
         AlphaMode = AlphaMode is "background" ? "background" : "skip";
         FrontRegionMode = FrontRegionMode is "skip" ? "skip" : "fill";
         RightRegionMode = RightRegionMode is "skip" ? "skip" : "fill";

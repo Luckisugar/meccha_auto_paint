@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("round", "cube", "all")]
+    [ValidateSet("round", "cube", "fukuyoka", "all")]
     [string]$BodyType = "all"
 )
 
@@ -71,6 +71,11 @@ $profiles = @(
         BodyType = "cube"
         RawFile = "paintman_cube.mesh-profile-v2.json"
         ImageFile = "paintman_cube.image-profile-v2.json"
+    },
+    [PSCustomObject]@{
+        BodyType = "fukuyoka"
+        RawFile = "paintman_hukuyoka.mesh-profile-v2.json"
+        ImageFile = "paintman_hukuyoka.image-profile-v2.json"
     }
 )
 

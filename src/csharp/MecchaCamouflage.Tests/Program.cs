@@ -73,6 +73,7 @@ var tests = new List<(string Name, Action Run)>
     ("ESP snaplines default on", EspSnaplinesDefaultOn),
     ("regions default to side and back paint", RegionsDefaultToSideAndBackPaint),
     ("image design defaults are safe and persist", ImageDesignDefaultsAreSafeAndPersist),
+    ("image design preserves the fukuyoka body type", ImageDesignPreservesFukuyokaBodyType),
     ("web Image Fill payload uses an RGB object", WebImageFillPayloadUsesRgbObject),
     ("image layer crop validates normalized bounds", ImageLayerCropValidatesNormalizedBounds),
     ("legacy image transforms migrate to individual layers", LegacyImageTransformsMigrateToIndividualLayers),
@@ -101,6 +102,10 @@ var tests = new List<(string Name, Action Run)>
     ("web ui localizes every settings tab", WebUiLocalizesEverySettingsTab),
     ("web ui localizes image editor controls and crop dialog", WebUiLocalizesImageEditorControlsAndCropDialog),
     ("web ui localizes operation errors", WebUiLocalizesOperationErrors),
+    ("web ui exposes fukuyoka directly after cube", WebUiExposesFukuyokaDirectlyAfterCube),
+    ("host and capture tool preserve fukuyoka", HostAndCaptureToolPreserveFukuyoka),
+    ("profile refresh supports fukuyoka", ProfileRefreshSupportsFukuyoka),
+    ("native maps the hukuyoka asset identity to fukuyoka", NativeMapsHukuyokaAssetIdentityToFukuyoka),
     ("native startup and WebView recovery dialogs are localized", NativeStartupAndWebViewRecoveryDialogsAreLocalized),
     ("native preset file dialogs are localized", NativePresetFileDialogsAreLocalized),
     ("every declared web localization key resolves in every locale", EveryDeclaredWebLocalizationKeyResolvesInEveryLocale),
@@ -236,6 +241,34 @@ static void ImageDesignDefaultsAreSafeAndPersist()
         DataBase64 = Convert.ToBase64String([1, 2, 3])
     };
     Assert(webpLayer.TryValidate(out _), "image source layers with WebP format should be accepted");
+}
+
+static void ImageDesignPreservesFukuyokaBodyType()
+{
+    var design = new ImagePaintSettings
+    {
+        Enabled = true,
+        Revision = 1,
+        CanvasEncodingVersion = ImagePaintSettings.BackgroundPbrCanvasEncodingVersion,
+        BodyType = "fukuyoka",
+        CanvasRgbaBase64 = Convert.ToBase64String(new byte[ImagePaintSettings.CanvasByteLength]),
+        Layers =
+        [
+            new ImagePaintLayer
+            {
+                FileName = "fukuyoka.png",
+                MimeType = "image/png",
+                DataBase64 = Convert.ToBase64String([1])
+            }
+        ]
+    };
+
+    design.ClampDraft();
+
+    Assert(design.BodyType == "fukuyoka",
+        "normalizing an Image draft must preserve the selected fukuyoka body");
+    Assert(design.TryValidate(out var message),
+        "a fukuyoka Image draft must pass the same validation as round and cube: " + message);
 }
 
 static void WebImageFillPayloadUsesRgbObject()
@@ -843,6 +876,8 @@ static void NativeImagePaintUsesLiveProfileWhenSelectedBodyDiffers()
     var bridgeJson = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge_json.inc"));
 
     Assert(!bridge.Contains("The selected image body does not match the live mesh profile", StringComparison.Ordinal) &&
+           bridge.Contains("mesh_first_profile_body_type", StringComparison.Ordinal) &&
+           bridge.Contains("\"fukuyoka\"", StringComparison.Ordinal) &&
            bridge.Contains("image_paint_requested_body_type", StringComparison.Ordinal) &&
            bridge.Contains("image_paint_body_type_source", StringComparison.Ordinal) &&
            bridge.Contains("live_profile", StringComparison.Ordinal) &&
@@ -2614,6 +2649,117 @@ static void WebUiUsesPackagedReferenceGuides()
            migrationScript.Contains("ProfileRole", StringComparison.Ordinal) &&
            migrationScript.Contains("paintman_cube.image-profile-v2.json", StringComparison.Ordinal),
         "one-time migration must split legacy embedded reference poses into raw dump and derived Image profile files without manual JSON editing");
+}
+
+static void WebUiExposesFukuyokaDirectlyAfterCube()
+{
+    var repository = FindRepositoryRoot();
+    var index = ReadRepositoryText(Path.Combine(
+        repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "index.html"));
+    var app = ReadRepositoryText(Path.Combine(
+        repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "app.js"));
+    var styles = ReadRepositoryText(Path.Combine(
+        repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "styles.css"));
+    var cube = index.IndexOf("id=\"image-guide-cube\"", StringComparison.Ordinal);
+    var fukuyoka = index.IndexOf("id=\"image-guide-fukuyoka\"", StringComparison.Ordinal);
+
+    Assert(cube >= 0 && fukuyoka > cube,
+        "the Fukuyoka Image body tile must appear directly after Cube");
+    Assert(app.Contains("fukuyoka: \"mesh-profiles/paintman_hukuyoka.image-profile-v2.json\"", StringComparison.Ordinal) &&
+           app.Contains("setImageBodyType(\"fukuyoka\")", StringComparison.Ordinal),
+        "the Fukuyoka tile must load its packaged image profile and preserve its body identity");
+    Assert(styles.Contains(".image-choice {\n  grid-template-columns: repeat(3, minmax(0, 1fr));", StringComparison.Ordinal),
+        "Round, Cube, and Fukuyoka must remain on one row in that order");
+}
+
+static void HostAndCaptureToolPreserveFukuyoka()
+{
+    var repository = FindRepositoryRoot();
+    var hostSession = ReadRepositoryText(Path.Combine(
+        repository, "src", "csharp", "MecchaCamouflage.Controller", "HostSession.cs"));
+    var program = ReadRepositoryText(Path.Combine(
+        repository, "src", "csharp", "MecchaCamouflage.WebHost", "Program.cs"));
+    var mainForm = ReadRepositoryText(Path.Combine(
+        repository, "src", "csharp", "MecchaCamouflage.WebHost", "MainForm.cs"));
+    var imageLibrary = ReadRepositoryText(Path.Combine(
+        repository, "src", "csharp", "MecchaCamouflage.Core", "ImageDesignLibrary.cs"));
+
+    Assert(hostSession.Contains("ImagePaintSettings.NormalizeBodyType", StringComparison.Ordinal),
+        "guide and reference capture requests must preserve the fukuyoka body identity");
+    Assert(program.Contains("--capture-fukuyoka-reference-pose", StringComparison.Ordinal),
+        "the development capture tool must support the fukuyoka neutral-pose command");
+    Assert(mainForm.Contains("paintman_hukuyoka.image-profile-v2.json", StringComparison.Ordinal),
+        "the Web host must serve the packaged Fukuyoka image profile");
+    Assert(mainForm.Contains("ImagePaintSettings.NormalizeBodyType", StringComparison.Ordinal) &&
+           hostSession.Contains("ImagePaintSettings.NormalizeBodyType", StringComparison.Ordinal) &&
+           imageLibrary.Contains("ImagePaintSettings.IsSupportedBodyType", StringComparison.Ordinal) &&
+           !mainForm.Contains("private static string NormalizeImageBodyType", StringComparison.Ordinal) &&
+           !hostSession.Contains("private static string NormalizeImageBodyType", StringComparison.Ordinal),
+        "guide requests, artifacts, and saved design manifests must share one body-type contract");
+}
+
+static void ProfileRefreshSupportsFukuyoka()
+{
+    var repository = FindRepositoryRoot();
+    var refresh = ReadRepositoryText(Path.Combine(
+        repository, "scripts", "refresh-image-reference-profile.ps1"));
+    using var profile = JsonDocument.Parse(File.ReadAllText(Path.Combine(
+        repository, "resources", "mesh-profiles", "paintman_hukuyoka.mesh-profile-v2.json")));
+    var root = profile.RootElement;
+    using var imageProfile = JsonDocument.Parse(File.ReadAllText(Path.Combine(
+        repository, "resources", "mesh-profiles", "paintman_hukuyoka.image-profile-v2.json")));
+    var imageRoot = imageProfile.RootElement;
+
+    Assert(refresh.Contains("[ValidateSet(\"round\", \"cube\", \"fukuyoka\")]", StringComparison.Ordinal) &&
+           refresh.Contains("paintman_hukuyoka.uasset", StringComparison.Ordinal) &&
+           refresh.Contains("paintman_hukuyoka.mesh-profile-v2.json", StringComparison.Ordinal) &&
+           refresh.Contains("paintman_hukuyoka.image-profile-v2.json", StringComparison.Ordinal) &&
+           refresh.Contains("ExpectedVertices = 1508", StringComparison.Ordinal) &&
+           refresh.Contains("ExpectedIndices = 7584", StringComparison.Ordinal) &&
+           refresh.Contains("RedirectStandardOutput = $true", StringComparison.Ordinal) &&
+           refresh.Contains("RedirectStandardError = $true", StringComparison.Ordinal) &&
+           refresh.Contains("$process.WaitForExit()", StringComparison.Ordinal) &&
+           refresh.Contains("$process.ExitCode", StringComparison.Ordinal),
+        "the documented profile refresh command must preserve the measured Fukuyoka topology");
+    Assert(root.GetProperty("ProfileSchemaVersion").GetInt32() == 2 &&
+           root.GetProperty("SourcePath").GetString() ==
+               "Chameleon/Content/3Dmodel/cLeon/charactor/paintman/skeltal/paintman_hukuyoka.uasset" &&
+           root.GetProperty("Export").GetString() == "paintman_hukuyoka" &&
+           root.GetProperty("VertexCount").GetInt32() == 1508 &&
+           root.GetProperty("IndexCount").GetInt32() == 7584 &&
+           root.GetProperty("TriangleCount").GetInt32() == 2528 &&
+           root.GetProperty("Bones").GetArrayLength() == 28 &&
+           root.GetProperty("Lod0").GetProperty("Vertices").GetArrayLength() == 1508 &&
+           root.GetProperty("Lod0").GetProperty("Indices").GetArrayLength() == 7584 &&
+           root.GetProperty("Triangles").GetArrayLength() == 2528 &&
+           !root.TryGetProperty("ImageReferencePose", out _),
+        "the packaged Fukuyoka raw profile must match the current 3.3.1 asset and remain free of captured editor pose data");
+    Assert(imageRoot.GetProperty("ProfileRole").GetString() == "image_reference" &&
+           imageRoot.GetProperty("BaseProfileId").GetString() == root.GetProperty("ProfileId").GetString() &&
+           imageRoot.GetProperty("BaseProfileHash").GetString() == root.GetProperty("ProfileHash").GetString() &&
+           imageRoot.GetProperty("ImageReferencePose").GetProperty("ComponentTransforms").GetArrayLength() == 28 &&
+           imageRoot.GetProperty("ImageReferencePose").GetProperty("Vertices").GetArrayLength() == 1508,
+        "the packaged Fukuyoka Image profile must derive from the current raw profile and contain one complete neutral-pose capture");
+}
+
+static void NativeMapsHukuyokaAssetIdentityToFukuyoka()
+{
+    var repository = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(
+        repository, "src", "native", "bridge", "bridge.cpp"));
+    using var profile = JsonDocument.Parse(File.ReadAllText(Path.Combine(
+        repository, "resources", "mesh-profiles", "paintman_hukuyoka.mesh-profile-v2.json")));
+    var identity = string.Join(
+        "\n",
+        profile.RootElement.GetProperty("ProfileId").GetString(),
+        profile.RootElement.GetProperty("SourcePath").GetString(),
+        profile.RootElement.GetProperty("Export").GetString());
+
+    Assert(identity.Contains("hukuyoka", StringComparison.OrdinalIgnoreCase) &&
+           !identity.Contains("fukuyoka", StringComparison.OrdinalIgnoreCase),
+        "the current game asset must retain its authoritative hukuyoka spelling");
+    Assert(bridge.Contains("identity.find(\"hukuyoka\")", StringComparison.Ordinal),
+        "native body classification must map the game's hukuyoka asset spelling to the public fukuyoka body type");
 }
 
 static void WebUiRendersPassProgressAndTotalEta()

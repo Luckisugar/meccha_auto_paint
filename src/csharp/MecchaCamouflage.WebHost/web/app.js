@@ -54,7 +54,8 @@ const IMAGE_TRANSFER_CHUNK_CHARACTERS = 128 * 1024;
 const IMAGE_RESIZE_HANDLE_SIZE = 20;
 const IMAGE_GUIDE_PROFILE_FILES = Object.freeze({
   round: "mesh-profiles/paintman.image-profile-v2.json",
-  cube: "mesh-profiles/paintman_cube.image-profile-v2.json"
+  cube: "mesh-profiles/paintman_cube.image-profile-v2.json",
+  fukuyoka: "mesh-profiles/paintman_hukuyoka.image-profile-v2.json"
 });
 const imageGuideCanvasCache = new Map();
 const imageGuideProfileLoads = new Map();
@@ -1272,6 +1273,7 @@ function initializeImageEditor() {
   const input = byId("image-file-input");
   byId("image-guide-round").addEventListener("click", () => setImageBodyType("round"));
   byId("image-guide-cube").addEventListener("click", () => setImageBodyType("cube"));
+  byId("image-guide-fukuyoka").addEventListener("click", () => setImageBodyType("fukuyoka"));
   byId("image-upload").addEventListener("click", () => {
     if (canEditImage()) input.click();
   });
@@ -1624,7 +1626,7 @@ function drawImageComposition() {
 }
 
 function normalizeImageGuideBodyType(bodyType) {
-  return bodyType === "cube" ? "cube" : "round";
+  return bodyType === "cube" || bodyType === "fukuyoka" ? bodyType : "round";
 }
 
 function loadReferenceImageGuideProfile(bodyType) {
@@ -2197,7 +2199,11 @@ function renderImageEditor() {
       }
     }
   }
-  for (const [id, active] of [["image-guide-round", imageEditor.bodyType === "round"], ["image-guide-cube", imageEditor.bodyType === "cube"]]) {
+  for (const [id, active] of [
+    ["image-guide-round", imageEditor.bodyType === "round"],
+    ["image-guide-cube", imageEditor.bodyType === "cube"],
+    ["image-guide-fukuyoka", imageEditor.bodyType === "fukuyoka"]
+  ]) {
     byId(id).classList.toggle("active", active);
   }
   setNumberPair("image-brush-size", "image-brush-size-number", imageEditor.brushSizeTexels);
@@ -2407,7 +2413,7 @@ async function loadImagePreset() {
 
 async function hydrateImageEditor(design, transferId, draft) {
   const next = newImageEditor();
-  next.bodyType = design?.bodyType === "cube" ? "cube" : "round";
+  next.bodyType = normalizeImageGuideBodyType(design?.bodyType);
   next.frontRegionMode = design?.frontRegionMode === "skip" ? "skip" : "fill";
   next.rightRegionMode = design?.rightRegionMode === "skip" ? "skip" : "fill";
   next.backRegionMode = design?.backRegionMode === "skip" ? "skip" : "fill";

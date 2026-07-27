@@ -272,7 +272,7 @@ public sealed class ImageDesignLibrary
                 message = "The image design manifest has invalid layers.";
                 return false;
             }
-            if (manifest.Design.BodyType is not ("round" or "cube") ||
+            if (!ImagePaintSettings.IsSupportedBodyType(manifest.Design.BodyType) ||
                 manifest.Design.AlphaMode is not ("skip" or "background") ||
                 manifest.Design.CanvasEncodingVersion is not (0 or ImagePaintSettings.BackgroundPbrCanvasEncodingVersion) ||
                 manifest.Design.Revision < 1)
