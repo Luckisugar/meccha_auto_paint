@@ -44,6 +44,12 @@
 
 A Windows desktop app for MECCHA CHAMELEON.
 
+## Features
+
+- **Paint**: Paint a player character with custom colors and materials.
+- **Image Paint**: Paint imported images onto a player character.
+- **ESP**: Show player locations and information in game.
+
 ## Download
 
 Download the latest <code>meccha-camouflage.exe</code> from <a href="https://github.com/acentrist/MecchaCamouflage/releases/latest">GitHub Releases</a>.
