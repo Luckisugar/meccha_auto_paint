@@ -975,4 +975,175 @@ namespace runtime_contract
         return enabled && current_generation == captured_generation;
     }
 
+    constexpr std::uint64_t EspHudCaptureStallMs = 1'000;
+    constexpr std::uint64_t EspHudRebindMinIntervalMs = 2'000;
+
+    // A reflected UFunction is shared by every instance which dispatches that
+    // callback. Lobby -> match travel replaces the HUD UObject, so its address
+    // is intentionally not part of the durable callback identity.
+    constexpr bool esp_hud_callback_matches(std::uintptr_t expected_function,
+                                            std::uintptr_t actual_function)
+    {
+        return expected_function != 0 && expected_function == actual_function;
+    }
+
+    constexpr bool esp_hud_rebind_due(bool enabled,
+                                      std::uint64_t present_callbacks,
+                                      std::uint64_t last_capture_ms,
+                                      std::uint64_t now_ms,
+                                      std::uint64_t last_request_ms)
+    {
+        return enabled &&
+               present_callbacks > 0 &&
+               now_ms >= last_capture_ms &&
+               now_ms - last_capture_ms >= EspHudCaptureStallMs &&
+               now_ms >= last_request_ms &&
+               now_ms - last_request_ms >= EspHudRebindMinIntervalMs;
+    }
+
+    constexpr bool esp_native_renderer_configuration_is_reusable(
+        bool requested_enabled,
+        bool same_configuration,
+        bool renderer_enabled,
+        bool renderer_unavailable)
+    {
+        return requested_enabled &&
+               same_configuration &&
+               renderer_enabled &&
+               !renderer_unavailable;
+    }
+
+    struct EspScreenBounds
+    {
+        double left{0.0};
+        double top{0.0};
+        double right{0.0};
+        double bottom{0.0};
+    };
+
+    constexpr auto esp_expand_screen_bounds(EspScreenBounds bounds,
+                                            double horizontal_ratio,
+                                            double vertical_ratio) -> EspScreenBounds
+    {
+        if (bounds.right <= bounds.left || bounds.bottom <= bounds.top)
+        {
+            return bounds;
+        }
+        const auto horizontal =
+            horizontal_ratio > 0.0 ? (bounds.right - bounds.left) * horizontal_ratio : 0.0;
+        const auto vertical =
+            vertical_ratio > 0.0 ? (bounds.bottom - bounds.top) * vertical_ratio : 0.0;
+        return {
+            bounds.left - horizontal,
+            bounds.top - vertical,
+            bounds.right + horizontal,
+            bounds.bottom + vertical};
+    }
+
+    constexpr bool esp_pose_array_header_usable(std::uintptr_t data,
+                                                int count,
+                                                int capacity,
+                                                int required_bones)
+    {
+        return data != 0 &&
+               required_bones > 0 &&
+               count >= required_bones &&
+               capacity >= count &&
+               capacity <= 512;
+    }
+
+    enum class EspPoseTransformSpace
+    {
+        Unavailable = 0,
+        Component = 1,
+        Local = 2,
+    };
+
+    constexpr auto esp_select_pose_space(double component_error,
+                                         double local_error) -> EspPoseTransformSpace
+    {
+        const bool component_valid = component_error >= 0.0;
+        const bool local_valid = local_error >= 0.0;
+        if (!component_valid && !local_valid)
+        {
+            return EspPoseTransformSpace::Unavailable;
+        }
+        if (component_valid && (!local_valid || component_error <= local_error))
+        {
+            return EspPoseTransformSpace::Component;
+        }
+        return EspPoseTransformSpace::Local;
+    }
+
+    constexpr auto esp_ascii_glyph_rows(wchar_t character)
+        -> std::array<std::uint8_t, 7>
+    {
+        const wchar_t value =
+            character >= L'a' && character <= L'z'
+                ? static_cast<wchar_t>(character - L'a' + L'A')
+                : character;
+        switch (value)
+        {
+        case L'A': return {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
+        case L'B': return {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E};
+        case L'C': return {0x0F, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0F};
+        case L'D': return {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E};
+        case L'E': return {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F};
+        case L'F': return {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10};
+        case L'G': return {0x0F, 0x10, 0x10, 0x17, 0x11, 0x11, 0x0F};
+        case L'H': return {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
+        case L'I': return {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F};
+        case L'J': return {0x07, 0x02, 0x02, 0x02, 0x12, 0x12, 0x0C};
+        case L'K': return {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11};
+        case L'L': return {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F};
+        case L'M': return {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11};
+        case L'N': return {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11};
+        case L'O': return {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
+        case L'P': return {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10};
+        case L'Q': return {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D};
+        case L'R': return {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11};
+        case L'S': return {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E};
+        case L'T': return {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
+        case L'U': return {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
+        case L'V': return {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04};
+        case L'W': return {0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A};
+        case L'X': return {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11};
+        case L'Y': return {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04};
+        case L'Z': return {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F};
+        case L'0': return {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E};
+        case L'1': return {0x04, 0x0C, 0x14, 0x04, 0x04, 0x04, 0x1F};
+        case L'2': return {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F};
+        case L'3': return {0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E};
+        case L'4': return {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02};
+        case L'5': return {0x1F, 0x10, 0x10, 0x1E, 0x01, 0x01, 0x1E};
+        case L'6': return {0x0E, 0x10, 0x10, 0x1E, 0x11, 0x11, 0x0E};
+        case L'7': return {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08};
+        case L'8': return {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E};
+        case L'9': return {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E};
+        case L' ': return {};
+        case L'-': return {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00};
+        case L'_': return {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F};
+        case L'.': return {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C};
+        case L':': return {0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00};
+        case L'/': return {0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10};
+        case L'[': return {0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E};
+        case L']': return {0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E};
+        case L'?': return {0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04};
+        default: return esp_ascii_glyph_rows(L'?');
+        }
+    }
+
+    constexpr double esp_projection_scale_from_sample(double center,
+                                                      double raw_screen,
+                                                      double engine_screen)
+    {
+        const auto raw_delta = raw_screen - center;
+        if (raw_delta > -1.0 && raw_delta < 1.0)
+        {
+            return -1.0;
+        }
+        const auto scale = (engine_screen - center) / raw_delta;
+        return scale >= 0.5 && scale <= 2.5 ? scale : -1.0;
+    }
+
 }

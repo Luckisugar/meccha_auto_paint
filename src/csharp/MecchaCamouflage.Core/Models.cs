@@ -61,13 +61,17 @@ public sealed class PaintSettings
 
 public sealed class EspSettings
 {
-    public bool Enabled { get; set; }
+    public bool Enabled { get; set; } = true;
+    public string TargetScope { get; set; } = "all";
     public bool Boxes { get; set; } = true;
     public bool Skeletons { get; set; } = true;
     public bool Names { get; set; } = true;
     public bool Distance { get; set; } = true;
-    public bool Snaplines { get; set; }
+    public bool Snaplines { get; set; } = true;
+    // `Color` remains the persisted ally color for backward-compatible
+    // configurations written before role-aware ESP existed.
     public RgbColor Color { get; set; } = new(0, 255, 136);
+    public RgbColor EnemyColor { get; set; } = new(255, 0, 0);
 }
 
 /// <summary>

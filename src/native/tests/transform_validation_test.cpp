@@ -121,6 +121,87 @@ int main()
         return 9;
     }
 
+    // HUD instances are replaced during lobby -> match travel. The callback
+    // identity remains the durable contract; the UObject address must not be.
+    if (!runtime_contract::esp_hud_callback_matches(0x2000, 0x2000) ||
+        runtime_contract::esp_hud_callback_matches(0, 0x2000) ||
+        runtime_contract::esp_hud_callback_matches(0x2000, 0x3000))
+    {
+        return 32;
+    }
+    if (runtime_contract::esp_hud_rebind_due(true, 1, 10'000, 10'999, 0) ||
+        !runtime_contract::esp_hud_rebind_due(true, 1, 10'000, 11'000, 0) ||
+        runtime_contract::esp_hud_rebind_due(true, 1, 10'000, 11'500, 11'000) ||
+        !runtime_contract::esp_hud_rebind_due(true, 1, 10'000, 13'000, 11'000) ||
+        runtime_contract::esp_hud_rebind_due(false, 1, 10'000, 13'000, 0) ||
+        runtime_contract::esp_hud_rebind_due(true, 0, 10'000, 13'000, 0))
+    {
+        return 33;
+    }
+    if (!runtime_contract::esp_native_renderer_configuration_is_reusable(
+            true, true, true, false) ||
+        runtime_contract::esp_native_renderer_configuration_is_reusable(
+            true, false, true, false) ||
+        runtime_contract::esp_native_renderer_configuration_is_reusable(
+            true, true, false, false) ||
+        runtime_contract::esp_native_renderer_configuration_is_reusable(
+            true, true, true, true) ||
+        runtime_contract::esp_native_renderer_configuration_is_reusable(
+            false, true, false, false))
+    {
+        return 34;
+    }
+
+    const runtime_contract::EspScreenBounds capsule_bounds{
+        100.0, 200.0, 200.0, 400.0};
+    const auto expanded_bounds =
+        runtime_contract::esp_expand_screen_bounds(capsule_bounds, 0.10, 0.05);
+    if (expanded_bounds.left != 90.0 ||
+        expanded_bounds.top != 190.0 ||
+        expanded_bounds.right != 210.0 ||
+        expanded_bounds.bottom != 410.0)
+    {
+        return 35;
+    }
+    if (!runtime_contract::esp_pose_array_header_usable(0x1000, 96, 128, 28) ||
+        runtime_contract::esp_pose_array_header_usable(0, 96, 128, 28) ||
+        runtime_contract::esp_pose_array_header_usable(0x1000, 27, 128, 28) ||
+        runtime_contract::esp_pose_array_header_usable(0x1000, 96, 95, 28) ||
+        runtime_contract::esp_pose_array_header_usable(0x1000, 96, 513, 28))
+    {
+        return 36;
+    }
+    if (runtime_contract::esp_select_pose_space(0.05, 0.75) !=
+            runtime_contract::EspPoseTransformSpace::Component ||
+        runtime_contract::esp_select_pose_space(0.80, 0.04) !=
+            runtime_contract::EspPoseTransformSpace::Local ||
+        runtime_contract::esp_select_pose_space(-1.0, -1.0) !=
+            runtime_contract::EspPoseTransformSpace::Unavailable)
+    {
+        return 37;
+    }
+    const auto glyph_a = runtime_contract::esp_ascii_glyph_rows(L'A');
+    const auto glyph_lower_a = runtime_contract::esp_ascii_glyph_rows(L'a');
+    const auto glyph_unknown = runtime_contract::esp_ascii_glyph_rows(L'\u3042');
+    const auto glyph_question = runtime_contract::esp_ascii_glyph_rows(L'?');
+    if (glyph_a[0] != 0x0E || glyph_a[3] != 0x1F ||
+        glyph_lower_a != glyph_a ||
+        glyph_unknown != glyph_question)
+    {
+        return 38;
+    }
+    const auto projection_scale =
+        runtime_contract::esp_projection_scale_from_sample(
+            1720.0, 1848.0, 1892.0);
+    if (std::abs(projection_scale - 1.34375) > 0.000001 ||
+        runtime_contract::esp_projection_scale_from_sample(
+            1720.0, 1720.0, 1892.0) >= 0.0 ||
+        runtime_contract::esp_projection_scale_from_sample(
+            1720.0, 1848.0, 2500.0) >= 0.0)
+    {
+        return 39;
+    }
+
     const runtime_contract::ImageAtlasMappingInput round_front{
         false, runtime_contract::ImageAtlasRegion::Front, false,
         0.0, 0.80, 0.50, 0.0, 0.0, 1.0,

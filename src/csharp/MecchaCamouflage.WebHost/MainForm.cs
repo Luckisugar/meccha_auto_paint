@@ -62,7 +62,6 @@ public sealed class MainForm : Form
     };
 
     private readonly HostSession session;
-    private readonly EspOverlayForm espOverlay;
     private readonly WebViewStartupLifecycle webViewStartup = new();
     private WebView2? webView;
     private readonly System.Windows.Forms.Timer statusTimer = new() { Interval = 2000 };
@@ -77,6 +76,12 @@ public sealed class MainForm : Form
     private bool webViewRecoveryInProgress;
     private bool bridgeShutdownInProgress;
     private bool bridgeShutdownCompleted;
+    private string nativeEspConfigurationSignature = "";
+    private Guid? nativeEspConfigurationInstanceId;
+    private EspSettings? nativeEspPreview;
+    private long nativeEspPreviewGeneration;
+    private DateTimeOffset nextNativeEspStatusPoll = DateTimeOffset.MinValue;
+    private string nativeEspStatusSignature = "";
     private readonly Dictionary<string, StagedImageDesignTransfer> stagedImageDesigns = new(StringComparer.Ordinal);
     // Presets are loaded through a native dialog and held only long enough for
     // the WebView to request their assets in bounded chunks. They are drafts:
@@ -106,7 +111,6 @@ public sealed class MainForm : Form
     public MainForm(HostSession session)
     {
         this.session = session;
-        espOverlay = new EspOverlayForm(session);
         Text = UiText("app.title");
         Icon = LoadWindowIcon();
         MinimumSize = new Size(960, 640);
@@ -126,7 +130,6 @@ public sealed class MainForm : Form
 
         Shown += async (_, _) =>
         {
-            espOverlay.Start();
             try
             {
                 ApplyWindowSettings("shown");
@@ -142,9 +145,14 @@ public sealed class MainForm : Form
         Move += (_, _) => PersistWindowSnapshot();
         statusTimer.Tick += async (_, _) =>
         {
-            statusTimer.Interval = session.PaintRunning ? 500 : 2000;
+            // A D3D12 Present core must observe CreateSwapChain* before the
+            // game creates its renderer. While disconnected, poll quickly so
+            // a GUI that is already open attaches during process startup;
+            // once attached retain the existing low-overhead cadence.
+            statusTimer.Interval = !session.Runtime.IsConnected ? 250 : session.PaintRunning ? 500 : 2000;
             if (webReady)
                 StartBridgeWarmup();
+            PollNativePresentEspStatus();
             await PushSnapshotAsync();
         };
         session.Log.Changed += (_, _) => PushSnapshotFromAnyThread();
@@ -184,7 +192,6 @@ public sealed class MainForm : Form
         webReady = false;
         CancelUiReadyTimeout();
         statusTimer.Stop();
-        espOverlay.Dispose();
         PersistWindowSnapshot();
         UnregisterRawKeyboardInput();
         hotkeyKeyState.Clear();
@@ -480,9 +487,158 @@ public sealed class MainForm : Form
             try
             {
                 await session.WarmupBridgeAsync();
+                QueueNativePresentEspConfiguration(nativeEspPreview ?? session.Settings.Esp);
             }
             catch (OperationCanceledException)
             {
+            }
+        });
+    }
+
+    private static EspSettings CopyEspSettings(EspSettings settings) => new()
+    {
+        Enabled = settings.Enabled,
+        TargetScope = settings.TargetScope,
+        Boxes = settings.Boxes,
+        Skeletons = settings.Skeletons,
+        Names = settings.Names,
+        Distance = settings.Distance,
+        Snaplines = settings.Snaplines,
+        Color = settings.Color,
+        EnemyColor = settings.EnemyColor
+    };
+
+    private static string NativeEspSignature(EspSettings settings) => string.Join('|',
+        settings.Enabled,
+        settings.TargetScope,
+        settings.Boxes,
+        settings.Skeletons,
+        settings.Names,
+        settings.Distance,
+        settings.Snaplines,
+        settings.Color.ToHex(),
+        settings.EnemyColor.ToHex());
+
+    /// <summary>
+    /// The desktop host owns only configuration. It deliberately has no ESP
+    /// window, Present event consumer, or process-memory frame reader.
+    /// </summary>
+    private void QueueNativePresentEspConfiguration(EspSettings settings)
+    {
+        var copy = CopyEspSettings(settings);
+        var signature = NativeEspSignature(copy);
+        var instanceId = session.Runtime.ActiveBridgeInstanceId;
+        if (instanceId is not null && instanceId == nativeEspConfigurationInstanceId &&
+            string.Equals(signature, nativeEspConfigurationSignature, StringComparison.Ordinal))
+            return;
+        nativeEspConfigurationSignature = signature;
+        nativeEspConfigurationInstanceId = instanceId;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var reply = await session.ConfigureNativePresentEspAsync(copy);
+                if (reply.Success)
+                {
+                    session.Log.Info("ESP: native Present renderer " + reply.Message + ".");
+                    return;
+                }
+                if (reply.Message.Contains("resident Present detour", StringComparison.OrdinalIgnoreCase))
+                {
+                    // An unknown renderer hook may belong to Steam or capture
+                    // software as well as a prior bridge. Keep this signature
+                    // latched so periodic warmup cannot retry an unsafe vtable
+                    // replacement and flood the log.
+                    session.Log.Warn("ESP: native Present renderer unavailable | " + reply.Stage + " | " + reply.Message);
+                    return;
+                }
+                nativeEspConfigurationSignature = "";
+                nativeEspConfigurationInstanceId = null;
+                session.Log.Warn("ESP: native Present renderer unavailable | " + reply.Stage + " | " + reply.Message);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException)
+            {
+                nativeEspConfigurationSignature = "";
+                nativeEspConfigurationInstanceId = null;
+                session.Log.Warn("ESP: native Present renderer is waiting for the bridge: " + ex.Message);
+            }
+        });
+    }
+
+    private void PollNativePresentEspStatus()
+    {
+        if (!session.Runtime.IsConnected || DateTimeOffset.UtcNow < nextNativeEspStatusPoll)
+            return;
+        nextNativeEspStatusPoll = DateTimeOffset.UtcNow.AddSeconds(2);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var reply = await session.GetNativePresentEspStatusAsync();
+                if (string.IsNullOrWhiteSpace(reply.Raw))
+                    return;
+                using var document = JsonDocument.Parse(reply.Raw);
+                var metadata = document.RootElement.TryGetProperty("metadata", out var value) ? value : default;
+                if (metadata.ValueKind != JsonValueKind.Object)
+                    return;
+                var status = metadata.TryGetProperty("status", out var statusValue) ? statusValue.GetString() ?? "unknown" : "unknown";
+                var reason = document.RootElement.TryGetProperty("message", out var messageValue) ? messageValue.GetString() ?? "" : "";
+                var format = metadata.TryGetProperty("swapchain_format", out var formatValue) ? formatValue.GetString() ?? "" : "";
+                var sequence = metadata.TryGetProperty("snapshot_sequence", out var sequenceValue) ? sequenceValue.GetUInt64() : 0;
+                var frames = metadata.TryGetProperty("rendered_frames", out var framesValue) ? framesValue.GetUInt64() : 0;
+                var captureStatus = metadata.TryGetProperty("capture_status", out var captureStatusValue) ? captureStatusValue.GetString() ?? "unknown" : "unknown";
+                var captureAge = metadata.TryGetProperty("capture_age_ms", out var captureAgeValue) ? captureAgeValue.GetUInt64() : 0;
+                var rebinds = metadata.TryGetProperty("hud_rebinds", out var rebindsValue) ? rebindsValue.GetUInt64() : 0;
+                var rosterSource = metadata.TryGetProperty("roster_source", out var rosterSourceValue) ? rosterSourceValue.GetString() ?? "unknown" : "unknown";
+                var roster = metadata.TryGetProperty("roster_count", out var rosterValue) ? rosterValue.GetUInt32() : 0;
+                var pawns = metadata.TryGetProperty("valid_pawns", out var pawnsValue) ? pawnsValue.GetUInt32() : 0;
+                var capsuleComponents = metadata.TryGetProperty("capsule_components", out var capsuleComponentsValue) ? capsuleComponentsValue.GetUInt32() : 0;
+                var capsuleTransforms = metadata.TryGetProperty("capsule_transforms", out var capsuleTransformsValue) ? capsuleTransformsValue.GetUInt32() : 0;
+                var capsuleSizes = metadata.TryGetProperty("capsule_sizes", out var capsuleSizesValue) ? capsuleSizesValue.GetUInt32() : 0;
+                var capsuleProjected = metadata.TryGetProperty("capsule_projected", out var capsuleProjectedValue) ? capsuleProjectedValue.GetUInt32() : 0;
+                var skeletonContracts = metadata.TryGetProperty("skeleton_contracts", out var skeletonContractsValue) ? skeletonContractsValue.GetUInt64() : 0;
+                var poseProfiles = metadata.TryGetProperty("pose_profile_matches", out var poseProfilesValue) ? poseProfilesValue.GetUInt32() : 0;
+                var poseComponent = metadata.TryGetProperty("pose_component_space", out var poseComponentValue) ? poseComponentValue.GetUInt32() : 0;
+                var poseLocal = metadata.TryGetProperty("pose_local_space", out var poseLocalValue) ? poseLocalValue.GetUInt32() : 0;
+                var poseBones = metadata.TryGetProperty("pose_bones", out var poseBonesValue) ? poseBonesValue.GetUInt32() : 0;
+                var poseEdges = metadata.TryGetProperty("pose_edges", out var poseEdgesValue) ? poseEdgesValue.GetUInt32() : 0;
+                var poses = metadata.TryGetProperty("poses", out var posesValue) ? posesValue.GetUInt32() : 0;
+                var players = metadata.TryGetProperty("players", out var playersValue) ? playersValue.GetUInt32() : 0;
+                var lines = metadata.TryGetProperty("lines", out var linesValue) ? linesValue.GetUInt32() : 0;
+                var texts = metadata.TryGetProperty("texts", out var textsValue) ? textsValue.GetUInt32() : 0;
+                var vertices = metadata.TryGetProperty("vertices", out var verticesValue) ? verticesValue.GetUInt64() : 0;
+                var glyphQuads = metadata.TryGetProperty("glyph_quads", out var glyphQuadsValue) ? glyphQuadsValue.GetUInt64() : 0;
+                var projectionScaleX = metadata.TryGetProperty("projection_scale_x", out var projectionScaleXValue) ? projectionScaleXValue.GetDouble() : 1.0;
+                var projectionScaleY = metadata.TryGetProperty("projection_scale_y", out var projectionScaleYValue) ? projectionScaleYValue.GetDouble() : 1.0;
+                var projectionCalibrations = metadata.TryGetProperty("projection_calibrations", out var projectionCalibrationsValue) ? projectionCalibrationsValue.GetUInt64() : 0;
+                var submitted = metadata.TryGetProperty("submitted_frames", out var submittedValue) ? submittedValue.GetUInt64() : 0;
+                var completed = metadata.TryGetProperty("completed_fences", out var completedValue) ? completedValue.GetUInt64() : 0;
+                var signature = string.Join('|',
+                    status, reason, format, captureStatus, rebinds, rosterSource,
+                    roster, pawns, capsuleComponents, capsuleTransforms, capsuleSizes,
+                    capsuleProjected, skeletonContracts, poseProfiles, poseComponent,
+                    poseLocal, poseBones, poseEdges, poses, players, lines, texts,
+                    vertices, glyphQuads,
+                    Math.Round(projectionScaleX, 4), Math.Round(projectionScaleY, 4),
+                    projectionCalibrations > 0,
+                    submitted > 0, completed > 0);
+                if (string.Equals(signature, nativeEspStatusSignature, StringComparison.Ordinal))
+                    return;
+                nativeEspStatusSignature = signature;
+                session.Log.Info(
+                    $"ESP: native Present status={status}; format={format}; snapshot_sequence={sequence}; " +
+                    $"capture={captureStatus} age_ms={captureAge}; hud_rebinds={rebinds}; " +
+                    $"roster={rosterSource}:{roster}; pawns={pawns}; " +
+                    $"capsule={capsuleComponents}/{capsuleTransforms}/{capsuleSizes}/{capsuleProjected}; " +
+                    $"pose=contracts:{skeletonContracts} profiles:{poseProfiles} " +
+                    $"space:{poseComponent}/{poseLocal} bones:{poseBones} edges:{poseEdges} ready:{poses}; " +
+                    $"geometry={players}/{lines}/{texts}; vertices={vertices}; glyph_quads={glyphQuads}; " +
+                    $"projection_scale={projectionScaleX:F4}/{projectionScaleY:F4} calibrations={projectionCalibrations}; " +
+                    $"submitted_frames={submitted}; completed_fences={completed}; rendered_frames={frames}; reason={reason}.");
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException or IOException)
+            {
+                // The next poll will recover from a bridge generation change.
             }
         });
     }
@@ -841,6 +997,10 @@ public sealed class MainForm : Form
                 return HandleUpdateSetting(command.Payload);
             case "updateSettings":
                 return HandleUpdateSettings(command.Payload);
+            case "previewEspSettings":
+                return HandlePreviewEspSettings(command.Payload);
+            case "clearEspPreview":
+                return HandleClearEspPreview(command.Payload);
             case "resetSetting":
                 return HandleResetSetting(command.Payload);
             case "resetSection":
@@ -1332,6 +1492,12 @@ public sealed class MainForm : Form
     private object ApplyResult(HostCommandResult result)
     {
         ApplyWindowSettings();
+        if (result.Success)
+        {
+            nativeEspPreview = null;
+            nativeEspConfigurationSignature = "";
+            QueueNativePresentEspConfiguration(session.Settings.Esp);
+        }
         _ = PushSnapshotAsync();
         return new { success = result.Success, message = result.Message };
     }
@@ -1354,6 +1520,90 @@ public sealed class MainForm : Form
     {
         if (payload.TryGetProperty("opacity", out var opacityValue) && opacityValue.TryGetDouble(out var opacity))
             Opacity = Math.Clamp(opacity, 0.35, 1.0);
+    }
+
+    private object HandlePreviewEspSettings(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object ||
+            !TryReadBoolean(payload, "enabled", out var enabled) ||
+            !TryReadString(payload, "scope", out var scope) ||
+            !TryReadBoolean(payload, "boxes", out var boxes) ||
+            !TryReadBoolean(payload, "skeletons", out var skeletons) ||
+            !TryReadBoolean(payload, "names", out var names) ||
+            !TryReadBoolean(payload, "distance", out var distance) ||
+            !TryReadBoolean(payload, "snaplines", out var snaplines) ||
+            !TryReadColor(payload, "allyColor", out var allyColor) ||
+            !TryReadColor(payload, "enemyColor", out var enemyColor) ||
+            !TryReadNonnegativeInt64(payload, "generation", out var generation) ||
+            scope is not ("all" or "enemy" or "ally"))
+        {
+            return new { success = false, message = "ESP draft preview is invalid." };
+        }
+
+        if (generation < nativeEspPreviewGeneration)
+            return new { success = true };
+        nativeEspPreviewGeneration = generation;
+        nativeEspPreview = new EspSettings
+        {
+            Enabled = enabled,
+            TargetScope = scope,
+            Boxes = boxes,
+            Skeletons = skeletons,
+            Names = names,
+            Distance = distance,
+            Snaplines = snaplines,
+            Color = allyColor,
+            EnemyColor = enemyColor
+        };
+        nativeEspConfigurationSignature = "";
+        QueueNativePresentEspConfiguration(nativeEspPreview);
+        return new { success = true };
+    }
+
+    private object HandleClearEspPreview(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object ||
+            !TryReadNonnegativeInt64(payload, "generation", out var generation))
+        {
+            return new { success = false, message = "ESP draft preview reset is invalid." };
+        }
+        if (generation < nativeEspPreviewGeneration)
+            return new { success = true };
+        nativeEspPreviewGeneration = generation;
+        nativeEspPreview = null;
+        nativeEspConfigurationSignature = "";
+        QueueNativePresentEspConfiguration(session.Settings.Esp);
+        return new { success = true };
+    }
+
+    private static bool TryReadBoolean(JsonElement payload, string name, out bool value)
+    {
+        value = false;
+        if (!payload.TryGetProperty(name, out var property) ||
+            property.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            return false;
+        value = property.GetBoolean();
+        return true;
+    }
+
+    private static bool TryReadString(JsonElement payload, string name, out string value)
+    {
+        value = "";
+        return payload.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String &&
+               !string.IsNullOrWhiteSpace(value = property.GetString() ?? "");
+    }
+
+    private static bool TryReadColor(JsonElement payload, string name, out RgbColor value)
+    {
+        value = RgbColor.White;
+        return payload.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String &&
+               RgbColor.TryParse(property.GetString(), out value);
+    }
+
+    private static bool TryReadNonnegativeInt64(JsonElement payload, string name, out long value)
+    {
+        value = 0;
+        return payload.TryGetProperty(name, out var property) && property.TryGetInt64(out value) && value >= 0;
     }
 
     private async Task HandleHotkeyAsync(int id)

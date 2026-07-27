@@ -24,7 +24,18 @@ var tests = new List<(string Name, Action Run)>
     ("native image paint uses the live profile when the selected body differs", NativeImagePaintUsesLiveProfileWhenSelectedBodyDiffers),
     ("image unpreview omits paint-plan diagnostics", ImageUnpreviewOmitsPaintPlanDiagnostics),
     ("custom freecam surface is absent", CustomFreecamSurfaceIsAbsent),
-    ("misc is an empty extension surface", MiscIsAnEmptyExtensionSurface),
+    ("misc configures the native Present ESP renderer", MiscUsesNativePresentEspRenderer),
+    ("native Present ESP has no external frame-render fallback", NativePresentEspHasNoExternalFallback),
+    ("native Present ESP hooks queue, owns wrapped backbuffers, and reports lifecycle state", NativePresentEspOwnsRendererLifecycle),
+    ("runtime keeps one resident bridge across GUI updates", RuntimeKeepsResidentBridgeAcrossGuiUpdates),
+    ("native Present reports the failing direct backbuffer setup step", NativePresentReportsBackbufferSetupStep),
+    ("native Present pipeline initializes valid D3D12 defaults", NativePresentPipelineInitializesValidD3d12Defaults),
+    ("native Present has an opaque R10 PSO fallback", NativePresentHasOpaqueR10PipelineFallback),
+    ("native Present pipeline uses explicit shader linkage semantics", NativePresentPipelineUsesExplicitShaderLinkageSemantics),
+    ("native Present ESP restores its own hook without chaining unknown hooks", NativePresentEspRestoresOwnHookWithoutChaining),
+    ("native Present capsule projection honors UE camera axes and constrained aspect", NativePresentCapsuleProjectionHonorsCameraAxes),
+    ("native Present box prefers validated pose bounds with a capsule fallback", NativePresentBoxUsesPoseBoundsWithCapsuleFallback),
+    ("native Present snapshot double buffer never publishes a partial frame", NativePresentSnapshotDoubleBufferIsAtomic),
     ("spectator paint resolution requires local controller identity", SpectatorPaintResolutionRequiresLocalControllerIdentity),
     ("diagnostic stroke limit requires explicit option", DiagnosticStrokeLimitRequiresExplicitOption),
     ("native accepts the single brush configured range", NativeAcceptsSingleBrushConfiguredRange),
@@ -56,6 +67,7 @@ var tests = new List<(string Name, Action Run)>
     ("diagnostics log write is best effort when file is locked", DiagnosticsLogWriteIsBestEffortWhenFileLocked),
     ("runtime log write is best effort when file is locked", RuntimeLogWriteIsBestEffortWhenFileLocked),
     ("auto material defaults off", AutoMaterialDefaultsOff),
+    ("ESP snaplines default on", EspSnaplinesDefaultOn),
     ("regions default to side and back paint", RegionsDefaultToSideAndBackPaint),
     ("image design defaults are safe and persist", ImageDesignDefaultsAreSafeAndPersist),
     ("web Image Fill payload uses an RGB object", WebImageFillPayloadUsesRgbObject),
@@ -862,7 +874,7 @@ static void CustomFreecamSurfaceIsAbsent()
         "the application must not expose or invoke its own freecam implementation");
 }
 
-static void MiscIsAnEmptyExtensionSurface()
+static void MiscUsesNativePresentEspRenderer()
 {
     var root = FindRepositoryRoot();
     var bridge = File.ReadAllText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
@@ -873,20 +885,511 @@ static void MiscIsAnEmptyExtensionSurface()
     var app = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "web", "app.js"));
 
     Assert(markup.Contains("data-settings-panel=\"misc\"", StringComparison.Ordinal) &&
-           !markup.Contains("misc-walk-speed", StringComparison.Ordinal) &&
-           !markup.Contains("misc-jump-power", StringComparison.Ordinal) &&
-           !markup.Contains("misc-gravity", StringComparison.Ordinal) &&
-           !markup.Contains("data-settings-actions=\"misc\"", StringComparison.Ordinal) &&
-           !app.Contains("getMiscState", StringComparison.Ordinal) &&
-           !app.Contains("applyMiscState", StringComparison.Ordinal) &&
-           !mainForm.Contains("getMiscState", StringComparison.Ordinal) &&
-           !mainForm.Contains("applyMiscState", StringComparison.Ordinal) &&
-           !runtime.Contains("MiscState", StringComparison.Ordinal) &&
-           !session.Contains("MiscState", StringComparison.Ordinal) &&
-           !bridge.Contains("misc_state", StringComparison.Ordinal) &&
+           markup.Contains("data-settings-actions=\"misc\"", StringComparison.Ordinal) &&
+           markup.Contains("id=\"esp-enabled\"", StringComparison.Ordinal) &&
+           markup.Contains("id=\"esp-boxes\"", StringComparison.Ordinal) &&
+           markup.Contains("id=\"esp-skeletons\"", StringComparison.Ordinal) &&
+           markup.Contains("id=\"esp-color\"", StringComparison.Ordinal) &&
+           markup.Contains("data-esp-scope", StringComparison.Ordinal) &&
+           markup.Contains("id=\"esp-enemy-color\"", StringComparison.Ordinal) &&
+           app.Contains("bindCheckbox(\"esp-enabled\", \"esp.enabled\")", StringComparison.Ordinal) &&
+           app.Contains("bindColorPair(\"esp-color-picker\", \"esp-color\", \"esp.color\")", StringComparison.Ordinal) &&
+           app.Contains("bindColorPair(\"esp-enemy-color-picker\", \"esp-enemy-color\", \"esp.enemyColor\")", StringComparison.Ordinal) &&
+           mainForm.Contains("QueueNativePresentEspConfiguration", StringComparison.Ordinal) &&
+           !mainForm.Contains("EspOverlayForm", StringComparison.Ordinal) &&
+           runtime.Contains("ConfigureNativePresentEspAsync", StringComparison.Ordinal) &&
+           session.Contains("esp.enabled", StringComparison.Ordinal) &&
+           !File.Exists(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs")) &&
+           bridge.Contains("esp_native_present", StringComparison.Ordinal) &&
+           bridge.Contains("d3d12_direct", StringComparison.Ordinal) &&
            !bridge.Contains("misc_apply", StringComparison.Ordinal),
-        "Misc must remain an empty UI extension surface until a verified action is available");
+        "Misc must configure only the in-process Native Present ESP renderer; the WinForms/RPM overlay is not a production path");
 }
+
+static void NativePresentEspHasNoExternalFallback()
+{
+    var root = FindRepositoryRoot();
+    var mainForm = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "MainForm.cs"));
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(!mainForm.Contains("EspOverlayForm", StringComparison.Ordinal) &&
+           !mainForm.Contains("EspMemoryReader", StringComparison.Ordinal) &&
+           !File.Exists(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs")) &&
+           !File.Exists(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspMemoryReader.cs")) &&
+           bridge.Contains("external_overlay\\\":false", StringComparison.Ordinal) &&
+           !bridge.Contains("SetEvent(signal);", StringComparison.Ordinal),
+        "native Present ESP must fail closed instead of signalling or starting an external overlay frame renderer");
+}
+
+static void NativePresentEspOwnsRendererLifecycle()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var runtime = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
+
+    Assert(bridge.Contains("esp_execute_command_lists_detour", StringComparison.Ordinal) &&
+           bridge.Contains("esp_resize_buffers_detour", StringComparison.Ordinal) &&
+           bridge.Contains("esp_create_swapchain_for_hwnd_detour", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_track_swapchain_queue", StringComparison.Ordinal) &&
+           bridge.Contains("BridgeResidentCoreV1", StringComparison.Ordinal) &&
+           bridge.Contains("bridge host detached; resident core remains available", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_queue_for_late_present", StringComparison.Ordinal) &&
+           bridge.Contains("same-thread Present submission", StringComparison.Ordinal) &&
+           bridge.Contains("DXGI_FORMAT_R10G10B10A2_UNORM", StringComparison.Ordinal) &&
+           bridge.Contains("D3D12_RESOURCE_STATE_PRESENT", StringComparison.Ordinal) &&
+           bridge.Contains("D3D12_RESOURCE_STATE_RENDER_TARGET", StringComparison.Ordinal) &&
+           bridge.Contains("CreateRenderTargetView", StringComparison.Ordinal) &&
+           bridge.Contains("CreateCommandAllocator", StringComparison.Ordinal) &&
+           bridge.Contains("CreateFence", StringComparison.Ordinal) &&
+           bridge.Contains("ExecuteCommandLists(1, lists)", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_render_snapshot_guarded", StringComparison.Ordinal) &&
+           bridge.Contains("native Present compositor faulted", StringComparison.Ordinal) &&
+           bridge.Contains("GetCurrentBackBufferIndex", StringComparison.Ordinal) &&
+           bridge.Contains("g_esp_native_snapshot_readers", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_present_status_native", StringComparison.Ordinal) &&
+           bridge.Contains("snapshot_sequence", StringComparison.Ordinal) &&
+           bridge.Contains("capture_age_ms", StringComparison.Ordinal) &&
+           bridge.Contains("hud_rebinds", StringComparison.Ordinal) &&
+           bridge.Contains("valid_pawns", StringComparison.Ordinal) &&
+           bridge.Contains("capsule_projected", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_skeleton_contract_for_mesh", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_compose_local_pose", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_pose_topology_error", StringComparison.Ordinal) &&
+           bridge.Contains("pose_local_space", StringComparison.Ordinal) &&
+           bridge.Contains("runtime_contract::esp_ascii_glyph_rows", StringComparison.Ordinal) &&
+           bridge.Contains("glyph_quads", StringComparison.Ordinal) &&
+           bridge.Contains("snapshot.text_count", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_calibrate_projection", StringComparison.Ordinal) &&
+           bridge.Contains("sdk_project_world_to_screen", StringComparison.Ordinal) &&
+           bridge.Contains("projection_scale_x", StringComparison.Ordinal) &&
+           bridge.Contains("submitted_frames", StringComparison.Ordinal) &&
+           bridge.Contains("completed_fences", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_present_probe", StringComparison.Ordinal) &&
+           bridge.Contains("runtime_contract::esp_hud_callback_matches", StringComparison.Ordinal) &&
+           !bridge.Contains("reinterpret_cast<std::uintptr_t>(object) ==\n                g_esp_hud_callback_target", StringComparison.Ordinal) &&
+           bridge.Contains("rendered_frames", StringComparison.Ordinal) &&
+           runtime.Contains("ConfigureNativePresentEspAsync", StringComparison.Ordinal) &&
+           runtime.Contains("force_rebind", StringComparison.Ordinal) &&
+           runtime.Contains("ArmNativePresentEspProbeAsync", StringComparison.Ordinal) &&
+           runtime.Contains("TryAttachResidentCore", StringComparison.Ordinal) &&
+           runtime.Contains("GetNativePresentEspStatusAsync", StringComparison.Ordinal),
+        "native Present ESP must capture the exact swapchain queue, use profile-driven local/component pose selection and direct glyph geometry, retain one resident renderer across host reconnects, publish completed snapshots, and expose lifecycle status");
+}
+
+static void RuntimeKeepsResidentBridgeAcrossGuiUpdates()
+{
+    var root = FindRepositoryRoot();
+    var runtime = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
+
+    Assert(runtime.Contains("TryAttachResidentCore", StringComparison.Ordinal) &&
+           !runtime.Contains("ReplaceObsoleteResidentCoreAsync", StringComparison.Ordinal) &&
+           !runtime.Contains("TryGetPackagedBridgeHash", StringComparison.Ordinal) &&
+           !runtime.Contains("WaitForResidentCoreExitAsync", StringComparison.Ordinal),
+        "a GUI update must reconnect to its authenticated resident bridge instead of stacking another native DLL in a live game");
+}
+
+static void NativePresentReportsBackbufferSetupStep()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("native D3D12 backbuffer setup failed at ", StringComparison.Ordinal) &&
+           bridge.Contains("CheckFeatureSupport(format)", StringComparison.Ordinal) &&
+           bridge.Contains("CreateGraphicsPipelineState(pipeline)", StringComparison.Ordinal) &&
+           bridge.Contains("failure_step", StringComparison.Ordinal),
+        "native Present diagnostics must identify the exact D3D12 initialization call that rejected the swapchain");
+}
+
+static void NativePresentPipelineInitializesValidD3d12Defaults()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("D3D12_COMPARISON_FUNC_LESS", StringComparison.Ordinal) &&
+           bridge.Contains("D3D12_DEFAULT_STENCIL_READ_MASK", StringComparison.Ordinal) &&
+           bridge.Contains("D3D12_BLEND_ONE", StringComparison.Ordinal) &&
+           bridge.Contains("D3D12_BLEND_ZERO", StringComparison.Ordinal),
+        "the direct PSO must explicitly initialize all depth-stencil and blend fields that D3D12 validates");
+}
+
+static void NativePresentHasOpaqueR10PipelineFallback()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("opaque R10 fallback", StringComparison.Ordinal) &&
+           bridge.Contains("blend.BlendEnable = FALSE", StringComparison.Ordinal),
+        "the R10 Present path must retain a non-blended PSO candidate when a driver rejects alpha blending");
+}
+
+static void NativePresentPipelineUsesExplicitShaderLinkageSemantics()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("struct EspDirectPixelInput", StringComparison.Ordinal) &&
+           bridge.Contains("float4 color : COLOR0", StringComparison.Ordinal) &&
+           bridge.Contains(": SV_TARGET0", StringComparison.Ordinal),
+        "the production vertex and pixel shaders must use an explicit matching COLOR0 linkage");
+}
+
+static void NativePresentEspRestoresOwnHookWithoutChaining()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var build = ReadRepositoryText(Path.Combine(root, "scripts", "build.ps1"));
+
+    Assert(bridge.Contains("MH_CreateHook", StringComparison.Ordinal) &&
+           bridge.Contains("MH_ApplyQueued", StringComparison.Ordinal) &&
+           bridge.Contains("MH_RemoveHook", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_uninstall_present_sync", StringComparison.Ordinal) &&
+           bridge.Contains("not a raw vtable", StringComparison.Ordinal) &&
+           !bridge.Contains("*present_slot = reinterpret_cast<void*>(&esp_present_detour)", StringComparison.Ordinal) &&
+           build.Contains("third_party\\minhook", StringComparison.Ordinal),
+        "the bridge must use trampoline detours and remove only its own hooks instead of replacing a shared graphics vtable");
+}
+
+// Retired external-renderer assertions are deliberately retained only as
+// migration archaeology until the next test-suite compaction. They no longer
+// execute because their corresponding source files were removed.
+#pragma warning disable CS8321
+static void ExternalEspReaderRecognizesLiveGameBuild()
+{
+    var reader = ReadRepositoryText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "csharp", "MecchaCamouflage.WebHost", "EspMemoryReader.cs"));
+
+    Assert(reader.Contains("new(0x6865EE5D, 0x0AB26000)", StringComparison.Ordinal) &&
+           reader.Contains("SupportedBuilds.Any", StringComparison.Ordinal) &&
+           reader.Contains("FindPattern", StringComparison.Ordinal) &&
+           reader.Contains("Size = 0x70", StringComparison.Ordinal) &&
+           reader.Contains("[FieldOffset(0x5C)]", StringComparison.Ordinal) &&
+           reader.Contains("AspectRatio", StringComparison.Ordinal) &&
+           reader.Contains("The current camera data is unavailable.", StringComparison.Ordinal) &&
+           !reader.Contains("ReadFString", StringComparison.Ordinal),
+        "the external ESP reader must recognize the live game build while retaining signature and camera validation");
+}
+
+static void ExternalEspRemainsAttachedWhileGameIsUnfocused()
+{
+    var overlay = ReadRepositoryText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs"));
+
+    Assert(!overlay.Contains("GetForegroundWindow", StringComparison.Ordinal) &&
+           overlay.Contains("TryGetClientBounds(gameWindow, out var bounds)", StringComparison.Ordinal) &&
+           overlay.Contains("ShowWithoutActivation", StringComparison.Ordinal),
+        "the click-through ESP must follow the game client bounds even when the game is not foreground");
+}
+
+static void ExternalEspIsOwnedByGameWindow()
+{
+    var overlay = ReadRepositoryText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs"));
+
+    Assert(overlay.Contains("TopMost = false;", StringComparison.Ordinal) &&
+           overlay.Contains("SetWindowLongPtr(Handle, GwlHwndParent, gameWindow)", StringComparison.Ordinal) &&
+           overlay.Contains("IsIconic(gameWindow)", StringComparison.Ordinal),
+        "the ESP must be an owned game-window overlay, not a system-wide topmost window");
+}
+
+static void ExternalEspRetainsValidSamples()
+{
+    var overlay = ReadRepositoryText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs"));
+    var reader = ReadRepositoryText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "csharp", "MecchaCamouflage.WebHost", "EspMemoryReader.cs"));
+
+    Assert(overlay.Contains("if (nextFrame is not null)", StringComparison.Ordinal) &&
+           overlay.Contains("lastFrameAt", StringComparison.Ordinal) &&
+           overlay.Contains("TransparencyKey = Color.Black;", StringComparison.Ordinal) &&
+           overlay.Contains("DoubleBuffered = true;", StringComparison.Ordinal) &&
+           overlay.Contains("RenderFrame(eventArgs.Graphics, ClientSize);", StringComparison.Ordinal) &&
+           overlay.Contains("transport=colorkey_owned_popup", StringComparison.Ordinal) &&
+           overlay.Contains("SetWindowPos(Handle, HwndTop", StringComparison.Ordinal) &&
+           !overlay.Contains("layeredSurface.Present", StringComparison.Ordinal) &&
+           !overlay.Contains("ScheduleHudProbe();", StringComparison.Ordinal) &&
+           !overlay.Contains("ScheduleHudCallbackProbe();", StringComparison.Ordinal) &&
+           !overlay.Contains("ScheduleHudLineProbe();", StringComparison.Ordinal) &&
+           !overlay.Contains("ScheduleHudRendererConfiguration();", StringComparison.Ordinal) &&
+           !overlay.Contains("QueueHudRendererRoleUpdate(resolved);", StringComparison.Ordinal) &&
+           !reader.Contains("LocalBones", StringComparison.Ordinal) &&
+           reader.Contains("BoneTransformStride", StringComparison.Ordinal) &&
+           reader.Contains("SkeletonBoneCount * BoneTransformStride", StringComparison.Ordinal) &&
+           reader.Contains("return new EspFrame(initialView, players);", StringComparison.Ordinal) &&
+           reader.IndexOf("TryReadView(cameraManager", StringComparison.Ordinal) ==
+           reader.LastIndexOf("TryReadView(cameraManager", StringComparison.Ordinal) &&
+           !reader.Contains("playerCache", StringComparison.Ordinal) &&
+           !reader.Contains("CachedPlayer", StringComparison.Ordinal) &&
+           !reader.Contains("TryReadLatestPawnLocation", StringComparison.Ordinal) &&
+           !reader.Contains("Read<Vec3>(transforms.Data", StringComparison.Ordinal),
+        "the overlay must retain complete reads through a transient failure, use the game-compatible ColorKey transport as an owned popup, take one pre-scan camera snapshot, and never interpolate roots, reuse stale samples, or issue one RPM call per bone");
+}
+
+static void ExternalEspLayeredSourceUsesCompatibleMemoryDc()
+{
+    var surface = ReadRepositoryText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "csharp", "MecchaCamouflage.WebHost", "EspLayeredSurface.cs"));
+
+    Assert(surface.Contains("CreateCompatibleDC", StringComparison.Ordinal) &&
+           surface.Contains("CreateDIBSection", StringComparison.Ordinal) &&
+           surface.Contains("SelectObject", StringComparison.Ordinal) &&
+           surface.Contains("memoryDeviceContext,", StringComparison.Ordinal) &&
+           surface.Contains("target.Flush(FlushIntention.Sync)", StringComparison.Ordinal) &&
+           !surface.Contains("target.GetHdc()", StringComparison.Ordinal),
+        "the per-pixel layered overlay must pass USER32 a real memory DC with a selected 32-bit DIB, not a transient GDI+ HDC");
+}
+
+static void ExternalEspCalibratesAgainstGameThreadProjection()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var runtime = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
+    var session = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "HostSession.cs"));
+    var overlay = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs"));
+
+    Assert(bridge.Contains("auto esp_projection_probe_native", StringComparison.Ordinal) &&
+           bridge.Contains("void esp_projection_probe_on_hud_callback", StringComparison.Ordinal) &&
+           bridge.Contains("sdk_project_world_to_screen", StringComparison.Ordinal) &&
+           bridge.Contains("engine_exact_axes_delta_px", StringComparison.Ordinal) &&
+           bridge.Contains("\"mutation_performed\\\":false", StringComparison.Ordinal) &&
+           runtime.Contains("GetEspProjectionProbeAsync", StringComparison.Ordinal) &&
+           session.Contains("GetEspProjectionProbeAsync", StringComparison.Ordinal) &&
+           overlay.Contains("ScheduleProjectionProbe", StringComparison.Ordinal) &&
+           overlay.Contains("exact_90_to_engine_delta_px", StringComparison.Ordinal) &&
+           overlay.Contains("[DEBUG-esp-projection-4d71]", StringComparison.Ordinal),
+        "the external overlay must compare its raw camera projection with UE's game-thread projection before changing production geometry");
+}
+
+static void EspColorPreviewAndNamesAreSafe()
+{
+    var root = FindRepositoryRoot();
+    var app = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "web", "app.js"));
+    var form = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "MainForm.cs"));
+    var overlay = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs"));
+    var snapshot = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspRoleSnapshot.cs"));
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(app.Contains("previewEspSettings", StringComparison.Ordinal) &&
+           app.Contains("clearEspPreview", StringComparison.Ordinal) &&
+           form.Contains("HandlePreviewEspSettings", StringComparison.Ordinal) &&
+           overlay.Contains("SetPreview", StringComparison.Ordinal) &&
+           overlay.Contains("EffectiveSettings", StringComparison.Ordinal) &&
+           app.Contains("espPreviewGeneration", StringComparison.Ordinal) &&
+           overlay.Contains("previewGeneration", StringComparison.Ordinal) &&
+           snapshot.Contains("IsDisplayName", StringComparison.Ordinal) &&
+           snapshot.Contains("char.IsLetter", StringComparison.Ordinal) &&
+           bridge.Contains("WideCharToMultiByte", StringComparison.Ordinal),
+        "every draft ESP setting must preview live, roll back when the draft is discarded, and reflected numeric fields must never be displayed as player names");
+}
+
+static void ExternalEspUsesCornerBoxesAndBottomScreenSnaplines()
+{
+    var overlay = ReadRepositoryText(Path.Combine(
+        FindRepositoryRoot(),
+        "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs"));
+
+    Assert(overlay.Contains("DrawCornerBox(graphics, outlinePen, bounds)", StringComparison.Ordinal) &&
+           overlay.Contains("private static void DrawCornerBox", StringComparison.Ordinal) &&
+           overlay.Contains("TryGetSnaplineAnchor", StringComparison.Ordinal) &&
+           overlay.Contains("Spine1JunctionBone", StringComparison.Ordinal) &&
+           overlay.Contains("TryGetStableCoreBounds", StringComparison.Ordinal) &&
+           overlay.Contains("StableBoxBoneIndices", StringComparison.Ordinal) &&
+           overlay.Contains("viewport.Height - 2f", StringComparison.Ordinal) &&
+           overlay.Contains("bottom-screen target aid", StringComparison.Ordinal) &&
+           overlay.Contains("TryGetProjectionViewport", StringComparison.Ordinal) &&
+           overlay.Contains("TryGetProjectionFocal", StringComparison.Ordinal) &&
+           !overlay.Contains("+ 89.8", StringComparison.Ordinal) &&
+           !overlay.Contains("HeadBoneCandidates", StringComparison.Ordinal) &&
+           !overlay.Contains("points.Min", StringComparison.Ordinal) &&
+           !overlay.Contains("points.Max", StringComparison.Ordinal) &&
+           !overlay.Contains("positionDelta", StringComparison.Ordinal) &&
+           !overlay.Contains("torsoUnit", StringComparison.Ordinal) &&
+           !overlay.Contains("* 2.4f", StringComparison.Ordinal) &&
+           !overlay.Contains("DrawRectangle(colorPen", StringComparison.Ordinal),
+        "ESP boxes must use orientation-independent core-bone extrema, while snaplines start at the bottom screen centre and end at the target Spine1 junction");
+}
+
+static void EspNamesPrioritizeCustomDisplayName()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var snapshot = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspRoleSnapshot.cs"));
+
+    Assert(bridge.Contains("{\"CustomPlayerName\", \"PlayerNamePrivate\", \"PlayerName\"}", StringComparison.Ordinal) &&
+           !bridge.Contains("esp_roles_debug", StringComparison.Ordinal) &&
+           snapshot.Contains("IsDisplayName", StringComparison.Ordinal) &&
+           snapshot.Contains("char.IsLetter", StringComparison.Ordinal),
+        "the reflected custom display name must win over a numeric PlayerNamePrivate without retaining a production diagnostics command");
+}
+
+static void ExternalEspSynchronizesToGamePresent()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var synchronizer = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspPresentSynchronizer.cs"));
+    var overlay = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs"));
+
+    Assert(bridge.Contains("IDXGISwapChain", StringComparison.Ordinal) &&
+           bridge.Contains("esp_present_detour", StringComparison.Ordinal) &&
+           bridge.Contains("Local\\\\MecchaEspPresent-", StringComparison.Ordinal) &&
+           synchronizer.Contains("EventWaitHandle.OpenExisting", StringComparison.Ordinal) &&
+           overlay.Contains("tickInProgress", StringComparison.Ordinal) &&
+           overlay.Contains("QueueOverlayTick", StringComparison.Ordinal) &&
+           overlay.Contains("game Present synchronization is active", StringComparison.Ordinal),
+        "the external reader must be driven by the game DXGI Present event and coalesce UI work instead of queueing a tick for every signal");
+}
+
+static void NativePresentCapsuleProjectionHonorsCameraAxes()
+{
+    var view = new NativePresentCamera(
+        new NativePresentVector3(0, 0, 0),
+        new NativePresentRotator(0, 0, 0),
+        90,
+        16.0 / 9.0,
+        NativePresentFovAxis.MaintainY);
+
+    Assert(NativePresentProjection.TryProject(
+               view,
+               new NativePresentVector3(1000, 0, 0),
+               3440,
+               1440,
+               out var centre) &&
+           Math.Abs(centre.X - 1720) < 0.001 && Math.Abs(centre.Y - 720) < 0.001,
+        "a MaintainY 90 degree UE camera must put its forward vector at the constrained viewport centre");
+
+    Assert(NativePresentProjection.TryProject(
+               view,
+               new NativePresentVector3(1000, 100, 0),
+               3440,
+               1440,
+               out var right) &&
+           Math.Abs(right.X - 1848) < 0.001 && Math.Abs(right.Y - 720) < 0.001,
+        "MaintainY must use height × aspect ratio as its horizontal focal length");
+
+    var rolled = view with { Rotation = new NativePresentRotator(0, 0, 90) };
+    Assert(NativePresentProjection.TryProject(
+               rolled,
+               new NativePresentVector3(1000, 0, 100),
+               3440,
+               1440,
+               out var rollPoint) &&
+           Math.Abs(rollPoint.X - 1592) < 0.001 && Math.Abs(rollPoint.Y - 720) < 0.001,
+        "roll must be part of the UE camera rotation matrix rather than an ignored overlay approximation");
+}
+
+static void NativePresentBoxUsesPoseBoundsWithCapsuleFallback()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var view = new NativePresentCamera(
+        new NativePresentVector3(0, 0, 0),
+        new NativePresentRotator(0, 0, 0),
+        90,
+        16.0 / 9.0,
+        NativePresentFovAxis.MaintainY);
+    var capsule = new NativePresentCapsule(
+        new NativePresentVector3(1000, 0, 0),
+        new NativePresentRotator(0, 0, 0),
+        Radius: 50,
+        HalfHeight: 100);
+
+    Assert(NativePresentProjection.TryProject(view, new NativePresentVector3(1000, 0, 100), 3440, 1440, out var apex) &&
+           Math.Abs(apex.Y - 648) < 0.001,
+        $"the collision capsule apex itself must project before building its bounds (actual={apex})");
+    Assert(NativePresentProjection.TryProjectCapsuleBounds(view, capsule, 3440, 1440, out var box) &&
+           box.Left <= 1656 && box.Right >= 1784 && box.Top <= 648 && box.Bottom >= 792 &&
+           box.Width > 100 && box.Height > 100 &&
+           bridge.Contains("esp_native_component_pose", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_project_pose_bounds", StringComparison.Ordinal) &&
+           bridge.Contains("esp_expand_screen_bounds", StringComparison.Ordinal),
+        $"the renderer must prefer validated animated pose bounds while retaining a stable collision-capsule fallback (actual={box})");
+}
+
+static void NativePresentSnapshotDoubleBufferIsAtomic()
+{
+    var publisher = new NativePresentSnapshotBuffer<int>(capacity: 4);
+    Assert(!publisher.TryRead(out _), "an empty native snapshot buffer must not expose an incomplete frame");
+
+    var writer = publisher.BeginWrite();
+    writer.Add(17);
+    Assert(!publisher.TryRead(out _), "the reader must not observe a writer-owned frame before publication");
+    publisher.Publish(writer);
+
+    Assert(publisher.TryRead(out var frame) && frame.Sequence == 1 && frame.Items.Span.SequenceEqual([17]),
+        "publication must atomically hand off the complete snapshot and sequence number");
+}
+
+static void EspHudDiscoveryIsMutationFree()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var runtime = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
+    var overlay = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs"));
+
+    Assert(bridge.Contains("auto esp_hud_probe_native()", StringComparison.Ordinal) &&
+           bridge.Contains("\"mutation_performed\\\":false", StringComparison.Ordinal) &&
+           bridge.Contains("\"renderer_installed\\\":false", StringComparison.Ordinal) &&
+           bridge.Contains("\"esp_hud_probe\"", StringComparison.Ordinal) &&
+           runtime.Contains("GetEspHudProbeAsync", StringComparison.Ordinal) &&
+           overlay.Contains("ScheduleHudProbe", StringComparison.Ordinal) &&
+           overlay.Contains("mutations=false", StringComparison.Ordinal),
+        "HUD discovery must inventory callbacks without changing the game before a renderer is selected");
+}
+
+static void EspHudCallbackObservationDefersRendering()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var runtime = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
+    var overlay = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs"));
+
+    Assert(bridge.Contains("auto esp_hud_callback_probe_native()", StringComparison.Ordinal) &&
+           bridge.Contains("g_esp_hud_callback_hits.fetch_add", StringComparison.Ordinal) &&
+           bridge.Contains("renderer_installed\\\":false", StringComparison.Ordinal) &&
+           !bridge.Contains("K2_DrawLine\"}", StringComparison.Ordinal) &&
+           runtime.Contains("GetEspHudCallbackProbeAsync", StringComparison.Ordinal) &&
+           overlay.Contains("ScheduleHudCallbackProbe", StringComparison.Ordinal) &&
+           overlay.Contains("renderer=false", StringComparison.Ordinal),
+        "HUD callback observation must establish Canvas lifetime before it draws an ESP primitive");
+}
+
+static void EspHudCanvasLineProbeUsesResolvedAbi()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var runtime = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
+    var overlay = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs"));
+
+    Assert(bridge.Contains("auto esp_hud_line_probe_native()", StringComparison.Ordinal) &&
+           bridge.Contains("esp_hud_line_param_offset", StringComparison.Ordinal) &&
+           bridge.Contains("g_esp_hud_line_calls.fetch_add", StringComparison.Ordinal) &&
+           bridge.Contains("HudLineProbeMaxCalls", StringComparison.Ordinal) &&
+           bridge.Contains("green_line_24_24_to_88_24", StringComparison.Ordinal) &&
+           runtime.Contains("GetEspHudLineProbeAsync", StringComparison.Ordinal) &&
+           overlay.Contains("ScheduleHudLineProbe", StringComparison.Ordinal),
+        "the first HUD draw must use the reflected K2_DrawLine ABI and be observable before ESP geometry is enabled");
+}
+
+static void ExperimentalEspHudRendererIsNotAutoActivated()
+{
+    var root = FindRepositoryRoot();
+    var overlay = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs"));
+
+    Assert(overlay.Contains("EspLayeredSurface", StringComparison.Ordinal) &&
+           !overlay.Contains("ScheduleHudProbe();", StringComparison.Ordinal) &&
+           !overlay.Contains("ScheduleHudCallbackProbe();", StringComparison.Ordinal) &&
+           !overlay.Contains("ScheduleHudLineProbe();", StringComparison.Ordinal) &&
+           !overlay.Contains("ScheduleHudRendererConfiguration();", StringComparison.Ordinal) &&
+           !overlay.Contains("QueueHudRendererRoleUpdate(resolved);", StringComparison.Ordinal),
+        "the external ESP path must not auto-activate an experimental game-thread renderer alongside it");
+}
+
+#pragma warning restore CS8321
 
 static void SpectatorPaintResolutionRequiresLocalControllerIdentity()
 {
@@ -1351,6 +1854,14 @@ static void AutoMaterialDefaultsOff()
     Assert(!new AppSettings().Paint.AutoMaterial, "auto material should default off");
 }
 
+static void EspSnaplinesDefaultOn()
+{
+    var esp = new AppSettings().Esp;
+    Assert(esp.Enabled && esp.Snaplines && esp.TargetScope == "all" && esp.Color == new RgbColor(0, 255, 136) &&
+           esp.EnemyColor == new RgbColor(255, 0, 0),
+        "ESP should start enabled for all targets, with green allies, red enemies, and visible snaplines");
+}
+
 static void RegionsDefaultToSideAndBackPaint()
 {
     var paint = new AppSettings().Paint;
@@ -1748,9 +2259,10 @@ static void WebUiScopesEditActionsToActiveSettingsTab()
     var styles = ReadRepositoryText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "styles.css"));
     var catalog = LocalizationCatalog.Load();
 
-    Assert(CountOccurrences(markup, "data-settings-actions=") == 3 &&
+    Assert(CountOccurrences(markup, "data-settings-actions=") == 4 &&
            markup.Contains("data-settings-actions=\"paint\"", StringComparison.Ordinal) &&
            markup.Contains("data-settings-actions=\"image\"", StringComparison.Ordinal) &&
+           markup.Contains("data-settings-actions=\"misc\"", StringComparison.Ordinal) &&
            markup.Contains("data-settings-actions=\"application\"", StringComparison.Ordinal),
         "each editable settings tab must own its Edit, Reset, Cancel, and Save action bar");
     Assert(app.Contains("if (editing && tab.dataset.settingsTab !== activeSettingsTab)", StringComparison.Ordinal) &&
@@ -1759,6 +2271,8 @@ static void WebUiScopesEditActionsToActiveSettingsTab()
     Assert(app.Contains("if (activeSettingsTab === \"paint\")", StringComparison.Ordinal) &&
            app.Contains("draftSnapshot.settings.paint = clone(liveSnapshot.defaults.paint);", StringComparison.Ordinal) &&
            app.Contains("if (activeSettingsTab === \"image\")", StringComparison.Ordinal) &&
+           app.Contains("if (activeSettingsTab === \"misc\")", StringComparison.Ordinal) &&
+           app.Contains("draftSnapshot.settings.esp = clone(liveSnapshot.defaults.esp);", StringComparison.Ordinal) &&
            app.Contains("draftSnapshot.settings.app = clone(liveSnapshot.defaults.app);", StringComparison.Ordinal),
         "Reset must restore only the settings belonging to the active tab");
     Assert(styles.Contains(".action-bar[hidden] {\n  display: none;\n}", StringComparison.Ordinal),

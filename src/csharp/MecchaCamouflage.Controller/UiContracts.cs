@@ -65,12 +65,14 @@ public sealed record AppSnapshot(
 
 public sealed record EspSnapshot(
     bool Enabled,
+    string Scope,
     bool Boxes,
     bool Skeletons,
     bool Names,
     bool Distance,
     bool Snaplines,
-    string Color);
+    string Color,
+    string EnemyColor);
 
 /// <summary>
 /// Snapshot metadata deliberately omits large source image blobs. The web

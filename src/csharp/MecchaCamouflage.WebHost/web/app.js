@@ -34,6 +34,8 @@ const hotkeyKeys = [
 
 let liveSnapshot = null;
 let draftSnapshot = null;
+let espPreviewRequestScheduled = false;
+let espPreviewGeneration = 0;
 let editing = false;
 let activeLogFilter = "all";
 let recordingHotkey = null;
@@ -464,12 +466,14 @@ function renderSettings(snapshot) {
   setValue("image-stop-hotkey", app.imageStopHotkey);
   const esp = snapshot.settings.esp;
   setChecked("esp-enabled", esp.enabled);
+  renderEspScopeButtons(esp.scope, editable);
   setChecked("esp-boxes", esp.boxes);
   setChecked("esp-skeletons", esp.skeletons);
   setChecked("esp-names", esp.names);
   setChecked("esp-distance", esp.distance);
   setChecked("esp-snaplines", esp.snaplines);
   setColorPair("esp-color-picker", "esp-color", esp.color);
+  setColorPair("esp-enemy-color-picker", "esp-enemy-color", esp.enemyColor);
 
   const language = byId("language");
   if (language.options.length === 0) {
@@ -592,6 +596,25 @@ function renderRegionButtons(selector, key, current, editable) {
   }
 }
 
+function renderEspScopeButtons(current, editable) {
+  for (const container of document.querySelectorAll("[data-esp-scope]")) {
+    container.replaceChildren();
+    for (const scope of ["all", "enemy", "ally"]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = scope[0].toUpperCase() + scope.slice(1);
+      button.className = scope === current ? "active" : "";
+      button.disabled = !editable;
+      button.addEventListener("click", () => {
+        if (!ensureLiveDraftEdit()) return;
+        setDraftSetting("esp.scope", scope);
+        renderSettings(draftSnapshot);
+      });
+      container.append(button);
+    }
+  }
+}
+
 function renderImageRegionButtons(editor, editable) {
   for (const container of document.querySelectorAll("[data-image-region]")) {
     const property = container.dataset.imageRegion;
@@ -682,6 +705,7 @@ function cancelEdit() {
     imageEditor = imageEditorBeforeEdit;
   }
   closeHotkeyDialog();
+  clearEspPreview();
   setImageDesignDraftState(false).catch(error => showError(error.message || String(error)));
   send("setEditing", { editing: false }).catch(error => showError(error.message || String(error)));
   previewSavedWindow();
@@ -714,6 +738,7 @@ async function resetDraft() {
     draftSnapshot.language = liveSnapshot.language;
   }
   render();
+  previewEspDraft();
   previewDraftWindow();
   toast(i18n("toast.settings.reset", i18n(settingsTabTitleKey())));
 }
@@ -729,6 +754,7 @@ async function saveDraft() {
     draftSnapshot = null;
     imageEditorAtEditStart = null;
     closeHotkeyDialog();
+    clearEspPreview();
     await send("setEditing", { editing: false });
     previewSavedWindow();
     render();
@@ -751,6 +777,7 @@ async function saveDraft() {
     showError(result.message || i18n("error.settings.not.saved"));
     document.activeElement?.blur();
     draftSnapshot = clone(liveSnapshot);
+    clearEspPreview();
     previewSavedWindow();
     render();
     return;
@@ -765,6 +792,7 @@ async function saveDraft() {
     await setImageDesignDraftState(false);
   }
   closeHotkeyDialog();
+  clearEspPreview();
   await send("setEditing", { editing: false });
   toast(i18n("toast.settings.saved"));
   refresh().catch(error => showError(error.message || String(error)));
@@ -805,6 +833,40 @@ function setDraftSetting(key, value) {
     node = node[path[index]];
   }
   node[path.at(-1)] = value;
+  if (key.startsWith("esp.")) {
+    previewEspDraft();
+  }
+}
+
+function previewEspDraft() {
+  if (!draftSnapshot || espPreviewRequestScheduled) {
+    return;
+  }
+  espPreviewRequestScheduled = true;
+  requestAnimationFrame(() => {
+    espPreviewRequestScheduled = false;
+    if (!draftSnapshot) {
+      return;
+    }
+    const esp = draftSnapshot.settings.esp;
+    send("previewEspSettings", {
+      generation: ++espPreviewGeneration,
+      enabled: Boolean(esp.enabled),
+      scope: esp.scope,
+      boxes: Boolean(esp.boxes),
+      skeletons: Boolean(esp.skeletons),
+      names: Boolean(esp.names),
+      distance: Boolean(esp.distance),
+      snaplines: Boolean(esp.snaplines),
+      allyColor: normalizeColor(esp.color),
+      enemyColor: normalizeColor(esp.enemyColor)
+    }).catch(error => showError(error.message || String(error)));
+  });
+}
+
+function clearEspPreview() {
+  espPreviewRequestScheduled = false;
+  send("clearEspPreview", { generation: ++espPreviewGeneration }).catch(error => showError(error.message || String(error)));
 }
 
 function canEditControl(control = null) {
@@ -859,12 +921,14 @@ function diffSnapshots(before, after) {
     "paint.fillRoughness",
     "paint.fillEmissive",
     "esp.enabled",
+    "esp.scope",
     "esp.boxes",
     "esp.skeletons",
     "esp.names",
     "esp.distance",
     "esp.snaplines",
     "esp.color",
+    "esp.enemyColor",
     "app.alwaysOnTop",
     "app.opacity",
     "app.themeColor",
@@ -2557,6 +2621,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindCheckbox("esp-distance", "esp.distance");
   bindCheckbox("esp-snaplines", "esp.snaplines");
   bindColorPair("esp-color-picker", "esp-color", "esp.color");
+  bindColorPair("esp-enemy-color-picker", "esp-enemy-color", "esp.enemyColor");
   bindCheckbox("always-on-top", "app.alwaysOnTop");
   bindRangePair("opacity", "opacity-number", "app.opacity", value => value / 100);
   bindColorPair("theme-color-picker", "theme-color", "app.themeColor");
