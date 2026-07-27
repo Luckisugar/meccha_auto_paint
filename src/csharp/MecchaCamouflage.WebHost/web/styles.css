@@ -363,6 +363,12 @@ a:hover {
   gap: 7px;
 }
 
+.field-help {
+  margin: 0;
+  color: var(--muted);
+  font: 400 13px/19px var(--font-ui);
+}
+
 .field > span,
 .field-label,
 .brush-toggle > span,

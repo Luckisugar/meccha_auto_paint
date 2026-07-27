@@ -59,6 +59,19 @@ public sealed class PaintSettings
         BackRegionMode == RegionMode.Fill;
 }
 
+public sealed class EspSettings
+{
+    public bool Enabled { get; set; } = true;
+    public string TargetScope { get; set; } = "all";
+    public bool Boxes { get; set; } = true;
+    public bool Skeletons { get; set; } = true;
+    public bool Names { get; set; } = true;
+    public bool Distance { get; set; } = true;
+    public bool Snaplines { get; set; } = true;
+    public RgbColor HiderColor { get; set; } = new(0, 255, 136);
+    public RgbColor HunterColor { get; set; } = new(255, 0, 0);
+}
+
 /// <summary>
 /// An editable source image. The browser owns decoding and compositing; the
 /// controller only persists the original bytes and normalized placement.
@@ -311,7 +324,7 @@ public sealed class ImagePaintSettings
 
 public sealed class AppSettings
 {
-    public const int CurrentLayoutVersion = 45;
+    public const int CurrentLayoutVersion = 46;
     public int LayoutVersion { get; set; } = CurrentLayoutVersion;
     public double PanelX { get; set; } = -1.0;
     public double PanelY { get; set; } = -1.0;
@@ -335,4 +348,5 @@ public sealed class AppSettings
     public string ActiveImageDesignId { get; set; } = "";
     public PaintSettings Paint { get; set; } = new();
     public ImagePaintSettings Image { get; set; } = new();
+    public EspSettings Esp { get; set; } = new();
 }

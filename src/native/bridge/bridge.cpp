@@ -5,6 +5,15 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <d3d11.h>
+#include <d3d11on12.h>
+#include <d3d12.h>
+#include <d2d1_3.h>
+#include <d3dcompiler.h>
+#include <dwrite.h>
+#include <dxgi1_4.h>
+
+#include <MinHook.h>
 
 #include <algorithm>
 #include <array>
@@ -18,6 +27,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <cwctype>
 #include <initializer_list>
 #include <limits>
@@ -39,6 +49,9 @@
 
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "Gdi32.lib")
+#pragma comment(lib, "D3D11.lib")
+#pragma comment(lib, "D2d1.lib")
+#pragma comment(lib, "Dwrite.lib")
 
 namespace
 {
@@ -66,8 +79,13 @@ namespace
     // Total duration may legitimately grow at very low FPS. Fail only when a
     // measurable receiver queue makes no forward progress for this interval.
     constexpr int LocalQueueDrainIdleTimeoutMs = 120000;
+    constexpr UINT EspHudRebindMessage = WM_APP + 0x4D44;
     constexpr bool MeshFirstPostImportTextureSyncEnabled = false;
     constexpr double MeshFirstRuntimeCoordinateMaxAvgErrorCm = 50.0;
+    // [DEBUG-d3dinit] Keep the 11on12 acquire/release/Flush path intact while
+    // temporarily omitting only the R10 render-target draw.  This isolates a
+    // driver abort at Flush without changing queue ownership or D2D setup.
+    constexpr bool EspNativeR10CompositeSubmitProbeSkipDraw = true;
 
     constexpr std::uintptr_t OffClass = 0x10;
     constexpr std::uintptr_t OffName = 0x18;
@@ -87,6 +105,13 @@ namespace
     constexpr std::uintptr_t OffFPropertyElementSize = runtime_contract::FPropertyElementSizeOffset;
     constexpr std::uintptr_t OffFPropertyOffset = 0x44;
     constexpr std::uintptr_t OffFStructPropertyStruct = 0x70;
+    // UE 5.6 FBoolProperty stores its byte and bit masks immediately after the
+    // FProperty base.  A number of gameplay flags share their storage byte, so
+    // role snapshots must honour the reflected mask rather than treating any
+    // non-zero byte as true.
+    constexpr std::uintptr_t OffFBoolPropertyByteOffset = 0x71;
+    constexpr std::uintptr_t OffFBoolPropertyByteMask = 0x72;
+    constexpr std::uintptr_t OffFBoolPropertyFieldMask = 0x73;
 
     enum BridgeRuntimeState : int
     {
@@ -111,6 +136,9 @@ namespace
         RunningCancelRequested = 4,
     };
 
+    using EspNativeRole = runtime_contract::EspRole;
+    using EspNativeScope = runtime_contract::EspScope;
+
     HMODULE g_module = nullptr;
     std::atomic<bool> g_running{false};
     std::atomic<int> g_bridge_state{BRIDGE_RUNTIME_CREATED};
@@ -119,6 +147,27 @@ namespace
     std::atomic<SOCKET> g_listener{INVALID_SOCKET};
     std::atomic<std::uint32_t> g_bound_port{0};
     std::atomic<bool> g_bridge_started{false};
+    // A resident graphics core must survive ordinary host reconnects.  The
+    // mapping carries only the already-authenticated loopback endpoint for
+    // this PID; it lets a later GUI attach instead of injecting a second
+    // Present owner over the first one.
+    constexpr std::uint32_t BridgeResidentCoreMagicV1 = 0x3152434D; // "MCR1"
+    constexpr std::uint32_t BridgeResidentCoreAbiV1 = 1;
+    struct BridgeResidentCoreV1
+    {
+        std::uint32_t magic{BridgeResidentCoreMagicV1};
+        std::uint32_t size{0};
+        std::uint32_t abi{BridgeResidentCoreAbiV1};
+        std::uint32_t pid{0};
+        std::uint32_t port{0};
+        std::uint32_t protocol{BridgeBootstrapProtocolV1};
+        std::uint8_t instance_guid[16]{};
+        std::uint8_t token[32]{};
+        std::uint8_t sha256[32]{};
+    };
+    static_assert(sizeof(BridgeResidentCoreV1) == 104, "resident core rendezvous ABI mismatch");
+    HANDLE g_bridge_resident_core_mapping{nullptr};
+    void* g_bridge_resident_core_view{nullptr};
     // Command admission is distinct from the listener lifetime.  Shutdown closes
     // admission first so a client which was accepted just before closesocket()
     // cannot start a new game-thread job while the old bridge is draining.
@@ -154,6 +203,17 @@ namespace
     std::atomic<std::int64_t> g_observed_sync_channel_bytes{0};
     std::atomic<std::int64_t> g_observed_sync_compressed_channel_bytes{0};
     std::atomic<std::int64_t> g_observed_sync_compressed_channel_uncompressed_bytes{0};
+    // The HUD callback is the game-frame-owned renderer path. Its state is
+    // deliberately independent from the external WinForms overlay: each
+    // callback reads one coherent in-process camera/pose snapshot and emits
+    // Canvas primitives before the game's frame is presented.
+    std::atomic<std::uintptr_t> g_esp_hud_callback_target{0};
+    std::atomic<std::uintptr_t> g_esp_hud_callback_function{0};
+    std::atomic<int> g_esp_hud_canvas_offset{-1};
+    std::atomic<int> g_esp_hud_debug_canvas_offset{-1};
+    std::atomic<std::uintptr_t> g_esp_hud_observed_canvas{0};
+    std::atomic<std::uintptr_t> g_esp_hud_observed_debug_canvas{0};
+    std::atomic<std::uint64_t> g_esp_hud_callback_hits{0};
     std::mutex g_hook_mutex;
     std::mutex g_auto_event_watch_sample_mutex;
     std::mutex g_auto_event_watch_lifecycle_mutex;
@@ -214,6 +274,310 @@ namespace
     std::thread g_auto_event_watch_writer{};
 
     using ProcessEventFn = void(__fastcall*)(void*, void*, void*);
+    using DxgiPresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
+    using DxgiResizeBuffersFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*,
+                                                            UINT,
+                                                            UINT,
+                                                            UINT,
+                                                            DXGI_FORMAT,
+                                                            UINT);
+    using D3D12ExecuteCommandListsFn = void(STDMETHODCALLTYPE*)(
+        ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
+    using DxgiCreateSwapChainFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory*,
+                                                               IUnknown*,
+                                                               DXGI_SWAP_CHAIN_DESC*,
+                                                               IDXGISwapChain**);
+    using DxgiCreateSwapChainForHwndFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*,
+                                                                      IUnknown*,
+                                                                      HWND,
+                                                                      const DXGI_SWAP_CHAIN_DESC1*,
+                                                                      const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*,
+                                                                      IDXGIOutput*,
+                                                                      IDXGISwapChain1**);
+    using DxgiCreateSwapChainForCoreWindowFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*,
+                                                                            IUnknown*,
+                                                                            IUnknown*,
+                                                                            const DXGI_SWAP_CHAIN_DESC1*,
+                                                                            IDXGIOutput*,
+                                                                            IDXGISwapChain1**);
+    using DxgiCreateSwapChainForCompositionFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*,
+                                                                             IUnknown*,
+                                                                             const DXGI_SWAP_CHAIN_DESC1*,
+                                                                             IDXGIOutput*,
+                                                                             IDXGISwapChain1**);
+
+    void esp_native_present_capture_snapshot(void* hud);
+    auto install_esp_present_sync() -> bool;
+    void esp_native_uninstall_present_sync();
+
+    std::atomic<DxgiPresentFn> g_esp_present_original{nullptr};
+    std::atomic<void*> g_esp_present_target{nullptr};
+    std::atomic<DxgiResizeBuffersFn> g_esp_resize_buffers_original{nullptr};
+    std::atomic<void*> g_esp_resize_buffers_target{nullptr};
+    std::atomic<HWND> g_esp_present_window{nullptr};
+    std::atomic<IDXGISwapChain*> g_esp_present_swapchain{nullptr};
+    std::atomic<bool> g_esp_present_sync_ready{false};
+    std::atomic<bool> g_esp_resize_hook_ready{false};
+    std::atomic<std::uint32_t> g_esp_present_hook_callbacks{0};
+    std::atomic<bool> g_esp_minhook_initialized{false};
+    HANDLE g_esp_present_hook_mutex{nullptr};
+    std::atomic<DxgiCreateSwapChainFn> g_esp_create_swapchain_original{nullptr};
+    std::atomic<DxgiCreateSwapChainForHwndFn> g_esp_create_swapchain_for_hwnd_original{nullptr};
+    std::atomic<DxgiCreateSwapChainForCoreWindowFn> g_esp_create_swapchain_for_core_window_original{nullptr};
+    std::atomic<DxgiCreateSwapChainForCompositionFn> g_esp_create_swapchain_for_composition_original{nullptr};
+    std::atomic<void*> g_esp_create_swapchain_target{nullptr};
+    std::atomic<void*> g_esp_create_swapchain_for_hwnd_target{nullptr};
+    std::atomic<void*> g_esp_create_swapchain_for_core_window_target{nullptr};
+    std::atomic<void*> g_esp_create_swapchain_for_composition_target{nullptr};
+    std::atomic<bool> g_esp_swapchain_factory_hooks_ready{false};
+
+    struct EspNativePresentHookCallbackScope
+    {
+        EspNativePresentHookCallbackScope()
+        {
+            g_esp_present_hook_callbacks.fetch_add(1, std::memory_order_acq_rel);
+        }
+
+        ~EspNativePresentHookCallbackScope()
+        {
+            g_esp_present_hook_callbacks.fetch_sub(1, std::memory_order_acq_rel);
+        }
+    };
+
+    // Native Present ESP intentionally keeps all UObject work on the game
+    // thread. The Present detour consumes only these immutable, projected
+    // primitives. A slot is never written while its reader count is nonzero;
+    // a producer drops one snapshot instead of racing a frame already being
+    // composed into the game backbuffer.
+    constexpr std::size_t EspNativeMaxPlayers = 64;
+    constexpr std::size_t EspNativeMaxBones = 128;
+    constexpr std::size_t EspNativeMaxLines =
+        EspNativeMaxPlayers * (EspNativeMaxBones + 8);
+    constexpr std::size_t EspNativeMaxTexts = EspNativeMaxPlayers * 2;
+    constexpr std::size_t EspNativeMaxTextChars = 96;
+
+    enum class EspNativePresentState : int
+    {
+        Disabled = 0,
+        Initializing = 1,
+        Ready = 2,
+        Unavailable = 3,
+    };
+
+    struct EspNativeColor
+    {
+        float r{0.0f};
+        float g{1.0f};
+        float b{0.533333f};
+        float a{1.0f};
+    };
+
+    struct EspNativeLine
+    {
+        float x1{0.0f};
+        float y1{0.0f};
+        float x2{0.0f};
+        float y2{0.0f};
+        float thickness{1.75f};
+        EspNativeColor color{};
+    };
+
+    struct EspNativeText
+    {
+        float x{0.0f};
+        float y{0.0f};
+        EspNativeColor color{};
+        wchar_t value[EspNativeMaxTextChars]{};
+    };
+
+    struct EspNativeSnapshot
+    {
+        std::uint64_t sequence{0};
+        std::uint32_t viewport_width{0};
+        std::uint32_t viewport_height{0};
+        std::uint32_t roster_source{0}; // 1=PlayerArray, 2=role-roster fallback
+        std::uint32_t roster_count{0};
+        std::uint32_t valid_player_states{0};
+        std::uint32_t valid_pawns{0};
+        std::uint32_t filtered_local{0};
+        std::uint32_t filtered_spectators{0};
+        std::uint32_t filtered_scope{0};
+        std::uint32_t capsule_components{0};
+        std::uint32_t capsule_transforms{0};
+        std::uint32_t capsule_sizes{0};
+        std::uint32_t capsule_projected{0};
+        std::uint32_t mesh_components{0};
+        std::uint32_t pose_profile_matches{0};
+        std::uint32_t pose_component_space{0};
+        std::uint32_t pose_local_space{0};
+        std::uint32_t pose_bones{0};
+        std::uint32_t pose_edges{0};
+        std::uint32_t poses{0};
+        std::uint32_t players{0};
+        std::uint32_t line_count{0};
+        std::uint32_t text_count{0};
+        EspNativeLine lines[EspNativeMaxLines]{};
+        EspNativeText texts[EspNativeMaxTexts]{};
+    };
+
+    std::array<EspNativeSnapshot, 2> g_esp_native_snapshots{};
+    std::array<std::atomic<std::uint32_t>, 2> g_esp_native_snapshot_readers{};
+    // low bit is the published slot. The initial value has no completed
+    // snapshot; g_esp_native_snapshot_ready gates its interpretation.
+    std::atomic<std::uint64_t> g_esp_native_snapshot_token{0};
+    std::atomic<bool> g_esp_native_snapshot_ready{false};
+    std::atomic<std::uint64_t> g_esp_native_snapshot_drops{0};
+    std::atomic<std::uint64_t> g_esp_native_rendered_frames{0};
+    std::atomic<std::uint64_t> g_esp_native_submitted_frames{0};
+    std::atomic<std::uint64_t> g_esp_native_completed_fences{0};
+    std::atomic<std::uint64_t> g_esp_native_last_vertex_count{0};
+    std::atomic<std::uint64_t> g_esp_native_last_glyph_quads{0};
+    std::atomic<std::uint64_t> g_esp_native_skeleton_contract_count{0};
+    std::atomic<double> g_esp_native_projection_scale_x{1.0};
+    std::atomic<double> g_esp_native_projection_scale_y{1.0};
+    std::atomic<std::uint64_t> g_esp_native_projection_calibrations{0};
+    std::atomic<std::uint64_t> g_esp_native_last_projection_calibration_ms{0};
+    std::atomic<std::uint64_t> g_esp_native_probe_submitted_frames{0};
+    std::atomic<std::uint32_t> g_esp_native_probe_frames_remaining{0};
+    std::atomic<std::uint64_t> g_esp_native_capture_frames{0};
+    std::atomic<std::uint64_t> g_esp_native_present_calls{0};
+    std::atomic<std::uint64_t> g_esp_native_last_capture_tick_ms{0};
+    std::atomic<std::uint64_t> g_esp_native_enabled_tick_ms{0};
+    std::atomic<std::uint64_t> g_esp_native_last_rebind_request_tick_ms{0};
+    std::atomic<std::uint64_t> g_esp_native_hud_rebind_attempts{0};
+    std::atomic<std::uint64_t> g_esp_native_hud_rebind_successes{0};
+    std::atomic<bool> g_esp_native_hud_rebind_pending{false};
+    std::atomic<bool> g_esp_native_enabled{false};
+    // An SEH-render fault can bypass C++ unwinding while a D3D call owns the
+    // compositor mutex or a wrapped resource transition.  That compositor is
+    // consequently poison-only for the lifetime of this game process.
+    std::atomic<bool> g_esp_native_renderer_faulted{false};
+    std::atomic<bool> g_esp_native_boxes{true};
+    std::atomic<bool> g_esp_native_skeletons{true};
+    std::atomic<bool> g_esp_native_names{true};
+    std::atomic<bool> g_esp_native_distance{true};
+    std::atomic<bool> g_esp_native_snaplines{true};
+    std::atomic<std::uint32_t> g_esp_native_hider_color{0x00FF88u};
+    std::atomic<std::uint32_t> g_esp_native_hunter_color{0xFF0000u};
+    std::atomic<int> g_esp_native_scope{static_cast<int>(EspNativeScope::All)};
+    std::atomic<int> g_esp_native_state{static_cast<int>(EspNativePresentState::Disabled)};
+    // Updated immediately before every potentially faulting native render
+    // boundary.  The SEH guard publishes it as status without touching a
+    // possibly poisoned D3D object after an access violation.
+    std::atomic<int> g_esp_native_fault_stage{0};
+    std::atomic<DWORD> g_esp_native_fault_code{ERROR_SUCCESS};
+    std::atomic<std::uintptr_t> g_esp_native_fault_instruction{0};
+    // Temporary crash-boundary probe.  It is disabled after the first fully
+    // rendered frame, so its synchronous file write never runs in steady state.
+    std::atomic<bool> g_esp_native_init_probe_active{true};
+    std::mutex g_esp_native_status_mutex;
+    std::string g_esp_native_reason{"disabled"};
+    std::string g_esp_native_swapchain_format{};
+    std::mutex g_esp_native_config_mutex;
+    std::string g_esp_native_config_signature{};
+
+    struct EspNativeCompositor
+    {
+        ID3D12CommandQueue* queue{nullptr};
+        ID3D12Device* device{nullptr};
+        // The production Present path owns only native D3D12 state.  The
+        // legacy D3D11On12 members remain below temporarily while this bridge
+        // migrates its lifecycle, but no foreign swapchain resource is ever
+        // wrapped or flushed by the native renderer.
+        ID3D12DescriptorHeap* rtv_heap{nullptr};
+        ID3D12RootSignature* root_signature{nullptr};
+        ID3D12PipelineState* pipeline_state{nullptr};
+        ID3D12Fence* fence{nullptr};
+        HANDLE fence_event{nullptr};
+        UINT rtv_descriptor_size{0};
+        UINT64 next_fence_value{0};
+        DXGI_FORMAT pipeline_format{DXGI_FORMAT_UNKNOWN};
+        struct DirectFrame
+        {
+            ID3D12Resource* backbuffer{nullptr};
+            ID3D12CommandAllocator* allocator{nullptr};
+            ID3D12GraphicsCommandList* command_list{nullptr};
+            ID3D12Resource* vertex_upload{nullptr};
+            std::uint8_t* mapped_vertices{nullptr};
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
+            UINT64 fence_value{0};
+            UINT64 completed_fence_value{0};
+        };
+        std::vector<DirectFrame> direct_frames{};
+        ID3D11Device* d3d11_device{nullptr};
+        ID3D11DeviceContext* d3d11_context{nullptr};
+        ID3D11On12Device* d3d11on12{nullptr};
+        IDXGIDevice* dxgi_device{nullptr};
+        ID2D1Factory3* d2d_factory{nullptr};
+        ID2D1Device2* d2d_device{nullptr};
+        ID2D1DeviceContext2* d2d_context{nullptr};
+        IDWriteFactory* dwrite_factory{nullptr};
+        IDWriteTextFormat* text_format{nullptr};
+        ID2D1SolidColorBrush* brush{nullptr};
+        std::vector<ID3D11Resource*> wrapped_backbuffers{};
+        std::vector<ID2D1Bitmap1*> d2d_backbuffers{};
+        // Direct2D cannot target an R10G10B10A2 swapchain.  For that HDR-like
+        // path, it draws into this 8-bit premultiplied-alpha texture and the
+        // D3D11On12 context composites it over the real current backbuffer.
+        ID3D11Texture2D* overlay_texture{nullptr};
+        ID3D11ShaderResourceView* overlay_shader_resource{nullptr};
+        ID2D1Bitmap1* overlay_bitmap{nullptr};
+        std::vector<ID3D11RenderTargetView*> wrapped_backbuffer_targets{};
+        ID3D11VertexShader* composite_vertex_shader{nullptr};
+        ID3D11PixelShader* composite_pixel_shader{nullptr};
+        ID3D11SamplerState* composite_sampler{nullptr};
+        ID3D11BlendState* composite_blend{nullptr};
+        bool uses_offscreen_composite{false};
+        DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
+        UINT width{0};
+        UINT height{0};
+        UINT buffers{0};
+    };
+    std::mutex g_esp_native_compositor_mutex;
+    EspNativeCompositor g_esp_native_compositor{};
+    std::atomic<D3D12ExecuteCommandListsFn> g_esp_execute_original{nullptr};
+    std::atomic<void*> g_esp_execute_target{nullptr};
+    std::atomic<bool> g_esp_execute_hook_ready{false};
+
+    // D3D12 exposes a swapchain's device but not its presenting command
+    // queue.  The only supported ownership signal is the pDevice argument at
+    // CreateSwapChain*.  Record the COM identities there and never infer a
+    // queue from an arbitrary ExecuteCommandLists call.
+    struct EspNativeSwapchainQueue
+    {
+        IUnknown* swapchain_identity{nullptr};
+        ID3D12CommandQueue* queue{nullptr};
+    };
+    std::mutex g_esp_native_swapchain_queues_mutex;
+    std::vector<EspNativeSwapchainQueue> g_esp_native_swapchain_queues{};
+
+    // Late injection cannot replay the original DXGI CreateSwapChain* call.
+    // For that bounded case retain only the direct queue which submitted work
+    // on the Present thread immediately before the game swapchain presents,
+    // and require it to expose the swapchain's exact D3D12 device.  This is
+    // deliberately stronger than the former "first direct queue observed"
+    // heuristic and never uses unrelated worker-thread submissions.
+    struct EspNativePresentThreadQueue
+    {
+        DWORD thread_id{0};
+        std::uint64_t tick{0};
+        ID3D12CommandQueue* queue{nullptr};
+    };
+    std::mutex g_esp_native_present_thread_queues_mutex;
+    std::array<EspNativePresentThreadQueue, 8> g_esp_native_present_thread_queues{};
+    thread_local bool g_esp_native_overlay_queue_submission{false};
+
+    struct EspNativeDirectVertex
+    {
+        float x{0.0f};
+        float y{0.0f};
+        float r{0.0f};
+        float g{0.0f};
+        float b{0.0f};
+        float a{1.0f};
+    };
+    static_assert(sizeof(EspNativeDirectVertex) == 24, "native Present vertex ABI mismatch");
+    constexpr std::size_t EspNativeDirectMaxVertices = 196'608;
 
     enum class PaintJobState : int
     {
@@ -284,6 +648,8 @@ namespace
     auto auto_event_watch_record(std::uintptr_t object_address,
                                  std::uintptr_t function_address,
                                  std::uint8_t* params_bytes) -> void;
+    auto esp_hud_callback_probe_native() -> std::string;
+    auto esp_hud_callback_rebind_on_game_thread() -> bool;
     void __fastcall hooked_process_event(void* object, void* function, void* params);
     LRESULT CALLBACK message_hook_proc(int code, WPARAM wparam, LPARAM lparam);
 
@@ -360,6 +726,53 @@ namespace
         // No route was available.  Allow a later lifecycle or timer event to
         // retry instead of leaving the coalescing gate permanently closed.
         g_paint_dispatch_message_pending.store(false, std::memory_order_release);
+    }
+
+    auto esp_native_capture_age_ms(std::uint64_t now_ms) -> std::uint64_t
+    {
+        auto baseline = g_esp_native_last_capture_tick_ms.load(std::memory_order_acquire);
+        if (baseline == 0)
+        {
+            baseline = g_esp_native_enabled_tick_ms.load(std::memory_order_acquire);
+        }
+        return now_ms >= baseline ? now_ms - baseline : 0;
+    }
+
+    void post_esp_hud_rebind_if_stalled()
+    {
+        const auto now_ms = static_cast<std::uint64_t>(GetTickCount64());
+        const auto baseline = now_ms - esp_native_capture_age_ms(now_ms);
+        if (!runtime_contract::esp_hud_rebind_due(
+                g_esp_native_enabled.load(std::memory_order_acquire),
+                g_esp_native_present_calls.load(std::memory_order_acquire),
+                baseline,
+                now_ms,
+                g_esp_native_last_rebind_request_tick_ms.load(std::memory_order_acquire)))
+        {
+            return;
+        }
+        bool expected_pending = false;
+        if (!g_esp_native_hud_rebind_pending.compare_exchange_strong(
+                expected_pending, true, std::memory_order_acq_rel))
+        {
+            return;
+        }
+        g_esp_native_last_rebind_request_tick_ms.store(now_ms, std::memory_order_release);
+        if (const auto thread_id = g_game_thread_id.load(std::memory_order_acquire))
+        {
+            if (PostThreadMessageW(thread_id, EspHudRebindMessage, 0, 0))
+            {
+                return;
+            }
+        }
+        if (const auto hwnd = g_game_window.load(std::memory_order_acquire))
+        {
+            if (PostMessageW(hwnd, EspHudRebindMessage, 0, 0))
+            {
+                return;
+            }
+        }
+        g_esp_native_hud_rebind_pending.store(false, std::memory_order_release);
     }
 
     void CALLBACK paint_dispatch_timer_proc(HWND, UINT, UINT_PTR timer_id, DWORD)
@@ -2991,6 +3404,12 @@ namespace
 
     auto uninstall_message_hook() -> void
     {
+        // Native ESP uses this game-thread route to rebind DrawHUD after map
+        // travel. Paint completion must not tear down a resident ESP scheduler.
+        if (g_esp_native_enabled.load(std::memory_order_acquire))
+        {
+            return;
+        }
         const auto message_hook = g_message_hook.exchange(nullptr);
         if (message_hook)
         {
@@ -3034,6 +3453,13 @@ namespace
     {
         uninstall_message_hook();
         uninstall_process_event_vtable_hooks();
+        g_esp_hud_callback_target.store(0, std::memory_order_release);
+        g_esp_hud_callback_function.store(0, std::memory_order_release);
+        g_esp_hud_canvas_offset.store(-1, std::memory_order_release);
+        g_esp_hud_debug_canvas_offset.store(-1, std::memory_order_release);
+        g_esp_hud_observed_canvas.store(0, std::memory_order_release);
+        g_esp_hud_observed_debug_canvas.store(0, std::memory_order_release);
+        g_esp_hud_callback_hits.store(0, std::memory_order_release);
         g_process_event_hook_installed.store(false);
     }
 
@@ -17824,7 +18250,63 @@ namespace
         {
             reinterpret_cast<ProcessEventFn>(original)(object, function, params);
         }
+        // Observe only after the HUD's native/Blueprint event has run.  AHUD
+        // assigns its Canvas for this draw phase; this hook does not call any
+        // Canvas function and does not alter the HUD or render state.
+        const bool is_esp_hud_draw_callback =
+            object && function &&
+            runtime_contract::esp_hud_callback_matches(
+                g_esp_hud_callback_function.load(std::memory_order_acquire),
+                reinterpret_cast<std::uintptr_t>(function));
+        if (is_esp_hud_draw_callback)
+        {
+            __try
+            {
+                g_esp_hud_callback_hits.fetch_add(1, std::memory_order_relaxed);
+                const auto hud = reinterpret_cast<std::uintptr_t>(object);
+                // The UFunction is the stable callback identity. Keep the
+                // current instance only as the source of this frame's Canvas.
+                g_esp_hud_callback_target.store(hud, std::memory_order_release);
+                const auto canvas_offset = g_esp_hud_canvas_offset.load(std::memory_order_acquire);
+                const auto debug_canvas_offset = g_esp_hud_debug_canvas_offset.load(std::memory_order_acquire);
+                if (canvas_offset >= 0)
+                {
+                    const auto canvas = safe_read<std::uintptr_t>(
+                        hud + static_cast<std::uintptr_t>(canvas_offset), 0);
+                    if (live_uobject(canvas))
+                    {
+                        g_esp_hud_observed_canvas.store(canvas, std::memory_order_release);
+                    }
+                }
+                if (debug_canvas_offset >= 0)
+                {
+                    const auto debug_canvas = safe_read<std::uintptr_t>(
+                        hud + static_cast<std::uintptr_t>(debug_canvas_offset), 0);
+                    if (live_uobject(debug_canvas))
+                    {
+                        g_esp_hud_observed_debug_canvas.store(debug_canvas, std::memory_order_release);
+                    }
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+            }
+        }
+        if (is_esp_hud_draw_callback &&
+            g_esp_native_enabled.load(std::memory_order_acquire))
+        {
+            // Build one immutable, already-projected snapshot on the game
+            // thread. Present consumes this completed POD buffer only; it
+            // neither reads UObjects nor calls Canvas/ProcessEvent.
+            esp_native_present_capture_snapshot(object);
+        }
         g_active_hook_callbacks.fetch_sub(1);
+    }
+
+    auto esp_hud_callback_rebind_on_game_thread() -> bool
+    {
+        const auto response = esp_hud_callback_probe_native();
+        return json_bool_field(response, "success", false);
     }
 
     LRESULT CALLBACK message_hook_proc(int code, WPARAM wparam, LPARAM lparam)
@@ -17850,6 +18332,16 @@ namespace
                 if (dispatch_faulted)
                 {
                     fail_paint_dispatch_after_exception();
+                }
+            }
+            else if (msg && msg->message == EspHudRebindMessage)
+            {
+                g_esp_native_hud_rebind_pending.store(false, std::memory_order_release);
+                g_esp_native_hud_rebind_attempts.fetch_add(1, std::memory_order_relaxed);
+                const bool rebound = esp_hud_callback_rebind_on_game_thread();
+                if (rebound)
+                {
+                    g_esp_native_hud_rebind_successes.fetch_add(1, std::memory_order_relaxed);
                 }
             }
         }
@@ -18365,6 +18857,4890 @@ namespace
         return paint_pipeline_is_quiescent();
     }
 
+    // ESP role classification is independent of rendering. PlayerArray owns
+    // target existence; game-specific role rosters only attach Hider/Hunter
+    // metadata used by the native Present compositor.
+    enum class EspSnapshotRole
+    {
+        Unknown,
+        Hider,
+        Hunter,
+        Spectator,
+    };
+
+    struct EspSnapshotContext
+    {
+        std::uintptr_t world{0};
+        std::uintptr_t controller{0};
+        std::uintptr_t local_player_state{0};
+        std::uintptr_t local_pawn{0};
+    };
+
+    struct EspSnapshotTarget
+    {
+        std::uintptr_t player_state{0};
+        std::uintptr_t pawn{0};
+        EspSnapshotRole role{EspSnapshotRole::Unknown};
+        std::string name{};
+    };
+
+    struct EspSnapshotResolver
+    {
+        Reflection reflection{};
+        bool initialized{false};
+        std::uintptr_t cached_game_engine{0};
+        std::uintptr_t cached_world{0};
+        int game_viewport_offset{-2};
+        int viewport_world_offset{-2};
+    };
+
+    auto esp_snapshot_role_name(EspSnapshotRole role) -> const char*
+    {
+        switch (role)
+        {
+        case EspSnapshotRole::Hider: return "hider";
+        case EspSnapshotRole::Hunter: return "hunter";
+        case EspSnapshotRole::Spectator: return "spectator";
+        default: return "unknown";
+        }
+    }
+
+    auto esp_snapshot_read_bool_property(Reflection& ref,
+                                         std::uintptr_t object,
+                                         std::initializer_list<const char*> names,
+                                         bool& value) -> bool
+    {
+        if (!live_uobject(object))
+        {
+            return false;
+        }
+        for (const auto* name : names)
+        {
+            const auto property = find_object_property(ref, object, name);
+            const auto offset = property ? prop_offset(property) : -1;
+            if (!property || offset < 0)
+            {
+                continue;
+            }
+            const auto byte_offset = safe_read<std::uint8_t>(property + OffFBoolPropertyByteOffset, 0);
+            const auto byte_mask = safe_read<std::uint8_t>(property + OffFBoolPropertyByteMask, 0);
+            if (byte_mask == 0)
+            {
+                continue;
+            }
+            const auto raw = safe_read<std::uint8_t>(
+                object + static_cast<std::uintptr_t>(offset) + byte_offset, 0);
+            value = (raw & byte_mask) != 0;
+            return true;
+        }
+        return false;
+    }
+
+    auto esp_snapshot_read_object_array_property(Reflection& ref,
+                                                 std::uintptr_t object,
+                                                 std::initializer_list<const char*> names,
+                                                 std::vector<std::uintptr_t>& out) -> bool
+    {
+        out.clear();
+        if (!live_uobject(object))
+        {
+            return false;
+        }
+        for (const auto* name : names)
+        {
+            const auto property = find_object_property(ref, object, name);
+            const auto offset = property ? prop_offset(property) : -1;
+            if (offset < 0)
+            {
+                continue;
+            }
+            const auto array = safe_read<sdk::TArray<std::uintptr_t>>(
+                object + static_cast<std::uintptr_t>(offset));
+            if (!array.Data || array.Num < 0 || array.Num > 128 || array.Max < array.Num || array.Max > 512)
+            {
+                continue;
+            }
+            out.reserve(static_cast<std::size_t>(array.Num));
+            for (int index = 0; index < array.Num; ++index)
+            {
+                const auto value = safe_read<std::uintptr_t>(
+                    reinterpret_cast<std::uintptr_t>(array.Data) +
+                    static_cast<std::uintptr_t>(index) * sizeof(std::uintptr_t));
+                if (live_uobject(value))
+                {
+                    out.push_back(value);
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    struct EspFStringView
+    {
+        wchar_t* data{nullptr};
+        int num{0};
+        int max{0};
+    };
+
+    auto esp_snapshot_decode_fstring(const EspFStringView& value,
+                                     std::string& out,
+                                     bool& header_valid,
+                                     bool& copy_ok,
+                                     bool& utf8_ok) -> bool
+    {
+        out.clear();
+        header_valid = value.data && value.num > 0 && value.num <= 128 &&
+                       value.max >= value.num && value.max <= 256;
+        copy_ok = false;
+        utf8_ok = false;
+        if (!header_valid)
+        {
+            return false;
+        }
+        std::wstring wide(static_cast<std::size_t>(value.num), L'\0');
+        copy_ok = safe_copy(wide.data(), value.data,
+                            static_cast<std::size_t>(value.num) * sizeof(wchar_t));
+        if (!copy_ok)
+        {
+            return false;
+        }
+        const auto terminator = std::find(wide.begin(), wide.end(), L'\0');
+        const auto character_count = static_cast<int>(terminator - wide.begin());
+        if (character_count <= 0)
+        {
+            return false;
+        }
+        const auto byte_count = WideCharToMultiByte(
+            CP_UTF8,
+            WC_ERR_INVALID_CHARS,
+            wide.data(),
+            character_count,
+            nullptr,
+            0,
+            nullptr,
+            nullptr);
+        if (byte_count <= 0)
+        {
+            return false;
+        }
+        out.resize(static_cast<std::size_t>(byte_count));
+        utf8_ok = WideCharToMultiByte(
+                      CP_UTF8,
+                      WC_ERR_INVALID_CHARS,
+                      wide.data(),
+                      character_count,
+                      out.data(),
+                      byte_count,
+                      nullptr,
+                      nullptr) == byte_count;
+        if (!utf8_ok)
+        {
+            out.clear();
+            return false;
+        }
+        return !out.empty();
+    }
+
+    auto esp_snapshot_read_fstring_property(Reflection& ref,
+                                             std::uintptr_t object,
+                                             std::initializer_list<const char*> names,
+                                             std::string& out) -> bool
+    {
+        out.clear();
+        if (!live_uobject(object))
+        {
+            return false;
+        }
+        for (const auto* name : names)
+        {
+            const auto property = name ? find_object_property(ref, object, name) : 0;
+            const auto offset = property ? prop_offset(property) : -1;
+            // UE5 properties are FField instances, not UObjects.  Do not ask
+            // Reflection::class_name here: it reads the UObject class slot and
+            // rejects every valid FStrProperty.  FString is the native
+            // pointer/count/capacity triple on this x64 build.
+            if (offset < 0 ||
+                prop_element_size(property) != static_cast<int>(sizeof(EspFStringView)))
+            {
+                continue;
+            }
+            const auto value = safe_read<EspFStringView>(
+                object + static_cast<std::uintptr_t>(offset));
+            bool header_valid{};
+            bool copy_ok{};
+            bool utf8_ok{};
+            if (esp_snapshot_decode_fstring(value, out, header_valid, copy_ok, utf8_ok))
+                return true;
+        }
+        out.clear();
+        return false;
+    }
+
+    auto esp_snapshot_target_from_subject(Reflection& ref,
+                                          std::uintptr_t subject,
+                                          EspSnapshotRole role,
+                                          EspSnapshotTarget& out) -> bool
+    {
+        if (!live_uobject(subject))
+        {
+            return false;
+        }
+        const bool subject_is_player_state =
+            contains_text(lower_copy(ref.class_name(subject)), "playerstate");
+        auto pawn = read_object_property_by_names(
+            ref, subject, {"PawnPrivate", "Pawn", "Character", "AcknowledgedPawn"});
+        if (!live_uobject(pawn) && !subject_is_player_state)
+        {
+            pawn = subject;
+        }
+        auto player_state = live_uobject(pawn)
+                                ? read_object_property_by_names(ref, pawn, {"PlayerState"})
+                                : 0;
+        if (!live_uobject(player_state) && subject_is_player_state)
+        {
+            player_state = subject;
+        }
+        if (!live_uobject(player_state))
+        {
+            return false;
+        }
+        std::string name{};
+        (void)esp_snapshot_read_fstring_property(
+            // The game's replicated numeric PlayerNamePrivate is not the UI
+            // display identity.  Prefer the reflected CustomPlayerName field
+            // when present, then use the standard UE fallback names.  This is
+            // a property schema decision, never a player-name hard-code.
+            ref, player_state, {"CustomPlayerName", "PlayerNamePrivate", "PlayerName"}, name);
+        out = {player_state, pawn, role, name};
+        return true;
+    }
+
+    auto esp_snapshot_collect_roster(Reflection& ref,
+                                     std::uintptr_t game_state,
+                                     EspSnapshotRole role,
+                                     std::initializer_list<const char*> properties,
+                                     std::vector<EspSnapshotTarget>& out) -> bool
+    {
+        bool found = false;
+        std::unordered_set<std::uintptr_t> seen{};
+        for (const auto* property_name : properties)
+        {
+            std::vector<std::uintptr_t> subjects{};
+            if (esp_snapshot_read_object_array_property(ref, game_state, {property_name}, subjects))
+            {
+                found = true;
+            }
+            else if (const auto subject = read_object_property_by_names(ref, game_state, {property_name});
+                     live_uobject(subject))
+            {
+                found = true;
+                subjects.push_back(subject);
+            }
+            for (const auto subject : subjects)
+            {
+                EspSnapshotTarget target{};
+                if (esp_snapshot_target_from_subject(ref, subject, role, target) &&
+                    seen.insert(target.player_state).second)
+                {
+                    out.push_back(target);
+                }
+            }
+        }
+        return found;
+    }
+
+    auto esp_snapshot_controller_from_world(std::uintptr_t world) -> std::uintptr_t
+    {
+        const auto game_instance = safe_read<std::uintptr_t>(
+            world + sdk::FieldOffsets::UWorld_OwningGameInstance);
+        if (!live_uobject(game_instance))
+        {
+            return 0;
+        }
+        const auto local_players = safe_read<sdk::TArray<std::uintptr_t>>(
+            game_instance + sdk::FieldOffsets::UGameInstance_LocalPlayers);
+        if (!local_players.Data || local_players.Num <= 0 || local_players.Num > 8)
+        {
+            return 0;
+        }
+        const auto local_player = safe_read<std::uintptr_t>(
+            reinterpret_cast<std::uintptr_t>(local_players.Data));
+        return live_uobject(local_player)
+                   ? safe_read<std::uintptr_t>(local_player + sdk::FieldOffsets::UPlayer_PlayerController)
+                   : 0;
+    }
+
+    auto esp_snapshot_viewport_world(EspSnapshotResolver& resolver) -> std::uintptr_t
+    {
+        auto& ref = resolver.reflection;
+        if (resolver.game_viewport_offset == -2)
+        {
+            resolver.game_viewport_offset =
+                ref.resolve_property_offset("Engine", "GameViewport");
+            resolver.viewport_world_offset =
+                ref.resolve_property_offset("GameViewportClient", "World");
+        }
+        if (resolver.game_viewport_offset < 0 ||
+            resolver.viewport_world_offset < 0)
+        {
+            return 0;
+        }
+        if (!live_uobject(resolver.cached_game_engine))
+        {
+            resolver.cached_game_engine = ref.find_first_instance("GameEngine");
+        }
+        const auto viewport = live_uobject(resolver.cached_game_engine)
+                                  ? safe_read<std::uintptr_t>(
+                                        resolver.cached_game_engine +
+                                        static_cast<std::uintptr_t>(
+                                            resolver.game_viewport_offset))
+                                  : 0;
+        const auto world = live_uobject(viewport)
+                               ? safe_read<std::uintptr_t>(
+                                     viewport +
+                                     static_cast<std::uintptr_t>(
+                                         resolver.viewport_world_offset))
+                               : 0;
+        return live_uobject(world) ? world : 0;
+    }
+
+    auto esp_snapshot_resolve_context(EspSnapshotResolver& resolver,
+                                      EspSnapshotContext& out,
+                                      std::string& failure) -> bool
+    {
+        auto& ref = resolver.reflection;
+        const auto commit = [&](std::uintptr_t world, std::uintptr_t controller) {
+            if (!live_uobject(world) || !live_uobject(controller))
+            {
+                return false;
+            }
+            out.world = world;
+            out.controller = controller;
+            out.local_player_state = read_object_property_by_names(ref, controller, {"PlayerState"});
+            out.local_pawn = read_object_property_by_names(
+                ref, controller, {"AcknowledgedPawn", "Pawn", "Character"});
+            resolver.cached_world = world;
+            return true;
+        };
+
+        // GameViewportClient::World is the authoritative world across map
+        // travel. The old UWorld can remain a live UObject (and retain the
+        // GameInstance/LocalPlayer chain) after DrawHUD has moved to the new
+        // map, so UObject liveness alone cannot validate cached_world.
+        const auto viewport_world = esp_snapshot_viewport_world(resolver);
+        const bool viewport_world_valid = live_uobject(viewport_world);
+        const bool cached_world_valid = live_uobject(resolver.cached_world);
+        const auto preferred_world = runtime_contract::esp_select_snapshot_world(
+            viewport_world,
+            viewport_world_valid,
+            resolver.cached_world,
+            cached_world_valid);
+        const auto preferred_controller =
+            esp_snapshot_controller_from_world(preferred_world);
+        if (commit(preferred_world, preferred_controller))
+        {
+            return true;
+        }
+        if (viewport_world_valid)
+        {
+            failure = "viewport_local_player_controller_unavailable";
+            return false;
+        }
+
+        const auto world_class = ref.find_class("World");
+        if (!world_class)
+        {
+            failure = "world_class_unavailable";
+            return false;
+        }
+        std::uintptr_t selected_world{};
+        std::uintptr_t selected_controller{};
+        ref.for_each_object([&](std::uintptr_t candidate) {
+            if (ref.class_ptr(candidate) != world_class)
+            {
+                return false;
+            }
+            const auto controller = esp_snapshot_controller_from_world(candidate);
+            if (live_uobject(controller))
+            {
+                selected_world = candidate;
+                selected_controller = controller;
+            }
+            return false;
+        });
+        if (!commit(selected_world, selected_controller))
+        {
+            failure = "local_player_controller_unavailable";
+            return false;
+        }
+        return true;
+    }
+
+    // Shared callback metadata used while binding the current DrawHUD route.
+    auto esp_hud_probe_object_metadata(Reflection& ref,
+                                       std::uintptr_t object,
+                                       const char* prefix,
+                                       std::initializer_list<const char*> function_names,
+                                       int& available_functions) -> std::string
+    {
+        const std::string key_prefix(prefix ? prefix : "object");
+        std::string metadata{};
+        const bool available = live_uobject(object);
+        const auto vtable = available ? safe_read<std::uintptr_t>(object, 0) : 0;
+        const auto process_event_target =
+            vtable ? safe_read<std::uintptr_t>(
+                         vtable + static_cast<std::uintptr_t>(ProcessEventVtableIndex) * sizeof(std::uintptr_t),
+                         0)
+                   : 0;
+        metadata += ",\"" + key_prefix + "_available\":" + std::string(json_bool(available));
+        metadata += ",\"" + key_prefix + "_class\":\"" +
+                    json_escape(available ? ref.class_name(object) : "") + "\"";
+        metadata += ",\"" + key_prefix + "_path\":\"" +
+                    json_escape(available ? ref.object_path(object) : "") + "\"";
+        metadata += ",\"" + key_prefix + "_process_event_hookable\":" +
+                    std::string(json_bool(address_in_main_module_code(process_event_target)));
+        for (const auto* function_name : function_names)
+        {
+            const auto function = available ? ref.find_function(object, function_name) : 0;
+            const bool function_available = function != 0;
+            available_functions += function_available ? 1 : 0;
+            metadata += ",\"" + key_prefix + "_" + function_name + "_available\":" +
+                        std::string(json_bool(function_available));
+            if (function_available)
+            {
+                metadata += ",\"" + key_prefix + "_" + function_name + "_path\":\"" +
+                            json_escape(ref.object_path(function)) + "\"";
+            }
+        }
+        return metadata;
+    }
+
+    auto esp_hud_callback_probe_native() -> std::string
+    {
+        static std::mutex resolver_mutex{};
+        static EspSnapshotResolver resolver{};
+        std::lock_guard<std::mutex> lock(resolver_mutex);
+
+        std::string failure{};
+        if (!resolver.initialized)
+        {
+            if (!resolver.reflection.init(failure))
+            {
+                return response_json(false, "esp_hud_callback_probe_reflection_unavailable", 0, 1, failure);
+            }
+            resolver.initialized = true;
+        }
+
+        EspSnapshotContext context{};
+        if (!esp_snapshot_resolve_context(resolver, context, failure))
+        {
+            return response_json(false, "esp_hud_callback_probe_context_unavailable", 0, 1, failure);
+        }
+
+        auto& ref = resolver.reflection;
+        const auto hud = read_object_property_by_names(
+            ref, context.controller, {"MyHUD", "HUD", "PlayerHUD"});
+        if (!live_uobject(hud))
+        {
+            return response_json(false,
+                                 "esp_hud_callback_probe_hud_unavailable",
+                                 0,
+                                 1,
+                                 "HUD is not available yet");
+        }
+
+        std::uintptr_t callback{};
+        const char* callback_name = "";
+        for (const auto* candidate : {"ReceiveDrawHUD", "DrawHUD", "PostRender", "ReceivePostRender"})
+        {
+            callback = ref.find_function(hud, candidate);
+            if (callback)
+            {
+                callback_name = candidate;
+                break;
+            }
+        }
+        if (!callback)
+        {
+            return response_json(false,
+                                 "esp_hud_callback_probe_draw_unavailable",
+                                 0,
+                                 1,
+                                 "HUD has no reflected draw callback");
+        }
+
+        const auto canvas_property = find_object_property(ref, hud, "Canvas");
+        const auto debug_canvas_property = find_object_property(ref, hud, "DebugCanvas");
+        const int canvas_offset = canvas_property ? prop_offset(canvas_property) : -1;
+        const int debug_canvas_offset = debug_canvas_property ? prop_offset(debug_canvas_property) : -1;
+        if (canvas_offset < 0 && debug_canvas_offset < 0)
+        {
+            return response_json(false,
+                                 "esp_hud_callback_probe_canvas_property_unavailable",
+                                 0,
+                                 1,
+                                 "HUD exposes no reflected Canvas property");
+        }
+
+        const bool reconfigured =
+            g_esp_hud_callback_target.load(std::memory_order_acquire) != hud ||
+            g_esp_hud_callback_function.load(std::memory_order_acquire) != callback ||
+            g_esp_hud_canvas_offset.load(std::memory_order_acquire) != canvas_offset ||
+            g_esp_hud_debug_canvas_offset.load(std::memory_order_acquire) != debug_canvas_offset;
+        if (reconfigured)
+        {
+            // Publish all immutable matching fields before enabling the
+            // callback.  The hook only compares raw addresses and reads the
+            // two reflected offsets; it never touches Reflection or invokes UE.
+            g_esp_hud_canvas_offset.store(canvas_offset, std::memory_order_release);
+            g_esp_hud_debug_canvas_offset.store(debug_canvas_offset, std::memory_order_release);
+            g_esp_hud_observed_canvas.store(0, std::memory_order_release);
+            g_esp_hud_observed_debug_canvas.store(0, std::memory_order_release);
+            g_esp_hud_callback_hits.store(0, std::memory_order_release);
+            g_esp_hud_callback_function.store(callback, std::memory_order_release);
+            g_esp_hud_callback_target.store(hud, std::memory_order_release);
+        }
+
+        if (!install_process_event_vtable_hook_for_object(hud, failure))
+        {
+            return response_json(false, "esp_hud_callback_probe_hook_unavailable", 0, 1, failure);
+        }
+
+        const auto observed_canvas = g_esp_hud_observed_canvas.load(std::memory_order_acquire);
+        const auto observed_debug_canvas = g_esp_hud_observed_debug_canvas.load(std::memory_order_acquire);
+        int canvas_functions{};
+        std::string metadata =
+            "\"pid\":" + std::to_string(GetCurrentProcessId()) +
+            ",\"mutation_performed\":true" +
+            ",\"renderer_installed\":false" +
+            ",\"callback_probe_active\":true" +
+            ",\"callback_reconfigured\":" + std::string(json_bool(reconfigured)) +
+            ",\"hud_callback_name\":\"" + json_escape(callback_name) + "\"" +
+            ",\"callback_hits\":" +
+                std::to_string(g_esp_hud_callback_hits.load(std::memory_order_acquire)) +
+            ",\"canvas_observed\":" + std::string(json_bool(live_uobject(observed_canvas))) +
+            ",\"debug_canvas_observed\":" + std::string(json_bool(live_uobject(observed_debug_canvas)));
+        metadata += esp_hud_probe_object_metadata(
+            ref,
+            observed_canvas,
+            "callback_canvas",
+            {"K2_DrawLine", "K2_DrawText", "DrawLine", "DrawText", "Project"},
+            canvas_functions);
+        metadata += esp_hud_probe_object_metadata(
+            ref,
+            observed_debug_canvas,
+            "callback_debug_canvas",
+            {"K2_DrawLine", "K2_DrawText", "DrawLine", "DrawText", "Project"},
+            canvas_functions);
+        metadata += ",\"canvas_functions\":" + std::to_string(canvas_functions);
+        return response_json(true,
+                             "esp_hud_callback_probe",
+                             static_cast<int>(g_esp_hud_callback_hits.load(std::memory_order_acquire)),
+                             0,
+                             live_uobject(observed_canvas) || live_uobject(observed_debug_canvas)
+                                 ? "HUD callback Canvas observed"
+                                 : "HUD callback hook installed; waiting for Canvas",
+                             metadata);
+    }
+
+    template <typename T>
+    void esp_native_release(T*& value)
+    {
+        if (value)
+        {
+            value->Release();
+            value = nullptr;
+        }
+    }
+
+    auto esp_native_format_name(DXGI_FORMAT format) -> std::string
+    {
+        switch (format)
+        {
+        case DXGI_FORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return "B8G8R8A8_UNORM_SRGB";
+        case DXGI_FORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return "R8G8B8A8_UNORM_SRGB";
+        case DXGI_FORMAT_R10G10B10A2_UNORM: return "R10G10B10A2_UNORM";
+        default: return "DXGI_FORMAT_" + std::to_string(static_cast<int>(format));
+        }
+    }
+
+    auto esp_native_supported_backbuffer_format(DXGI_FORMAT format) -> bool
+    {
+        return format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+               format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+               format == DXGI_FORMAT_R8G8B8A8_UNORM ||
+               format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+               format == DXGI_FORMAT_R10G10B10A2_UNORM;
+    }
+
+    void esp_native_clear_swapchain_queues()
+    {
+        std::lock_guard<std::mutex> lock(g_esp_native_swapchain_queues_mutex);
+        for (auto& entry : g_esp_native_swapchain_queues)
+        {
+            esp_native_release(entry.queue);
+            esp_native_release(entry.swapchain_identity);
+        }
+        g_esp_native_swapchain_queues.clear();
+    }
+
+    void esp_native_track_swapchain_queue(IUnknown* device_or_queue, IDXGISwapChain* swapchain)
+    {
+        if (!device_or_queue || !swapchain)
+        {
+            return;
+        }
+        ID3D12CommandQueue* queue = nullptr;
+        IUnknown* identity = nullptr;
+        if (FAILED(device_or_queue->QueryInterface(
+                __uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&queue))) ||
+            !queue || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT ||
+            FAILED(swapchain->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity))) ||
+            !identity)
+        {
+            esp_native_release(identity);
+            esp_native_release(queue);
+            return;
+        }
+        std::lock_guard<std::mutex> lock(g_esp_native_swapchain_queues_mutex);
+        for (const auto& entry : g_esp_native_swapchain_queues)
+        {
+            if (entry.swapchain_identity == identity)
+            {
+                esp_native_release(identity);
+                esp_native_release(queue);
+                return;
+            }
+        }
+        g_esp_native_swapchain_queues.push_back({identity, queue});
+    }
+
+    auto esp_native_queue_for_swapchain(IDXGISwapChain* swapchain) -> ID3D12CommandQueue*
+    {
+        if (!swapchain)
+        {
+            return nullptr;
+        }
+        IUnknown* identity = nullptr;
+        if (FAILED(swapchain->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity))) || !identity)
+        {
+            esp_native_release(identity);
+            return nullptr;
+        }
+        std::lock_guard<std::mutex> lock(g_esp_native_swapchain_queues_mutex);
+        for (const auto& entry : g_esp_native_swapchain_queues)
+        {
+            if (entry.swapchain_identity == identity && entry.queue)
+            {
+                entry.queue->AddRef();
+                esp_native_release(identity);
+                return entry.queue;
+            }
+        }
+        esp_native_release(identity);
+        return nullptr;
+    }
+
+    void esp_native_observe_present_thread_queue(ID3D12CommandQueue* queue)
+    {
+        if (!queue || g_esp_native_overlay_queue_submission ||
+            queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+        {
+            return;
+        }
+        const DWORD thread_id = GetCurrentThreadId();
+        const std::uint64_t tick = GetTickCount64();
+        std::lock_guard<std::mutex> lock(g_esp_native_present_thread_queues_mutex);
+        EspNativePresentThreadQueue* selected = nullptr;
+        for (auto& entry : g_esp_native_present_thread_queues)
+        {
+            if (entry.thread_id == thread_id)
+            {
+                selected = &entry;
+                break;
+            }
+            if (!selected && !entry.queue)
+            {
+                selected = &entry;
+            }
+        }
+        if (!selected)
+        {
+            selected = &*std::min_element(
+                g_esp_native_present_thread_queues.begin(),
+                g_esp_native_present_thread_queues.end(),
+                [](const auto& left, const auto& right) { return left.tick < right.tick; });
+        }
+        if (selected->queue != queue)
+        {
+            esp_native_release(selected->queue);
+            queue->AddRef();
+            selected->queue = queue;
+        }
+        selected->thread_id = thread_id;
+        selected->tick = tick;
+    }
+
+    auto esp_native_queue_matches_swapchain(ID3D12CommandQueue* queue, IDXGISwapChain* swapchain) -> bool
+    {
+        if (!queue || !swapchain)
+        {
+            return false;
+        }
+        ID3D12Device* swapchain_device = nullptr;
+        ID3D12Device* queue_device = nullptr;
+        const bool matched = SUCCEEDED(swapchain->GetDevice(__uuidof(ID3D12Device),
+                                                            reinterpret_cast<void**>(&swapchain_device))) &&
+                             SUCCEEDED(queue->GetDevice(__uuidof(ID3D12Device),
+                                                        reinterpret_cast<void**>(&queue_device))) &&
+                             swapchain_device == queue_device;
+        esp_native_release(queue_device);
+        esp_native_release(swapchain_device);
+        return matched;
+    }
+
+    auto esp_native_queue_for_late_present(IDXGISwapChain* swapchain) -> ID3D12CommandQueue*
+    {
+        const DWORD thread_id = GetCurrentThreadId();
+        const std::uint64_t now = GetTickCount64();
+        ID3D12CommandQueue* queue = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_esp_native_present_thread_queues_mutex);
+            for (const auto& entry : g_esp_native_present_thread_queues)
+            {
+                if (entry.thread_id == thread_id && entry.queue && now >= entry.tick && now - entry.tick <= 250)
+                {
+                    entry.queue->AddRef();
+                    queue = entry.queue;
+                    break;
+                }
+            }
+        }
+        if (!queue)
+        {
+            return nullptr;
+        }
+        if (!esp_native_queue_matches_swapchain(queue, swapchain))
+        {
+            esp_native_release(queue);
+            return nullptr;
+        }
+        esp_native_track_swapchain_queue(queue, swapchain);
+        return queue;
+    }
+
+    void esp_native_clear_present_thread_queues()
+    {
+        std::lock_guard<std::mutex> lock(g_esp_native_present_thread_queues_mutex);
+        for (auto& entry : g_esp_native_present_thread_queues)
+        {
+            esp_native_release(entry.queue);
+            entry.thread_id = 0;
+            entry.tick = 0;
+        }
+    }
+
+    void esp_native_release_direct_backbuffers_locked(EspNativeCompositor& compositor);
+
+    auto esp_native_create_direct_pipeline_locked(EspNativeCompositor& compositor,
+                                                   DXGI_FORMAT format,
+                                                   const char*& failure_step) -> HRESULT
+    {
+        failure_step = "direct_pipeline_device";
+        if (!compositor.device)
+        {
+            return E_PENDING;
+        }
+        if (compositor.pipeline_state && compositor.root_signature && compositor.pipeline_format == format)
+        {
+            return S_OK;
+        }
+        esp_native_release(compositor.pipeline_state);
+        compositor.pipeline_format = DXGI_FORMAT_UNKNOWN;
+
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT format_support{};
+        format_support.Format = format;
+        failure_step = "CheckFeatureSupport(format)";
+        HRESULT result = compositor.device->CheckFeatureSupport(
+            D3D12_FEATURE_FORMAT_SUPPORT, &format_support, sizeof(format_support));
+        if (FAILED(result))
+        {
+            return result;
+        }
+        if ((format_support.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) == 0 ||
+            (format_support.Support1 & D3D12_FORMAT_SUPPORT1_BLENDABLE) == 0)
+        {
+            return E_FAIL;
+        }
+
+        if (!compositor.root_signature)
+        {
+            const auto d3d12_module = GetModuleHandleW(L"d3d12.dll");
+            using SerializeRootSignatureFn = HRESULT(WINAPI*)(const D3D12_ROOT_SIGNATURE_DESC*,
+                                                              D3D_ROOT_SIGNATURE_VERSION,
+                                                              ID3DBlob**,
+                                                              ID3DBlob**);
+            const auto serialize = d3d12_module
+                                       ? reinterpret_cast<SerializeRootSignatureFn>(
+                                             GetProcAddress(d3d12_module, "D3D12SerializeRootSignature"))
+                                       : nullptr;
+            if (!serialize)
+            {
+                return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+            }
+            D3D12_ROOT_SIGNATURE_DESC description{};
+            description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+            ID3DBlob* signature = nullptr;
+            ID3DBlob* errors = nullptr;
+            failure_step = "D3D12SerializeRootSignature";
+            result = serialize(&description, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &errors);
+            esp_native_release(errors);
+            if (SUCCEEDED(result))
+            {
+                failure_step = "CreateRootSignature";
+                result = compositor.device->CreateRootSignature(
+                    0, signature->GetBufferPointer(), signature->GetBufferSize(),
+                    __uuidof(ID3D12RootSignature), reinterpret_cast<void**>(&compositor.root_signature));
+            }
+            esp_native_release(signature);
+            if (FAILED(result))
+            {
+                return result;
+            }
+        }
+
+        const auto compiler_module = LoadLibraryW(L"d3dcompiler_47.dll");
+        if (!compiler_module)
+        {
+            failure_step = "LoadLibrary(d3dcompiler_47.dll)";
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+        const auto compile = reinterpret_cast<decltype(&D3DCompile)>(
+            GetProcAddress(compiler_module, "D3DCompile"));
+        if (!compile)
+        {
+            FreeLibrary(compiler_module);
+            failure_step = "GetProcAddress(D3DCompile)";
+            return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+        }
+        static constexpr char VertexShader[] = R"HLSL(
+struct EspDirectVertexInput { float2 position : POSITION0; float4 color : COLOR0; };
+struct EspDirectVertexOutput { float4 position : SV_POSITION; float4 color : COLOR0; };
+EspDirectVertexOutput main(EspDirectVertexInput input)
+{
+    EspDirectVertexOutput output;
+    output.position = float4(input.position, 0.0, 1.0);
+    output.color = input.color;
+    return output;
+}
+)HLSL";
+        static constexpr char PixelShader[] = R"HLSL(
+struct EspDirectPixelInput { float4 position : SV_POSITION; float4 color : COLOR0; };
+float4 main(EspDirectPixelInput input) : SV_TARGET0 { return input.color; }
+)HLSL";
+        ID3DBlob* vertex_blob = nullptr;
+        ID3DBlob* pixel_blob = nullptr;
+        ID3DBlob* errors = nullptr;
+        failure_step = "D3DCompile(vertex)";
+        result = compile(VertexShader, sizeof(VertexShader) - 1, "MecchaEspDirectVS", nullptr, nullptr,
+                         "main", "vs_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &vertex_blob, &errors);
+        esp_native_release(errors);
+        if (SUCCEEDED(result))
+        {
+            failure_step = "D3DCompile(pixel)";
+            result = compile(PixelShader, sizeof(PixelShader) - 1, "MecchaEspDirectPS", nullptr, nullptr,
+                             "main", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &pixel_blob, &errors);
+        }
+        esp_native_release(errors);
+        if (FAILED(result))
+        {
+            esp_native_release(pixel_blob);
+            esp_native_release(vertex_blob);
+            FreeLibrary(compiler_module);
+            return result;
+        }
+
+        D3D12_INPUT_ELEMENT_DESC input_elements[] = {
+            {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        };
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline{};
+        pipeline.pRootSignature = compositor.root_signature;
+        pipeline.VS = {vertex_blob->GetBufferPointer(), vertex_blob->GetBufferSize()};
+        pipeline.PS = {pixel_blob->GetBufferPointer(), pixel_blob->GetBufferSize()};
+        pipeline.BlendState.AlphaToCoverageEnable = FALSE;
+        pipeline.BlendState.IndependentBlendEnable = FALSE;
+        for (auto& target : pipeline.BlendState.RenderTarget)
+        {
+            target.BlendEnable = FALSE;
+            target.LogicOpEnable = FALSE;
+            target.SrcBlend = D3D12_BLEND_ONE;
+            target.DestBlend = D3D12_BLEND_ZERO;
+            target.BlendOp = D3D12_BLEND_OP_ADD;
+            target.SrcBlendAlpha = D3D12_BLEND_ONE;
+            target.DestBlendAlpha = D3D12_BLEND_ZERO;
+            target.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            target.LogicOp = D3D12_LOGIC_OP_NOOP;
+            target.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        }
+        auto& blend = pipeline.BlendState.RenderTarget[0];
+        blend.BlendEnable = TRUE;
+        blend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+        blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        blend.BlendOp = D3D12_BLEND_OP_ADD;
+        blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+        blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        pipeline.SampleMask = UINT_MAX;
+        pipeline.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        pipeline.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        pipeline.RasterizerState.FrontCounterClockwise = FALSE;
+        pipeline.RasterizerState.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+        pipeline.RasterizerState.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+        pipeline.RasterizerState.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+        pipeline.RasterizerState.DepthClipEnable = TRUE;
+        pipeline.RasterizerState.MultisampleEnable = FALSE;
+        pipeline.RasterizerState.AntialiasedLineEnable = FALSE;
+        pipeline.RasterizerState.ForcedSampleCount = 0;
+        pipeline.RasterizerState.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+        pipeline.DepthStencilState.DepthEnable = FALSE;
+        pipeline.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        pipeline.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        pipeline.DepthStencilState.StencilEnable = FALSE;
+        pipeline.DepthStencilState.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+        pipeline.DepthStencilState.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
+        pipeline.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+        pipeline.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+        pipeline.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
+        pipeline.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        pipeline.DepthStencilState.BackFace = pipeline.DepthStencilState.FrontFace;
+        pipeline.InputLayout = {input_elements, static_cast<UINT>(std::size(input_elements))};
+        pipeline.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+        pipeline.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pipeline.NumRenderTargets = 1;
+        pipeline.RTVFormats[0] = format;
+        pipeline.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        pipeline.SampleDesc.Count = 1;
+        pipeline.SampleDesc.Quality = 0;
+        failure_step = "CreateGraphicsPipelineState(pipeline)";
+        result = compositor.device->CreateGraphicsPipelineState(
+            &pipeline, __uuidof(ID3D12PipelineState), reinterpret_cast<void**>(&compositor.pipeline_state));
+        // A handful of R10 swapchain drivers reject the alpha-blended form
+        // even though the format advertises render-target and blend support.
+        // ESP geometry remains useful without blending, so retry a fully
+        // opaque PSO rather than falling back to D3D11On12 or touching game
+        // render state.  Other formats keep normal alpha blending.
+        if (FAILED(result) && format == DXGI_FORMAT_R10G10B10A2_UNORM)
+        {
+            blend.BlendEnable = FALSE;
+            failure_step = "CreateGraphicsPipelineState(opaque R10 fallback)";
+            result = compositor.device->CreateGraphicsPipelineState(
+                &pipeline, __uuidof(ID3D12PipelineState), reinterpret_cast<void**>(&compositor.pipeline_state));
+        }
+        // Do not guess at another renderer when both production candidates are
+        // rejected.  A no-input probe PSO is safe to construct and separates a
+        // root-signature/format rejection from an input-signature rejection in
+        // the next status reply without recording or submitting any commands.
+        if (FAILED(result))
+        {
+            static constexpr char ProbeVertexShader[] = R"HLSL(
+struct Output { float4 position : SV_POSITION; float4 color : COLOR0; };
+Output main(uint vertex_id : SV_VertexID)
+{
+    static const float2 positions[3] = { float2(-0.5, -0.5), float2(0.0, 0.5), float2(0.5, -0.5) };
+    Output output;
+    output.position = float4(positions[vertex_id], 0.0, 1.0);
+    output.color = float4(1.0, 0.0, 0.0, 1.0);
+    return output;
+}
+)HLSL";
+            ID3DBlob* probe_vertex_blob = nullptr;
+            failure_step = "D3DCompile(probe vertex)";
+            const HRESULT probe_compile = compile(
+                ProbeVertexShader, sizeof(ProbeVertexShader) - 1, "MecchaEspDirectProbeVS", nullptr, nullptr,
+                "main", "vs_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &probe_vertex_blob, &errors);
+            esp_native_release(errors);
+            if (FAILED(probe_compile))
+            {
+                esp_native_release(probe_vertex_blob);
+                result = probe_compile;
+            }
+            else
+            {
+                auto probe_pipeline = pipeline;
+                probe_pipeline.InputLayout = {nullptr, 0};
+                probe_pipeline.VS = {probe_vertex_blob->GetBufferPointer(), probe_vertex_blob->GetBufferSize()};
+                ID3D12PipelineState* probe_state = nullptr;
+                failure_step = "CreateGraphicsPipelineState(no-input probe)";
+                const HRESULT probe_result = compositor.device->CreateGraphicsPipelineState(
+                    &probe_pipeline, __uuidof(ID3D12PipelineState), reinterpret_cast<void**>(&probe_state));
+                esp_native_release(probe_state);
+                if (SUCCEEDED(probe_result))
+                {
+                    failure_step = "CreateGraphicsPipelineState(no-input probe succeeded; vertex input path rejected)";
+                }
+                else
+                {
+                    // Depth-only/stream-output style pipelines may omit a
+                    // pixel shader and render target.  This second probe
+                    // keeps the same root signature and vertex bytecode so
+                    // it distinguishes those two stages from the R10 output
+                    // merger without recording a command list.
+                    auto vertex_only_pipeline = probe_pipeline;
+                    vertex_only_pipeline.PS = {nullptr, 0};
+                    vertex_only_pipeline.NumRenderTargets = 0;
+                    vertex_only_pipeline.RTVFormats[0] = DXGI_FORMAT_UNKNOWN;
+                    ID3D12PipelineState* vertex_only_state = nullptr;
+                    failure_step = "CreateGraphicsPipelineState(vertex-only probe)";
+                    const HRESULT vertex_only_result = compositor.device->CreateGraphicsPipelineState(
+                        &vertex_only_pipeline, __uuidof(ID3D12PipelineState),
+                        reinterpret_cast<void**>(&vertex_only_state));
+                    esp_native_release(vertex_only_state);
+                    if (SUCCEEDED(vertex_only_result))
+                    {
+                        failure_step = "CreateGraphicsPipelineState(vertex-only probe succeeded; pixel/R10 output path rejected)";
+                        static constexpr char ProbePixelShader[] = R"HLSL(
+float4 main() : SV_TARGET0 { return float4(1.0, 0.0, 0.0, 1.0); }
+)HLSL";
+                        ID3DBlob* probe_pixel_blob = nullptr;
+                        failure_step = "D3DCompile(probe pixel)";
+                        const HRESULT probe_pixel_compile = compile(
+                            ProbePixelShader, sizeof(ProbePixelShader) - 1, "MecchaEspDirectProbePS", nullptr, nullptr,
+                            "main", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &probe_pixel_blob, &errors);
+                        esp_native_release(errors);
+                        if (SUCCEEDED(probe_pixel_compile))
+                        {
+                            auto solid_pixel_pipeline = probe_pipeline;
+                            solid_pixel_pipeline.PS = {
+                                probe_pixel_blob->GetBufferPointer(), probe_pixel_blob->GetBufferSize()};
+                            ID3D12PipelineState* solid_pixel_state = nullptr;
+                            failure_step = "CreateGraphicsPipelineState(solid-pixel probe)";
+                            const HRESULT solid_pixel_result = compositor.device->CreateGraphicsPipelineState(
+                                &solid_pixel_pipeline, __uuidof(ID3D12PipelineState),
+                                reinterpret_cast<void**>(&solid_pixel_state));
+                            esp_native_release(solid_pixel_state);
+                            if (SUCCEEDED(solid_pixel_result))
+                            {
+                                failure_step = "CreateGraphicsPipelineState(solid-pixel probe succeeded; pixel input linkage rejected)";
+                            }
+                        }
+                        esp_native_release(probe_pixel_blob);
+                    }
+                }
+                esp_native_release(probe_vertex_blob);
+            }
+        }
+        esp_native_release(pixel_blob);
+        esp_native_release(vertex_blob);
+        FreeLibrary(compiler_module);
+        if (SUCCEEDED(result))
+        {
+            compositor.pipeline_format = format;
+        }
+        return result;
+    }
+
+    auto esp_native_recreate_direct_backbuffers_locked(EspNativeCompositor& compositor,
+                                                        IDXGISwapChain* swapchain,
+                                                        const DXGI_SWAP_CHAIN_DESC& description,
+                                                        const char*& failure_step) -> HRESULT
+    {
+        failure_step = "validate_arguments";
+        if (!compositor.device || !swapchain || !esp_native_supported_backbuffer_format(description.BufferDesc.Format) ||
+            description.BufferCount == 0 || description.BufferCount > 8)
+        {
+            return E_INVALIDARG;
+        }
+        esp_native_release_direct_backbuffers_locked(compositor);
+        if (!compositor.rtv_heap)
+        {
+            failure_step = "CreateDescriptorHeap(RTV)";
+            D3D12_DESCRIPTOR_HEAP_DESC heap{};
+            heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+            heap.NumDescriptors = 8;
+            heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+            HRESULT result = compositor.device->CreateDescriptorHeap(
+                &heap, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&compositor.rtv_heap));
+            if (FAILED(result)) return result;
+            compositor.rtv_descriptor_size = compositor.device->GetDescriptorHandleIncrementSize(
+                D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        }
+        const char* pipeline_failure_step = "direct_pipeline";
+        HRESULT result = esp_native_create_direct_pipeline_locked(
+            compositor, description.BufferDesc.Format, pipeline_failure_step);
+        failure_step = pipeline_failure_step;
+        if (FAILED(result)) return result;
+        if (!compositor.fence)
+        {
+            failure_step = "CreateFence";
+            result = compositor.device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                    __uuidof(ID3D12Fence),
+                                                    reinterpret_cast<void**>(&compositor.fence));
+            if (FAILED(result)) return result;
+            failure_step = "CreateEvent";
+            compositor.fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (!compositor.fence_event) return HRESULT_FROM_WIN32(GetLastError());
+        }
+        const auto rtv_start = compositor.rtv_heap->GetCPUDescriptorHandleForHeapStart();
+        compositor.direct_frames.reserve(description.BufferCount);
+        for (UINT index = 0; index < description.BufferCount; ++index)
+        {
+            EspNativeCompositor::DirectFrame frame{};
+            failure_step = "IDXGISwapChain::GetBuffer";
+            result = swapchain->GetBuffer(index, __uuidof(ID3D12Resource),
+                                          reinterpret_cast<void**>(&frame.backbuffer));
+            if (FAILED(result)) break;
+            frame.rtv = rtv_start;
+            frame.rtv.ptr += static_cast<SIZE_T>(index) * compositor.rtv_descriptor_size;
+            compositor.device->CreateRenderTargetView(frame.backbuffer, nullptr, frame.rtv);
+            failure_step = "CreateCommandAllocator";
+            result = compositor.device->CreateCommandAllocator(
+                D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator),
+                reinterpret_cast<void**>(&frame.allocator));
+            if (FAILED(result)) break;
+            failure_step = "CreateCommandList";
+            result = compositor.device->CreateCommandList(
+                0, D3D12_COMMAND_LIST_TYPE_DIRECT, frame.allocator, compositor.pipeline_state,
+                __uuidof(ID3D12GraphicsCommandList), reinterpret_cast<void**>(&frame.command_list));
+            if (FAILED(result)) break;
+            failure_step = "ID3D12GraphicsCommandList::Close";
+            result = frame.command_list->Close();
+            if (FAILED(result)) break;
+            D3D12_HEAP_PROPERTIES heap{};
+            heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+            heap.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+            heap.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+            D3D12_RESOURCE_DESC upload{};
+            upload.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            upload.Width = sizeof(EspNativeDirectVertex) * EspNativeDirectMaxVertices;
+            upload.Height = 1;
+            upload.DepthOrArraySize = 1;
+            upload.MipLevels = 1;
+            upload.SampleDesc.Count = 1;
+            upload.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            failure_step = "CreateCommittedResource(upload)";
+            result = compositor.device->CreateCommittedResource(
+                &heap, D3D12_HEAP_FLAG_NONE, &upload, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                __uuidof(ID3D12Resource), reinterpret_cast<void**>(&frame.vertex_upload));
+            if (FAILED(result)) break;
+            failure_step = "ID3D12Resource::Map(upload)";
+            result = frame.vertex_upload->Map(0, nullptr, reinterpret_cast<void**>(&frame.mapped_vertices));
+            if (FAILED(result)) break;
+            compositor.direct_frames.push_back(frame);
+        }
+        if (FAILED(result) || compositor.direct_frames.size() != description.BufferCount)
+        {
+            esp_native_release_direct_backbuffers_locked(compositor);
+            if (SUCCEEDED(result)) failure_step = "backbuffer_frame_count";
+            return FAILED(result) ? result : E_FAIL;
+        }
+        compositor.format = description.BufferDesc.Format;
+        compositor.width = description.BufferDesc.Width;
+        compositor.height = description.BufferDesc.Height;
+        compositor.buffers = description.BufferCount;
+        compositor.uses_offscreen_composite = false;
+        return S_OK;
+    }
+
+    auto esp_native_write_direct_vertices(const EspNativeSnapshot& snapshot,
+                                          UINT width,
+                                          UINT height,
+                                          EspNativeDirectVertex* output,
+                                          std::size_t capacity) -> std::size_t
+    {
+        if (!output || width == 0 || height == 0)
+        {
+            return 0;
+        }
+        const float scale_x = snapshot.viewport_width > 0
+                                  ? static_cast<float>(width) / static_cast<float>(snapshot.viewport_width)
+                                  : 1.0f;
+        const float scale_y = snapshot.viewport_height > 0
+                                  ? static_cast<float>(height) / static_cast<float>(snapshot.viewport_height)
+                                  : 1.0f;
+        std::size_t count = 0;
+        const auto emit = [&](float x, float y, const EspNativeColor& color) {
+            if (count >= capacity) return false;
+            output[count++] = {2.0f * x / static_cast<float>(width) - 1.0f,
+                               1.0f - 2.0f * y / static_cast<float>(height),
+                               color.r, color.g, color.b, color.a};
+            return true;
+        };
+        const auto emit_quad = [&](float left,
+                                   float top,
+                                   float right,
+                                   float bottom,
+                                   const EspNativeColor& color) {
+            if (count + 6 > capacity)
+            {
+                return false;
+            }
+            (void)emit(left, top, color);
+            (void)emit(right, top, color);
+            (void)emit(right, bottom, color);
+            (void)emit(left, top, color);
+            (void)emit(right, bottom, color);
+            (void)emit(left, bottom, color);
+            return true;
+        };
+        for (std::uint32_t index = 0; index < snapshot.line_count && count + 6 <= capacity; ++index)
+        {
+            const auto& line = snapshot.lines[index];
+            const float x1 = line.x1 * scale_x;
+            const float y1 = line.y1 * scale_y;
+            const float x2 = line.x2 * scale_x;
+            const float y2 = line.y2 * scale_y;
+            const float dx = x2 - x1;
+            const float dy = y2 - y1;
+            const float length = std::sqrt(dx * dx + dy * dy);
+            if (!std::isfinite(length) || length < 0.01f) continue;
+            const float half_thickness = std::max(0.5f, line.thickness * (scale_x + scale_y) * 0.25f);
+            const float px = -dy * half_thickness / length;
+            const float py = dx * half_thickness / length;
+            const EspNativeColor color{line.color.r, line.color.g, line.color.b, line.color.a};
+            (void)emit(x1 + px, y1 + py, color);
+            (void)emit(x2 + px, y2 + py, color);
+            (void)emit(x2 - px, y2 - py, color);
+            (void)emit(x1 + px, y1 + py, color);
+            (void)emit(x2 - px, y2 - py, color);
+            (void)emit(x1 - px, y1 - py, color);
+        }
+        std::uint64_t glyph_quads{};
+        const float glyph_scale =
+            std::max(1.5f, 2.0f * (scale_x + scale_y) * 0.5f);
+        const auto emit_text_pass = [&](const EspNativeText& text,
+                                        std::size_t length,
+                                        float offset_x,
+                                        float offset_y,
+                                        const EspNativeColor& color) {
+            const float advance = 6.0f * glyph_scale;
+            const float origin_x =
+                text.x * scale_x -
+                static_cast<float>(length) * advance * 0.5f +
+                offset_x;
+            const float origin_y = text.y * scale_y + offset_y;
+            for (std::size_t character_index = 0;
+                 character_index < length;
+                 ++character_index)
+            {
+                const auto rows = runtime_contract::esp_ascii_glyph_rows(
+                    text.value[character_index]);
+                for (int row = 0; row < 7; ++row)
+                {
+                    int column{};
+                    while (column < 5)
+                    {
+                        while (column < 5 &&
+                               (rows[static_cast<std::size_t>(row)] &
+                                (1u << (4 - column))) == 0)
+                        {
+                            ++column;
+                        }
+                        if (column >= 5)
+                        {
+                            break;
+                        }
+                        const int run_start = column;
+                        while (column < 5 &&
+                               (rows[static_cast<std::size_t>(row)] &
+                                (1u << (4 - column))) != 0)
+                        {
+                            ++column;
+                        }
+                        const float left =
+                            origin_x +
+                            (static_cast<float>(character_index) * 6.0f +
+                             static_cast<float>(run_start)) *
+                                glyph_scale;
+                        const float top =
+                            origin_y + static_cast<float>(row) * glyph_scale;
+                        const float right =
+                            origin_x +
+                            (static_cast<float>(character_index) * 6.0f +
+                             static_cast<float>(column)) *
+                                glyph_scale;
+                        if (!emit_quad(
+                                left,
+                                top,
+                                right,
+                                top + glyph_scale,
+                                color))
+                        {
+                            return false;
+                        }
+                        ++glyph_quads;
+                    }
+                }
+            }
+            return true;
+        };
+        for (std::uint32_t index = 0;
+             index < snapshot.text_count && count + 6 <= capacity;
+             ++index)
+        {
+            const auto& text = snapshot.texts[index];
+            const auto length = wcsnlen(text.value, EspNativeMaxTextChars);
+            if (length == 0)
+            {
+                continue;
+            }
+            const EspNativeColor shadow{0.0f, 0.0f, 0.0f, 0.85f};
+            if (!emit_text_pass(
+                    text, length, 1.5f, 1.5f, shadow) ||
+                !emit_text_pass(
+                    text,
+                    length,
+                    0.0f,
+                    0.0f,
+                    text.color))
+            {
+                break;
+            }
+        }
+        g_esp_native_last_glyph_quads.store(
+            glyph_quads, std::memory_order_release);
+        return count;
+    }
+
+    auto esp_native_write_probe_vertices(UINT width,
+                                         UINT height,
+                                         EspNativeDirectVertex* output,
+                                         std::size_t capacity) -> std::size_t
+    {
+        if (!output || width == 0 || height == 0 || capacity < 12)
+        {
+            return 0;
+        }
+        const float center_x = static_cast<float>(width) * 0.5f;
+        const float center_y = static_cast<float>(height) * 0.5f;
+        const EspNativeColor color{1.0f, 0.0f, 0.75f, 1.0f};
+        std::size_t count = 0;
+        const auto emit = [&](float x, float y) {
+            output[count++] = {2.0f * x / static_cast<float>(width) - 1.0f,
+                               1.0f - 2.0f * y / static_cast<float>(height),
+                               color.r, color.g, color.b, color.a};
+        };
+        const auto emit_quad = [&](float left, float top, float right, float bottom) {
+            emit(left, top); emit(right, top); emit(right, bottom);
+            emit(left, top); emit(right, bottom); emit(left, bottom);
+        };
+        emit_quad(center_x - 32.0f, center_y - 2.0f,
+                  center_x + 32.0f, center_y + 2.0f);
+        emit_quad(center_x - 2.0f, center_y - 32.0f,
+                  center_x + 2.0f, center_y + 32.0f);
+        return count;
+    }
+
+    auto esp_native_uses_offscreen_composite(DXGI_FORMAT format) -> bool
+    {
+        // Direct2D's device-context bitmap target support excludes the game's
+        // R10G10B10A2 swapchain.  The format is otherwise valid for D3D11On12
+        // render-target use, so draw to a B8 alpha texture then composite it.
+        return format == DXGI_FORMAT_R10G10B10A2_UNORM;
+    }
+
+    void esp_native_set_state(EspNativePresentState state,
+                              const std::string& reason,
+                              const std::string& format = {})
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_esp_native_status_mutex);
+            g_esp_native_reason = reason;
+            if (!format.empty())
+            {
+                g_esp_native_swapchain_format = format;
+            }
+        }
+        g_esp_native_state.store(static_cast<int>(state), std::memory_order_release);
+    }
+
+    auto esp_native_state_name(EspNativePresentState state) -> const char*
+    {
+        switch (state)
+        {
+        case EspNativePresentState::Initializing: return "initializing";
+        case EspNativePresentState::Ready: return "ready";
+        case EspNativePresentState::Unavailable: return "unavailable";
+        default: return "disabled";
+        }
+    }
+
+    auto esp_native_fault_stage_name(int stage) -> const char*
+    {
+        switch (stage)
+        {
+        case 1: return "snapshot_acquire";
+        case 2: return "queue_match";
+        case 3: return "swapchain_description";
+        case 4: return "device_stack";
+        case 5: return "backbuffer_recreation";
+        case 6: return "backbuffer_index";
+        case 7: return "wrapped_resource_acquire";
+        case 8: return "direct2d_draw";
+        case 9: return "direct2d_end_draw";
+        case 10: return "offscreen_composite";
+        case 11: return "wrapped_resource_release";
+        case 12: return "d3d11_flush";
+        case 13: return "backbuffer_release_previous";
+        case 14: return "backbuffer_get_buffer";
+        case 15: return "backbuffer_create_wrapped_resource";
+        case 16: return "backbuffer_create_render_target_view";
+        case 17: return "backbuffer_create_offscreen_texture";
+        case 18: return "backbuffer_create_offscreen_shader_resource_view";
+        case 19: return "backbuffer_offscreen_query_dxgi_surface";
+        case 20: return "backbuffer_offscreen_create_d2d_bitmap";
+        case 21: return "backbuffer_load_d3dcompiler";
+        case 22: return "backbuffer_compile_composite_vertex_shader";
+        case 23: return "backbuffer_compile_composite_pixel_shader";
+        case 24: return "backbuffer_create_composite_vertex_shader";
+        case 25: return "backbuffer_create_composite_pixel_shader";
+        case 26: return "backbuffer_create_composite_sampler";
+        case 27: return "backbuffer_create_composite_blend_state";
+        case 28: return "device_stack_d3d11on12_create_device";
+        case 29: return "device_stack_query_d3d11on12";
+        case 30: return "device_stack_query_dxgi_device";
+        case 31: return "device_stack_create_d2d_factory";
+        case 32: return "device_stack_create_d2d_device";
+        case 33: return "device_stack_query_d2d_device";
+        case 34: return "device_stack_create_d2d_context";
+        case 35: return "device_stack_query_d2d_context";
+        case 36: return "device_stack_create_dwrite_factory";
+        case 37: return "device_stack_create_text_format";
+        case 38: return "device_stack_set_text_alignment";
+        case 39: return "device_stack_set_paragraph_alignment";
+        default: return "unknown";
+        }
+    }
+
+    void esp_native_record_init_stage(int stage)
+    {
+        g_esp_native_fault_stage.store(stage, std::memory_order_release);
+        if (!g_esp_native_init_probe_active.load(std::memory_order_acquire))
+        {
+            return;
+        }
+        const auto directory = runtime_log_dir_path();
+        if (directory.empty())
+        {
+            return;
+        }
+        const auto path = directory + L"\\native-present-init-stage-" +
+                          std::to_wstring(GetCurrentProcessId()) + L".log";
+        char text[256]{};
+        const auto length = std::snprintf(
+            text,
+            sizeof(text),
+            "[DEBUG-d3dinit] tick=%llu stage=%d name=%s\\r\\n",
+            static_cast<unsigned long long>(GetTickCount64()),
+            stage,
+            esp_native_fault_stage_name(stage));
+        if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(text))
+        {
+            return;
+        }
+        const HANDLE file = CreateFileW(path.c_str(),
+                                        GENERIC_WRITE,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                        nullptr,
+                                        CREATE_ALWAYS,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr);
+        if (file == INVALID_HANDLE_VALUE)
+        {
+            return;
+        }
+        DWORD written = 0;
+        const BOOL wrote = WriteFile(file, text, static_cast<DWORD>(length), &written, nullptr);
+        if (wrote && written == static_cast<DWORD>(length))
+        {
+            (void)FlushFileBuffers(file);
+        }
+        CloseHandle(file);
+    }
+
+    void esp_native_release_direct_backbuffers_locked(EspNativeCompositor& compositor)
+    {
+        for (auto& frame : compositor.direct_frames)
+        {
+            if (frame.vertex_upload && frame.mapped_vertices)
+            {
+                frame.vertex_upload->Unmap(0, nullptr);
+                frame.mapped_vertices = nullptr;
+            }
+            esp_native_release(frame.vertex_upload);
+            esp_native_release(frame.command_list);
+            esp_native_release(frame.allocator);
+            esp_native_release(frame.backbuffer);
+            frame.fence_value = 0;
+        }
+        compositor.direct_frames.clear();
+    }
+
+    void esp_native_release_backbuffers_locked(EspNativeCompositor& compositor)
+    {
+        esp_native_release_direct_backbuffers_locked(compositor);
+        if (compositor.d2d_context)
+        {
+            compositor.d2d_context->SetTarget(nullptr);
+        }
+        for (auto*& bitmap : compositor.d2d_backbuffers)
+        {
+            esp_native_release(bitmap);
+        }
+        compositor.d2d_backbuffers.clear();
+        esp_native_release(compositor.overlay_bitmap);
+        esp_native_release(compositor.overlay_shader_resource);
+        esp_native_release(compositor.overlay_texture);
+        for (auto*& target : compositor.wrapped_backbuffer_targets)
+        {
+            esp_native_release(target);
+        }
+        compositor.wrapped_backbuffer_targets.clear();
+        for (auto*& wrapped : compositor.wrapped_backbuffers)
+        {
+            esp_native_release(wrapped);
+        }
+        compositor.wrapped_backbuffers.clear();
+        compositor.format = DXGI_FORMAT_UNKNOWN;
+        compositor.width = 0;
+        compositor.height = 0;
+        compositor.buffers = 0;
+        compositor.uses_offscreen_composite = false;
+    }
+
+    void esp_native_release_compositor_locked(EspNativeCompositor& compositor, bool release_queue)
+    {
+        esp_native_release_backbuffers_locked(compositor);
+        if (compositor.fence_event)
+        {
+            CloseHandle(compositor.fence_event);
+            compositor.fence_event = nullptr;
+        }
+        esp_native_release(compositor.fence);
+        esp_native_release(compositor.pipeline_state);
+        esp_native_release(compositor.root_signature);
+        esp_native_release(compositor.rtv_heap);
+        compositor.rtv_descriptor_size = 0;
+        compositor.next_fence_value = 0;
+        compositor.pipeline_format = DXGI_FORMAT_UNKNOWN;
+        esp_native_release(compositor.brush);
+        esp_native_release(compositor.text_format);
+        esp_native_release(compositor.dwrite_factory);
+        esp_native_release(compositor.d2d_context);
+        esp_native_release(compositor.d2d_device);
+        esp_native_release(compositor.d2d_factory);
+        esp_native_release(compositor.dxgi_device);
+        esp_native_release(compositor.d3d11on12);
+        esp_native_release(compositor.d3d11_context);
+        esp_native_release(compositor.d3d11_device);
+        esp_native_release(compositor.composite_blend);
+        esp_native_release(compositor.composite_sampler);
+        esp_native_release(compositor.composite_pixel_shader);
+        esp_native_release(compositor.composite_vertex_shader);
+        esp_native_release(compositor.device);
+        if (release_queue)
+        {
+            esp_native_release(compositor.queue);
+        }
+    }
+
+    // DXGI requires every reference to the old backbuffers to be released
+    // before ResizeBuffers.  The Present detour retains wrappers between
+    // frames, so releasing only after the next Present would be too late and
+    // can make fullscreen/resolution transitions fail.  This helper is called
+    // from the swapchain ResizeBuffers detour while no wrapped resource is
+    // acquired by the compositor mutex.
+    void esp_native_prepare_resize(IDXGISwapChain* swapchain)
+    {
+        if (!g_esp_native_enabled.load(std::memory_order_acquire) ||
+            g_esp_native_renderer_faulted.load(std::memory_order_acquire) ||
+            !swapchain || swapchain != g_esp_present_swapchain.load(std::memory_order_acquire))
+        {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(g_esp_native_compositor_mutex);
+        auto& compositor = g_esp_native_compositor;
+        if (compositor.d2d_context)
+        {
+            compositor.d2d_context->SetTarget(nullptr);
+        }
+        if (compositor.d3d11_context)
+        {
+            compositor.d3d11_context->ClearState();
+            compositor.d3d11_context->Flush();
+        }
+        esp_native_release_backbuffers_locked(compositor);
+        if (g_esp_native_enabled.load(std::memory_order_acquire))
+        {
+            esp_native_set_state(EspNativePresentState::Initializing,
+                                 "swapchain resize recreation pending");
+        }
+    }
+
+    auto esp_native_queue_matches_swapchain_locked(EspNativeCompositor& compositor,
+                                                     IDXGISwapChain* swapchain) -> bool
+    {
+        if (!compositor.queue || !swapchain)
+        {
+            return false;
+        }
+        ID3D12Device* swapchain_device = nullptr;
+        ID3D12Device* queue_device = nullptr;
+        const bool matched = SUCCEEDED(swapchain->GetDevice(__uuidof(ID3D12Device),
+                                                            reinterpret_cast<void**>(&swapchain_device))) &&
+                             SUCCEEDED(compositor.queue->GetDevice(__uuidof(ID3D12Device),
+                                                                   reinterpret_cast<void**>(&queue_device))) &&
+                             swapchain_device == queue_device;
+        esp_native_release(queue_device);
+        esp_native_release(swapchain_device);
+        return matched;
+    }
+
+    auto esp_native_create_device_stack_locked(EspNativeCompositor& compositor) -> HRESULT
+    {
+        if (compositor.d2d_context)
+        {
+            return S_OK;
+        }
+        if (!compositor.device || !compositor.queue)
+        {
+            return E_PENDING;
+        }
+        IUnknown* queues[]{reinterpret_cast<IUnknown*>(compositor.queue)};
+        esp_native_record_init_stage(28);
+        HRESULT result = D3D11On12CreateDevice(
+            compositor.device,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            nullptr,
+            0,
+            queues,
+            1,
+            0,
+            &compositor.d3d11_device,
+            &compositor.d3d11_context,
+            nullptr);
+        if (FAILED(result))
+        {
+            return result;
+        }
+        esp_native_record_init_stage(29);
+        result = compositor.d3d11_device->QueryInterface(
+            __uuidof(ID3D11On12Device), reinterpret_cast<void**>(&compositor.d3d11on12));
+        if (FAILED(result)) return result;
+        esp_native_record_init_stage(30);
+        result = compositor.d3d11_device->QueryInterface(
+            __uuidof(IDXGIDevice), reinterpret_cast<void**>(&compositor.dxgi_device));
+        if (FAILED(result)) return result;
+        D2D1_FACTORY_OPTIONS factory_options{};
+        esp_native_record_init_stage(31);
+        result = D2D1CreateFactory(
+            D2D1_FACTORY_TYPE_SINGLE_THREADED,
+            __uuidof(ID2D1Factory3),
+            &factory_options,
+            reinterpret_cast<void**>(&compositor.d2d_factory));
+        if (FAILED(result)) return result;
+        ID2D1Device* base_device = nullptr;
+        esp_native_record_init_stage(32);
+        result = compositor.d2d_factory->CreateDevice(compositor.dxgi_device, &base_device);
+        if (FAILED(result)) return result;
+        esp_native_record_init_stage(33);
+        result = base_device->QueryInterface(__uuidof(ID2D1Device2),
+                                             reinterpret_cast<void**>(&compositor.d2d_device));
+        esp_native_release(base_device);
+        if (FAILED(result)) return result;
+        ID2D1DeviceContext* base_context = nullptr;
+        esp_native_record_init_stage(34);
+        result = compositor.d2d_device->CreateDeviceContext(
+            D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &base_context);
+        if (FAILED(result)) return result;
+        esp_native_record_init_stage(35);
+        result = base_context->QueryInterface(__uuidof(ID2D1DeviceContext2),
+                                              reinterpret_cast<void**>(&compositor.d2d_context));
+        esp_native_release(base_context);
+        if (FAILED(result)) return result;
+        esp_native_record_init_stage(36);
+        result = DWriteCreateFactory(
+            DWRITE_FACTORY_TYPE_SHARED,
+            __uuidof(IDWriteFactory),
+            reinterpret_cast<IUnknown**>(&compositor.dwrite_factory));
+        if (FAILED(result)) return result;
+        esp_native_record_init_stage(37);
+        result = compositor.dwrite_factory->CreateTextFormat(
+            L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            14.0f, L"", &compositor.text_format);
+        if (FAILED(result)) return result;
+        esp_native_record_init_stage(38);
+        compositor.text_format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        esp_native_record_init_stage(39);
+        compositor.text_format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        return S_OK;
+    }
+
+    auto esp_native_create_composite_pipeline_locked(EspNativeCompositor& compositor) -> HRESULT
+    {
+        if (compositor.composite_vertex_shader && compositor.composite_pixel_shader &&
+            compositor.composite_sampler && compositor.composite_blend)
+        {
+            return S_OK;
+        }
+        if (!compositor.d3d11_device)
+        {
+            return E_PENDING;
+        }
+
+        // Avoid a static D3DCompiler dependency in the staged bridge.  The
+        // Windows D3D12 runtime supplies d3dcompiler_47 for applications that
+        // need this small, fixed compositor shader pair.
+        esp_native_record_init_stage(21);
+        const auto compiler_module = LoadLibraryW(L"d3dcompiler_47.dll");
+        if (!compiler_module)
+        {
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+        const auto compile = reinterpret_cast<decltype(&D3DCompile)>(
+            GetProcAddress(compiler_module, "D3DCompile"));
+        if (!compile)
+        {
+            FreeLibrary(compiler_module);
+            return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+        }
+
+        static constexpr char VertexShaderSource[] = R"HLSL(
+struct VertexOut
+{
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
+};
+
+VertexOut main(uint vertexId : SV_VertexID)
+{
+    VertexOut output;
+    if (vertexId == 0)
+    {
+        output.position = float4(-1.0, -1.0, 0.0, 1.0);
+        output.uv = float2(0.0, 1.0);
+    }
+    else if (vertexId == 1)
+    {
+        output.position = float4(-1.0, 3.0, 0.0, 1.0);
+        output.uv = float2(0.0, -1.0);
+    }
+    else
+    {
+        output.position = float4(3.0, -1.0, 0.0, 1.0);
+        output.uv = float2(2.0, 1.0);
+    }
+    return output;
+}
+)HLSL";
+        static constexpr char PixelShaderSource[] = R"HLSL(
+Texture2D EspOverlay : register(t0);
+SamplerState EspSampler : register(s0);
+
+float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
+{
+    return EspOverlay.Sample(EspSampler, uv);
+}
+)HLSL";
+
+        ID3DBlob* vertex_blob = nullptr;
+        ID3DBlob* pixel_blob = nullptr;
+        ID3DBlob* errors = nullptr;
+        esp_native_record_init_stage(22);
+        HRESULT result = compile(VertexShaderSource, sizeof(VertexShaderSource) - 1,
+                                 "MecchaEspCompositeVS", nullptr, nullptr, "main", "vs_5_0",
+                                 D3DCOMPILE_ENABLE_STRICTNESS, 0, &vertex_blob, &errors);
+        esp_native_release(errors);
+        if (SUCCEEDED(result))
+        {
+            esp_native_record_init_stage(23);
+            result = compile(PixelShaderSource, sizeof(PixelShaderSource) - 1,
+                             "MecchaEspCompositePS", nullptr, nullptr, "main", "ps_5_0",
+                             D3DCOMPILE_ENABLE_STRICTNESS, 0, &pixel_blob, &errors);
+        }
+        esp_native_release(errors);
+        if (FAILED(result))
+        {
+            esp_native_release(pixel_blob);
+            esp_native_release(vertex_blob);
+            FreeLibrary(compiler_module);
+            return result;
+        }
+
+        esp_native_record_init_stage(24);
+        result = compositor.d3d11_device->CreateVertexShader(
+            vertex_blob->GetBufferPointer(), vertex_blob->GetBufferSize(), nullptr,
+            &compositor.composite_vertex_shader);
+        if (SUCCEEDED(result))
+        {
+            esp_native_record_init_stage(25);
+            result = compositor.d3d11_device->CreatePixelShader(
+                pixel_blob->GetBufferPointer(), pixel_blob->GetBufferSize(), nullptr,
+                &compositor.composite_pixel_shader);
+        }
+        esp_native_release(pixel_blob);
+        esp_native_release(vertex_blob);
+        FreeLibrary(compiler_module);
+        if (FAILED(result))
+        {
+            esp_native_release(compositor.composite_pixel_shader);
+            esp_native_release(compositor.composite_vertex_shader);
+            return result;
+        }
+
+        D3D11_SAMPLER_DESC sampler{};
+        sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sampler.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sampler.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sampler.MaxLOD = D3D11_FLOAT32_MAX;
+        esp_native_record_init_stage(26);
+        result = compositor.d3d11_device->CreateSamplerState(&sampler, &compositor.composite_sampler);
+        if (FAILED(result))
+        {
+            esp_native_release(compositor.composite_pixel_shader);
+            esp_native_release(compositor.composite_vertex_shader);
+            return result;
+        }
+
+        D3D11_BLEND_DESC blend{};
+        auto& render_target = blend.RenderTarget[0];
+        render_target.BlendEnable = TRUE;
+        // The Direct2D intermediate is premultiplied-alpha.  Its transparent
+        // clear therefore leaves the original game backbuffer untouched.
+        render_target.SrcBlend = D3D11_BLEND_ONE;
+        render_target.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        render_target.BlendOp = D3D11_BLEND_OP_ADD;
+        render_target.SrcBlendAlpha = D3D11_BLEND_ONE;
+        render_target.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+        render_target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        render_target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        esp_native_record_init_stage(27);
+        result = compositor.d3d11_device->CreateBlendState(&blend, &compositor.composite_blend);
+        if (FAILED(result))
+        {
+            esp_native_release(compositor.composite_sampler);
+            esp_native_release(compositor.composite_pixel_shader);
+            esp_native_release(compositor.composite_vertex_shader);
+        }
+        return result;
+    }
+
+    auto esp_native_create_offscreen_overlay_locked(EspNativeCompositor& compositor,
+                                                     UINT width,
+                                                     UINT height) -> HRESULT
+    {
+        if (!compositor.d3d11_device || !compositor.d2d_context)
+        {
+            return E_PENDING;
+        }
+        D3D11_TEXTURE2D_DESC texture{};
+        texture.Width = width;
+        texture.Height = height;
+        texture.MipLevels = 1;
+        texture.ArraySize = 1;
+        texture.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        texture.SampleDesc.Count = 1;
+        texture.Usage = D3D11_USAGE_DEFAULT;
+        texture.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        esp_native_record_init_stage(17);
+        HRESULT result = compositor.d3d11_device->CreateTexture2D(
+            &texture, nullptr, &compositor.overlay_texture);
+        if (FAILED(result))
+        {
+            return result;
+        }
+        esp_native_record_init_stage(18);
+        result = compositor.d3d11_device->CreateShaderResourceView(
+            compositor.overlay_texture, nullptr, &compositor.overlay_shader_resource);
+        if (FAILED(result))
+        {
+            return result;
+        }
+        IDXGISurface* surface = nullptr;
+        esp_native_record_init_stage(19);
+        result = compositor.overlay_texture->QueryInterface(
+            __uuidof(IDXGISurface), reinterpret_cast<void**>(&surface));
+        if (FAILED(result))
+        {
+            esp_native_release(surface);
+            return result;
+        }
+        D2D1_BITMAP_PROPERTIES1 bitmap_properties{};
+        bitmap_properties.pixelFormat = D2D1::PixelFormat(
+            DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
+        bitmap_properties.dpiX = 96.0f;
+        bitmap_properties.dpiY = 96.0f;
+        bitmap_properties.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+        esp_native_record_init_stage(20);
+        result = compositor.d2d_context->CreateBitmapFromDxgiSurface(
+            surface, &bitmap_properties, &compositor.overlay_bitmap);
+        esp_native_release(surface);
+        if (FAILED(result))
+        {
+            return result;
+        }
+        return esp_native_create_composite_pipeline_locked(compositor);
+    }
+
+    auto esp_native_composite_offscreen_locked(EspNativeCompositor& compositor,
+                                                UINT current) -> HRESULT
+    {
+        if (current >= compositor.wrapped_backbuffer_targets.size() ||
+            !compositor.overlay_shader_resource || !compositor.composite_vertex_shader ||
+            !compositor.composite_pixel_shader || !compositor.composite_sampler ||
+            !compositor.composite_blend || !compositor.d3d11_context)
+        {
+            return E_UNEXPECTED;
+        }
+        D3D11_VIEWPORT viewport{};
+        viewport.Width = static_cast<float>(compositor.width);
+        viewport.Height = static_cast<float>(compositor.height);
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+        auto* target = compositor.wrapped_backbuffer_targets[current];
+        compositor.d3d11_context->OMSetRenderTargets(1, &target, nullptr);
+        compositor.d3d11_context->RSSetViewports(1, &viewport);
+        compositor.d3d11_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        compositor.d3d11_context->VSSetShader(compositor.composite_vertex_shader, nullptr, 0);
+        compositor.d3d11_context->PSSetShader(compositor.composite_pixel_shader, nullptr, 0);
+        compositor.d3d11_context->PSSetSamplers(0, 1, &compositor.composite_sampler);
+        compositor.d3d11_context->PSSetShaderResources(0, 1, &compositor.overlay_shader_resource);
+        const float blend_factor[4]{};
+        compositor.d3d11_context->OMSetBlendState(compositor.composite_blend, blend_factor, UINT_MAX);
+        compositor.d3d11_context->Draw(3, 0);
+        ID3D11ShaderResourceView* null_resource = nullptr;
+        compositor.d3d11_context->PSSetShaderResources(0, 1, &null_resource);
+        return S_OK;
+    }
+
+    auto esp_native_recreate_backbuffers_locked(EspNativeCompositor& compositor,
+                                                 IDXGISwapChain* swapchain,
+                                                 const DXGI_SWAP_CHAIN_DESC& description) -> HRESULT
+    {
+        if (!esp_native_supported_backbuffer_format(description.BufferDesc.Format))
+        {
+            return DXGI_ERROR_UNSUPPORTED;
+        }
+        esp_native_record_init_stage(13);
+        esp_native_release_backbuffers_locked(compositor);
+        const bool offscreen_composite = esp_native_uses_offscreen_composite(description.BufferDesc.Format);
+        if (!offscreen_composite &&
+            (!compositor.d2d_context ||
+             !compositor.d2d_context->IsDxgiFormatSupported(description.BufferDesc.Format)))
+        {
+            return DXGI_ERROR_UNSUPPORTED;
+        }
+        for (UINT index = 0; index < description.BufferCount; ++index)
+        {
+            ID3D12Resource* resource = nullptr;
+            esp_native_record_init_stage(14);
+            HRESULT result = swapchain->GetBuffer(index, __uuidof(ID3D12Resource),
+                                                   reinterpret_cast<void**>(&resource));
+            if (FAILED(result))
+            {
+                esp_native_release(resource);
+                esp_native_release_backbuffers_locked(compositor);
+                return result;
+            }
+            D3D11_RESOURCE_FLAGS flags{};
+            flags.BindFlags = D3D11_BIND_RENDER_TARGET;
+            ID3D11Resource* wrapped = nullptr;
+            esp_native_record_init_stage(15);
+            // The game controls the state transition into this wrapper's
+            // render-target interval; ReleaseWrappedResources returns it to
+            // PRESENT before DXGI receives the real Present call.
+            result = compositor.d3d11on12->CreateWrappedResource(
+                resource,
+                &flags,
+                D3D12_RESOURCE_STATE_RENDER_TARGET,
+                D3D12_RESOURCE_STATE_PRESENT,
+                __uuidof(ID3D11Resource),
+                reinterpret_cast<void**>(&wrapped));
+            esp_native_release(resource);
+            if (FAILED(result))
+            {
+                esp_native_release(wrapped);
+                esp_native_release_backbuffers_locked(compositor);
+                return result;
+            }
+            compositor.wrapped_backbuffers.push_back(wrapped);
+            if (offscreen_composite)
+            {
+                ID3D11RenderTargetView* target = nullptr;
+                esp_native_record_init_stage(16);
+                result = compositor.d3d11_device->CreateRenderTargetView(wrapped, nullptr, &target);
+                if (FAILED(result))
+                {
+                    esp_native_release(target);
+                    esp_native_release_backbuffers_locked(compositor);
+                    return result;
+                }
+                compositor.wrapped_backbuffer_targets.push_back(target);
+                continue;
+            }
+            IDXGISurface* surface = nullptr;
+            result = wrapped->QueryInterface(__uuidof(IDXGISurface), reinterpret_cast<void**>(&surface));
+            if (FAILED(result))
+            {
+                esp_native_release(surface);
+                esp_native_release_backbuffers_locked(compositor);
+                return result;
+            }
+            D2D1_BITMAP_PROPERTIES1 bitmap_properties{};
+            bitmap_properties.pixelFormat = D2D1::PixelFormat(
+                description.BufferDesc.Format, D2D1_ALPHA_MODE_IGNORE);
+            bitmap_properties.dpiX = 96.0f;
+            bitmap_properties.dpiY = 96.0f;
+            bitmap_properties.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+            ID2D1Bitmap1* bitmap = nullptr;
+            result = compositor.d2d_context->CreateBitmapFromDxgiSurface(surface,
+                                                                           &bitmap_properties,
+                                                                           &bitmap);
+            esp_native_release(surface);
+            if (FAILED(result))
+            {
+                esp_native_release(bitmap);
+                esp_native_release_backbuffers_locked(compositor);
+                return result;
+            }
+            compositor.d2d_backbuffers.push_back(bitmap);
+        }
+        if (offscreen_composite)
+        {
+            const auto result = esp_native_create_offscreen_overlay_locked(
+                compositor, description.BufferDesc.Width, description.BufferDesc.Height);
+            if (FAILED(result))
+            {
+                esp_native_release_backbuffers_locked(compositor);
+                return result;
+            }
+        }
+        compositor.format = description.BufferDesc.Format;
+        compositor.width = description.BufferDesc.Width;
+        compositor.height = description.BufferDesc.Height;
+        compositor.buffers = description.BufferCount;
+        compositor.uses_offscreen_composite = offscreen_composite;
+        if (!compositor.brush)
+        {
+            const D2D1_COLOR_F green{0.0f, 1.0f, 0.0f, 1.0f};
+            const auto result = compositor.d2d_context->CreateSolidColorBrush(green, &compositor.brush);
+            if (FAILED(result))
+            {
+                esp_native_release_backbuffers_locked(compositor);
+                return result;
+            }
+        }
+        return S_OK;
+    }
+
+    void esp_native_capture_queue(ID3D12CommandQueue* queue)
+    {
+        // A queue observation alone never enables drawing. It becomes usable
+        // only when the game subsequently calls Present on this same thread,
+        // within the short render interval, for a swapchain on the same
+        // D3D12 device. Factory capture remains the authoritative path.
+        esp_native_observe_present_thread_queue(queue);
+    }
+
+    void STDMETHODCALLTYPE esp_execute_command_lists_detour(ID3D12CommandQueue* queue,
+                                                             UINT count,
+                                                             ID3D12CommandList* const* lists)
+    {
+        EspNativePresentHookCallbackScope callback_scope{};
+        esp_native_capture_queue(queue);
+        const auto original = g_esp_execute_original.load(std::memory_order_acquire);
+        if (original)
+        {
+            original(queue, count, lists);
+        }
+    }
+
+    auto esp_native_acquire_snapshot(const EspNativeSnapshot*& snapshot, std::uint32_t& slot) -> bool
+    {
+        snapshot = nullptr;
+        slot = 0;
+        if (!g_esp_native_snapshot_ready.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+        for (int attempts = 0; attempts < 3; ++attempts)
+        {
+            const auto token = g_esp_native_snapshot_token.load(std::memory_order_acquire);
+            const auto candidate = static_cast<std::uint32_t>(token & 1u);
+            g_esp_native_snapshot_readers[candidate].fetch_add(1, std::memory_order_acq_rel);
+            if (token == g_esp_native_snapshot_token.load(std::memory_order_acquire))
+            {
+                snapshot = &g_esp_native_snapshots[candidate];
+                slot = candidate;
+                return true;
+            }
+            g_esp_native_snapshot_readers[candidate].fetch_sub(1, std::memory_order_acq_rel);
+        }
+        return false;
+    }
+
+    void esp_native_release_snapshot(std::uint32_t slot)
+    {
+        g_esp_native_snapshot_readers[slot].fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    struct EspNativeSnapshotDiagnostics
+    {
+        bool available{false};
+        std::uint32_t roster_source{0};
+        std::uint32_t roster_count{0};
+        std::uint32_t valid_player_states{0};
+        std::uint32_t valid_pawns{0};
+        std::uint32_t filtered_local{0};
+        std::uint32_t filtered_spectators{0};
+        std::uint32_t filtered_scope{0};
+        std::uint32_t capsule_components{0};
+        std::uint32_t capsule_transforms{0};
+        std::uint32_t capsule_sizes{0};
+        std::uint32_t capsule_projected{0};
+        std::uint32_t mesh_components{0};
+        std::uint32_t pose_profile_matches{0};
+        std::uint32_t pose_component_space{0};
+        std::uint32_t pose_local_space{0};
+        std::uint32_t pose_bones{0};
+        std::uint32_t pose_edges{0};
+        std::uint32_t poses{0};
+        std::uint32_t players{0};
+        std::uint32_t lines{0};
+        std::uint32_t texts{0};
+    };
+
+    auto esp_native_snapshot_diagnostics() -> EspNativeSnapshotDiagnostics
+    {
+        const EspNativeSnapshot* snapshot = nullptr;
+        std::uint32_t slot{};
+        if (!esp_native_acquire_snapshot(snapshot, slot))
+        {
+            return {};
+        }
+        EspNativeSnapshotDiagnostics result{
+            true,
+            snapshot->roster_source,
+            snapshot->roster_count,
+            snapshot->valid_player_states,
+            snapshot->valid_pawns,
+            snapshot->filtered_local,
+            snapshot->filtered_spectators,
+            snapshot->filtered_scope,
+            snapshot->capsule_components,
+            snapshot->capsule_transforms,
+            snapshot->capsule_sizes,
+            snapshot->capsule_projected,
+            snapshot->mesh_components,
+            snapshot->pose_profile_matches,
+            snapshot->pose_component_space,
+            snapshot->pose_local_space,
+            snapshot->pose_bones,
+            snapshot->pose_edges,
+            snapshot->poses,
+            snapshot->players,
+            snapshot->line_count,
+            snapshot->text_count};
+        esp_native_release_snapshot(slot);
+        return result;
+    }
+
+    void esp_native_render_direct_snapshot(IDXGISwapChain* swapchain)
+    {
+        if (!g_esp_native_enabled.load(std::memory_order_acquire) || !swapchain)
+        {
+            return;
+        }
+        const EspNativeSnapshot* snapshot = nullptr;
+        std::uint32_t snapshot_slot{};
+        if (!esp_native_acquire_snapshot(snapshot, snapshot_slot))
+        {
+            return;
+        }
+        const auto release_snapshot = [&]() { esp_native_release_snapshot(snapshot_slot); };
+
+        // A post-start injection cannot derive this relationship from the
+        // device or from ExecuteCommandLists.  Rendering without it is a
+        // correctness fault, not a reason to risk the game process.
+        ID3D12CommandQueue* exact_queue = esp_native_queue_for_swapchain(swapchain);
+        bool late_present_association = false;
+        if (!exact_queue)
+        {
+            exact_queue = esp_native_queue_for_late_present(swapchain);
+            late_present_association = exact_queue != nullptr;
+        }
+        if (!exact_queue)
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "swapchain queue has no factory record or same-thread Present submission; native renderer did not guess");
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(g_esp_native_compositor_mutex);
+        auto& compositor = g_esp_native_compositor;
+        if (compositor.queue != exact_queue)
+        {
+            esp_native_release_compositor_locked(compositor, true);
+            compositor.queue = exact_queue;
+            exact_queue = nullptr;
+            if (FAILED(compositor.queue->GetDevice(
+                    __uuidof(ID3D12Device), reinterpret_cast<void**>(&compositor.device))) || !compositor.device)
+            {
+                esp_native_set_state(EspNativePresentState::Unavailable,
+                                     "the recorded swapchain command queue has no D3D12 device");
+                g_esp_native_enabled.store(false, std::memory_order_release);
+                release_snapshot();
+                return;
+            }
+        }
+        esp_native_release(exact_queue);
+
+        if (late_present_association)
+        {
+            esp_native_set_state(EspNativePresentState::Initializing,
+                                 "late injection associated the Present-thread command queue");
+        }
+
+        DXGI_SWAP_CHAIN_DESC description{};
+        if (FAILED(swapchain->GetDesc(&description)) ||
+            !esp_native_supported_backbuffer_format(description.BufferDesc.Format))
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "unsupported native D3D12 swapchain format");
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        const auto format_name = esp_native_format_name(description.BufferDesc.Format);
+        const bool recreate = compositor.format != description.BufferDesc.Format ||
+                              compositor.width != description.BufferDesc.Width ||
+                              compositor.height != description.BufferDesc.Height ||
+                              compositor.buffers != description.BufferCount ||
+                              compositor.direct_frames.size() != description.BufferCount;
+        HRESULT result = S_OK;
+        if (recreate)
+        {
+            g_esp_native_fault_stage.store(40, std::memory_order_release);
+            const char* failure_step = "unknown";
+            result = esp_native_recreate_direct_backbuffers_locked(
+                compositor, swapchain, description, failure_step);
+            if (FAILED(result))
+            {
+                esp_native_set_state(EspNativePresentState::Unavailable,
+                                     std::string("native D3D12 backbuffer setup failed at ") + failure_step + ": 0x" +
+                                         hex_address(static_cast<std::uintptr_t>(result)),
+                                     format_name);
+                g_esp_native_enabled.store(false, std::memory_order_release);
+                release_snapshot();
+                return;
+            }
+        }
+        IDXGISwapChain3* swapchain3 = nullptr;
+        if (FAILED(swapchain->QueryInterface(__uuidof(IDXGISwapChain3),
+                                             reinterpret_cast<void**>(&swapchain3))) || !swapchain3)
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable, "IDXGISwapChain3 is unavailable", format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        const UINT current = swapchain3->GetCurrentBackBufferIndex();
+        esp_native_release(swapchain3);
+        if (current >= compositor.direct_frames.size())
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "native D3D12 backbuffer index is out of range", format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        auto& frame = compositor.direct_frames[current];
+        if (!frame.backbuffer || !frame.allocator || !frame.command_list || !frame.vertex_upload ||
+            !frame.mapped_vertices || !compositor.fence || !compositor.pipeline_state || !compositor.root_signature)
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "native D3D12 frame resources are incomplete", format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        const UINT64 completed = compositor.fence->GetCompletedValue();
+        if (completed == UINT64_MAX)
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable, "native D3D12 device was removed", format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        if (frame.fence_value > frame.completed_fence_value &&
+            completed >= frame.fence_value)
+        {
+            frame.completed_fence_value = frame.fence_value;
+            g_esp_native_completed_fences.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (completed < frame.fence_value)
+        {
+            // Never block the game thread for overlay work.  The flip-chain
+            // frame slot will become available on a later Present call.
+            release_snapshot();
+            return;
+        }
+        auto vertex_count = esp_native_write_direct_vertices(
+            *snapshot, description.BufferDesc.Width, description.BufferDesc.Height,
+            reinterpret_cast<EspNativeDirectVertex*>(frame.mapped_vertices), EspNativeDirectMaxVertices);
+        auto probe_frames = g_esp_native_probe_frames_remaining.load(std::memory_order_acquire);
+        bool probe_frame = false;
+        while (vertex_count == 0 && probe_frames > 0)
+        {
+            if (g_esp_native_probe_frames_remaining.compare_exchange_weak(
+                    probe_frames, probe_frames - 1,
+                    std::memory_order_acq_rel, std::memory_order_acquire))
+            {
+                vertex_count = esp_native_write_probe_vertices(
+                    description.BufferDesc.Width, description.BufferDesc.Height,
+                    reinterpret_cast<EspNativeDirectVertex*>(frame.mapped_vertices),
+                    EspNativeDirectMaxVertices);
+                probe_frame = vertex_count > 0;
+                break;
+            }
+        }
+        g_esp_native_last_vertex_count.store(
+            static_cast<std::uint64_t>(vertex_count), std::memory_order_release);
+        if (vertex_count == 0)
+        {
+            release_snapshot();
+            esp_native_set_state(EspNativePresentState::Ready,
+                                 "native D3D12 Present compositor active (no geometry in current snapshot)",
+                                 format_name);
+            return;
+        }
+        g_esp_native_fault_stage.store(41, std::memory_order_release);
+        result = frame.allocator->Reset();
+        if (SUCCEEDED(result)) result = frame.command_list->Reset(frame.allocator, compositor.pipeline_state);
+        if (FAILED(result))
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "native D3D12 command-list reset failed: 0x" +
+                                     hex_address(static_cast<std::uintptr_t>(result)), format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        D3D12_RESOURCE_BARRIER to_render_target{};
+        to_render_target.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        to_render_target.Transition.pResource = frame.backbuffer;
+        to_render_target.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        to_render_target.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        to_render_target.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        frame.command_list->ResourceBarrier(1, &to_render_target);
+        D3D12_VIEWPORT viewport{};
+        viewport.Width = static_cast<float>(description.BufferDesc.Width);
+        viewport.Height = static_cast<float>(description.BufferDesc.Height);
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+        D3D12_RECT scissor{0, 0, static_cast<LONG>(description.BufferDesc.Width),
+                            static_cast<LONG>(description.BufferDesc.Height)};
+        const D3D12_VERTEX_BUFFER_VIEW vertex_view{
+            frame.vertex_upload->GetGPUVirtualAddress(),
+            static_cast<UINT>(vertex_count * sizeof(EspNativeDirectVertex)),
+            sizeof(EspNativeDirectVertex)};
+        frame.command_list->SetGraphicsRootSignature(compositor.root_signature);
+        frame.command_list->SetPipelineState(compositor.pipeline_state);
+        frame.command_list->RSSetViewports(1, &viewport);
+        frame.command_list->RSSetScissorRects(1, &scissor);
+        frame.command_list->OMSetRenderTargets(1, &frame.rtv, FALSE, nullptr);
+        frame.command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        frame.command_list->IASetVertexBuffers(0, 1, &vertex_view);
+        frame.command_list->DrawInstanced(static_cast<UINT>(vertex_count), 1, 0, 0);
+        std::swap(to_render_target.Transition.StateBefore, to_render_target.Transition.StateAfter);
+        frame.command_list->ResourceBarrier(1, &to_render_target);
+        result = frame.command_list->Close();
+        if (FAILED(result))
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "native D3D12 command-list close failed: 0x" +
+                                     hex_address(static_cast<std::uintptr_t>(result)), format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        ID3D12CommandList* lists[]{frame.command_list};
+        g_esp_native_fault_stage.store(42, std::memory_order_release);
+        const bool previous_overlay_submission = g_esp_native_overlay_queue_submission;
+        g_esp_native_overlay_queue_submission = true;
+        compositor.queue->ExecuteCommandLists(1, lists);
+        g_esp_native_submitted_frames.fetch_add(1, std::memory_order_relaxed);
+        if (probe_frame)
+        {
+            g_esp_native_probe_submitted_frames.fetch_add(1, std::memory_order_relaxed);
+        }
+        g_esp_native_overlay_queue_submission = previous_overlay_submission;
+        frame.fence_value = ++compositor.next_fence_value;
+        result = compositor.queue->Signal(compositor.fence, frame.fence_value);
+        release_snapshot();
+        if (FAILED(result))
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "native D3D12 overlay fence signal failed: 0x" +
+                                     hex_address(static_cast<std::uintptr_t>(result)), format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            return;
+        }
+        g_esp_native_rendered_frames.fetch_add(1, std::memory_order_relaxed);
+        g_esp_native_fault_stage.store(0, std::memory_order_release);
+        g_esp_native_init_probe_active.store(false, std::memory_order_release);
+        esp_native_set_state(EspNativePresentState::Ready, "native D3D12 Present compositor active", format_name);
+    }
+
+    auto esp_native_render_snapshot(IDXGISwapChain* swapchain) -> void
+    {
+        esp_native_render_direct_snapshot(swapchain);
+        return;
+        if (!g_esp_native_enabled.load(std::memory_order_acquire) || !swapchain)
+        {
+            return;
+        }
+        g_esp_native_fault_stage.store(1, std::memory_order_release);
+        const EspNativeSnapshot* snapshot = nullptr;
+        std::uint32_t snapshot_slot{};
+        if (!esp_native_acquire_snapshot(snapshot, snapshot_slot))
+        {
+            return;
+        }
+        const auto release_snapshot = [&]() { esp_native_release_snapshot(snapshot_slot); };
+
+        g_esp_native_fault_stage.store(2, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(g_esp_native_compositor_mutex);
+        auto& compositor = g_esp_native_compositor;
+        if (!esp_native_queue_matches_swapchain_locked(compositor, swapchain))
+        {
+            esp_native_set_state(EspNativePresentState::Initializing,
+                                 "waiting for ExecuteCommandLists on the game command queue");
+            release_snapshot();
+            return;
+        }
+        g_esp_native_fault_stage.store(3, std::memory_order_release);
+        DXGI_SWAP_CHAIN_DESC description{};
+        if (FAILED(swapchain->GetDesc(&description)))
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable, "IDXGISwapChain::GetDesc failed");
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        const auto format_name = esp_native_format_name(description.BufferDesc.Format);
+        if (!esp_native_supported_backbuffer_format(description.BufferDesc.Format))
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "unsupported swapchain backbuffer format: " + format_name,
+                                 format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        g_esp_native_fault_stage.store(4, std::memory_order_release);
+        HRESULT result = esp_native_create_device_stack_locked(compositor);
+        if (FAILED(result))
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "D3D11On12/Direct2D initialization failed: 0x" + hex_address(static_cast<std::uintptr_t>(result)),
+                                 format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        if (!compositor.d2d_context ||
+            (!esp_native_uses_offscreen_composite(description.BufferDesc.Format) &&
+             !compositor.d2d_context->IsDxgiFormatSupported(description.BufferDesc.Format)))
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "Direct2D does not support swapchain backbuffer format: " + format_name,
+                                 format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        const bool recreate = compositor.format != description.BufferDesc.Format ||
+                              compositor.width != description.BufferDesc.Width ||
+                              compositor.height != description.BufferDesc.Height ||
+                              compositor.buffers != description.BufferCount;
+        if (recreate)
+        {
+            g_esp_native_fault_stage.store(5, std::memory_order_release);
+            result = esp_native_recreate_backbuffers_locked(compositor, swapchain, description);
+            if (FAILED(result))
+            {
+                esp_native_set_state(EspNativePresentState::Unavailable,
+                                     "swapchain wrapped-resource creation failed: 0x" +
+                                         hex_address(static_cast<std::uintptr_t>(result)),
+                                     format_name);
+                g_esp_native_enabled.store(false, std::memory_order_release);
+                release_snapshot();
+                return;
+            }
+        }
+        g_esp_native_fault_stage.store(6, std::memory_order_release);
+        IDXGISwapChain3* swapchain3 = nullptr;
+        if (FAILED(swapchain->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&swapchain3))) ||
+            !swapchain3)
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable, "IDXGISwapChain3 is unavailable", format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        const UINT current = swapchain3->GetCurrentBackBufferIndex();
+        esp_native_release(swapchain3);
+        if (current >= compositor.wrapped_backbuffers.size() ||
+            (!compositor.uses_offscreen_composite && current >= compositor.d2d_backbuffers.size()) ||
+            (compositor.uses_offscreen_composite &&
+             (current >= compositor.wrapped_backbuffer_targets.size() || !compositor.overlay_bitmap)))
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable, "swapchain backbuffer index is out of range", format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            release_snapshot();
+            return;
+        }
+        ID3D11Resource* wrapped = compositor.wrapped_backbuffers[current];
+        esp_native_record_init_stage(7);
+        compositor.d3d11on12->AcquireWrappedResources(&wrapped, 1);
+        esp_native_record_init_stage(8);
+        compositor.d2d_context->SetTarget(compositor.uses_offscreen_composite
+                                              ? compositor.overlay_bitmap
+                                              : compositor.d2d_backbuffers[current]);
+        compositor.d2d_context->BeginDraw();
+        if (compositor.uses_offscreen_composite)
+        {
+            compositor.d2d_context->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+        }
+        const float scale_x = snapshot->viewport_width > 0
+                                  ? static_cast<float>(description.BufferDesc.Width) /
+                                        static_cast<float>(snapshot->viewport_width)
+                                  : 1.0f;
+        const float scale_y = snapshot->viewport_height > 0
+                                  ? static_cast<float>(description.BufferDesc.Height) /
+                                        static_cast<float>(snapshot->viewport_height)
+                                  : 1.0f;
+        for (std::uint32_t index = 0; index < snapshot->line_count; ++index)
+        {
+            const auto& line = snapshot->lines[index];
+            compositor.brush->SetColor({line.color.r, line.color.g, line.color.b, line.color.a});
+            compositor.d2d_context->DrawLine(
+                D2D1::Point2F(line.x1 * scale_x, line.y1 * scale_y),
+                D2D1::Point2F(line.x2 * scale_x, line.y2 * scale_y),
+                compositor.brush,
+                std::max(0.5f, line.thickness * (scale_x + scale_y) * 0.5f));
+        }
+        for (std::uint32_t index = 0; index < snapshot->text_count; ++index)
+        {
+            const auto& text = snapshot->texts[index];
+            const auto length = static_cast<UINT32>(wcsnlen(text.value, EspNativeMaxTextChars));
+            if (length == 0)
+            {
+                continue;
+            }
+            compositor.brush->SetColor({text.color.r, text.color.g, text.color.b, text.color.a});
+            const auto x = text.x * scale_x;
+            const auto y = text.y * scale_y;
+            compositor.d2d_context->DrawText(
+                text.value,
+                length,
+                compositor.text_format,
+                D2D1::RectF(x - 300.0f, y, x + 300.0f, y + 36.0f),
+                compositor.brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL);
+        }
+        esp_native_record_init_stage(9);
+        result = compositor.d2d_context->EndDraw();
+        compositor.d2d_context->SetTarget(nullptr);
+        if (SUCCEEDED(result) && compositor.uses_offscreen_composite)
+        {
+            esp_native_record_init_stage(10);
+            if (!EspNativeR10CompositeSubmitProbeSkipDraw)
+            {
+                result = esp_native_composite_offscreen_locked(compositor, current);
+            }
+        }
+        esp_native_record_init_stage(11);
+        compositor.d3d11on12->ReleaseWrappedResources(&wrapped, 1);
+        esp_native_record_init_stage(12);
+        compositor.d3d11_context->Flush();
+        release_snapshot();
+        if (FAILED(result))
+        {
+            if (result == D2DERR_RECREATE_TARGET)
+            {
+                esp_native_release_backbuffers_locked(compositor);
+                esp_native_set_state(EspNativePresentState::Initializing, "Direct2D target recreation pending", format_name);
+                return;
+            }
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "Direct2D EndDraw failed: 0x" + hex_address(static_cast<std::uintptr_t>(result)),
+                                 format_name);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            return;
+        }
+        g_esp_native_rendered_frames.fetch_add(1, std::memory_order_relaxed);
+        g_esp_native_fault_stage.store(0, std::memory_order_release);
+        g_esp_native_init_probe_active.store(false, std::memory_order_release);
+        esp_native_set_state(EspNativePresentState::Ready,
+                             compositor.uses_offscreen_composite
+                                 ? "native Present compositor active (R10 offscreen composite)"
+                                 : "native Present compositor active",
+                             format_name);
+    }
+
+    int esp_native_render_snapshot_exception_filter(EXCEPTION_POINTERS* exception)
+    {
+        if (exception && exception->ExceptionRecord)
+        {
+            g_esp_native_fault_code.store(exception->ExceptionRecord->ExceptionCode, std::memory_order_release);
+            g_esp_native_fault_instruction.store(
+                reinterpret_cast<std::uintptr_t>(exception->ExceptionRecord->ExceptionAddress),
+                std::memory_order_release);
+        }
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+
+    __declspec(noinline) DWORD esp_native_render_snapshot_seh(IDXGISwapChain* swapchain)
+    {
+        __try
+        {
+            esp_native_render_snapshot(swapchain);
+            return ERROR_SUCCESS;
+        }
+        __except (esp_native_render_snapshot_exception_filter(GetExceptionInformation()))
+        {
+            return g_esp_native_fault_code.load(std::memory_order_acquire);
+        }
+    }
+
+    void esp_native_render_snapshot_guarded(IDXGISwapChain* swapchain)
+    {
+        // A bad GPU object or driver callback must fail the ESP closed, not
+        // take the game process down.  Do not release COM state from this SEH
+        // handler: the fault may have interrupted a D3D call that owns the
+        // compositor mutex or a wrapped backbuffer transition.
+        const auto fault = esp_native_render_snapshot_seh(swapchain);
+        if (fault != ERROR_SUCCESS)
+        {
+            const auto stage = g_esp_native_fault_stage.load(std::memory_order_acquire);
+            const auto instruction = g_esp_native_fault_instruction.load(std::memory_order_acquire);
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            g_esp_native_renderer_faulted.store(true, std::memory_order_release);
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "native Present compositor faulted at " +
+                                     std::string(esp_native_fault_stage_name(stage)) +
+                                     ": code=" + hex_address(static_cast<std::uintptr_t>(fault)) +
+                                     ", instruction=" + hex_address(instruction));
+        }
+    }
+
+    struct EspNativePoint
+    {
+        double x{0.0};
+        double y{0.0};
+    };
+
+    struct EspNativeView
+    {
+        sdk::FVector location{};
+        sdk::FRotator rotation{};
+        float fov{0.0f};
+        float desired_fov{0.0f};
+        std::uint8_t padding0[0x5C - 0x38]{};
+        float aspect_ratio{0.0f};
+        std::int32_t aspect_ratio_axis_constraint{0};
+        std::uint8_t aspect_ratio_axis_constraint_is_set{0};
+        std::uint8_t padding1[3]{};
+        std::uint32_t camera_flags{0};
+        std::uint8_t projection_mode{0};
+        std::uint8_t padding2[3]{};
+    };
+    static_assert(sizeof(EspNativeView) == 0x70, "native Present view layout mismatch");
+
+    auto esp_native_finite(const sdk::FVector& value) -> bool
+    {
+        return std::isfinite(value.X) && std::isfinite(value.Y) && std::isfinite(value.Z) &&
+               std::abs(value.X) < 1.0e8 && std::abs(value.Y) < 1.0e8 && std::abs(value.Z) < 1.0e8;
+    }
+
+    auto esp_native_dot(const sdk::FVector& left, const sdk::FVector& right) -> double
+    {
+        return left.X * right.X + left.Y * right.Y + left.Z * right.Z;
+    }
+
+    void esp_native_axes(const sdk::FRotator& rotation,
+                         sdk::FVector& forward,
+                         sdk::FVector& right,
+                         sdk::FVector& up)
+    {
+        constexpr double radians = 3.14159265358979323846 / 180.0;
+        const auto pitch = rotation.Pitch * radians;
+        const auto yaw = rotation.Yaw * radians;
+        const auto roll = rotation.Roll * radians;
+        const auto sp = std::sin(pitch);
+        const auto cp = std::cos(pitch);
+        const auto sy = std::sin(yaw);
+        const auto cy = std::cos(yaw);
+        const auto sr = std::sin(roll);
+        const auto cr = std::cos(roll);
+        forward = {cp * cy, cp * sy, sp};
+        right = {sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp};
+        up = {-(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp};
+    }
+
+    auto esp_native_project_raw(const EspNativeView& view,
+                                const sdk::FVector& world,
+                                int width,
+                                int height,
+                                EspNativePoint& screen) -> bool
+    {
+        screen = {};
+        if (width <= 0 || height <= 0 || !esp_native_finite(view.location) || !esp_native_finite(world) ||
+            !std::isfinite(view.rotation.Pitch) || !std::isfinite(view.rotation.Yaw) || !std::isfinite(view.rotation.Roll) ||
+            !std::isfinite(view.fov) || view.fov < 20.0f || view.fov > 170.0f || view.projection_mode != 0)
+        {
+            return false;
+        }
+        sdk::FVector forward{};
+        sdk::FVector right{};
+        sdk::FVector up{};
+        esp_native_axes(view.rotation, forward, right, up);
+        const sdk::FVector delta{world.X - view.location.X, world.Y - view.location.Y, world.Z - view.location.Z};
+        const auto depth = esp_native_dot(delta, forward);
+        if (!std::isfinite(depth) || depth < 1.0)
+        {
+            return false;
+        }
+        constexpr double radians = 3.14159265358979323846 / 180.0;
+        const auto tangent = std::tan(static_cast<double>(view.fov) * radians / 2.0);
+        if (!std::isfinite(tangent) || std::abs(tangent) < 0.000001)
+        {
+            return false;
+        }
+        const auto camera_aspect = std::isfinite(view.aspect_ratio) && view.aspect_ratio >= 0.1f && view.aspect_ratio <= 100.0f
+                                       ? static_cast<double>(view.aspect_ratio)
+                                       : static_cast<double>(width) / static_cast<double>(height);
+        int axis = view.aspect_ratio_axis_constraint_is_set == 1 &&
+                   view.aspect_ratio_axis_constraint >= 0 && view.aspect_ratio_axis_constraint <= 2
+                       ? view.aspect_ratio_axis_constraint
+                       : 0;
+        if (axis == 2)
+        {
+            axis = static_cast<double>(width) / static_cast<double>(height) >= camera_aspect ? 0 : 1;
+        }
+        const auto focal_y = axis == 0
+                                 ? static_cast<double>(height) / 2.0 / tangent
+                                 : static_cast<double>(width) / 2.0 / tangent / camera_aspect;
+        const auto focal_x = axis == 0 ? focal_y * camera_aspect : static_cast<double>(width) / 2.0 / tangent;
+        screen = {static_cast<double>(width) / 2.0 + esp_native_dot(delta, right) * focal_x / depth,
+                  static_cast<double>(height) / 2.0 - esp_native_dot(delta, up) * focal_y / depth};
+        return std::isfinite(screen.x) && std::isfinite(screen.y);
+    }
+
+    auto esp_native_project(const EspNativeView& view,
+                            const sdk::FVector& world,
+                            int width,
+                            int height,
+                            EspNativePoint& screen) -> bool
+    {
+        if (!esp_native_project_raw(view, world, width, height, screen))
+        {
+            return false;
+        }
+        const auto center_x = static_cast<double>(width) * 0.5;
+        const auto center_y = static_cast<double>(height) * 0.5;
+        const auto scale_x =
+            g_esp_native_projection_scale_x.load(std::memory_order_acquire);
+        const auto scale_y =
+            g_esp_native_projection_scale_y.load(std::memory_order_acquire);
+        screen.x = center_x + (screen.x - center_x) * scale_x;
+        screen.y = center_y + (screen.y - center_y) * scale_y;
+        return std::isfinite(screen.x) && std::isfinite(screen.y);
+    }
+
+    void esp_native_calibrate_projection(Reflection& ref,
+                                         std::uintptr_t controller,
+                                         const EspNativeView& view,
+                                         int width,
+                                         int height)
+    {
+        const auto now_ms = static_cast<std::uint64_t>(GetTickCount64());
+        const auto previous =
+            g_esp_native_last_projection_calibration_ms.load(
+                std::memory_order_acquire);
+        if (previous != 0 && now_ms >= previous &&
+            now_ms - previous < 1'000)
+        {
+            return;
+        }
+        g_esp_native_last_projection_calibration_ms.store(
+            now_ms, std::memory_order_release);
+        sdk::FVector forward{};
+        sdk::FVector right{};
+        sdk::FVector up{};
+        esp_native_axes(view.rotation, forward, right, up);
+        SdkContext context{};
+        context.ok = live_uobject(controller);
+        context.controller = controller;
+        if (!context.ok)
+        {
+            return;
+        }
+        const auto sample = [&](const sdk::FVector& lateral,
+                                bool horizontal,
+                                double& scale) {
+            const sdk::FVector world{
+                view.location.X + forward.X * 1000.0 + lateral.X * 100.0,
+                view.location.Y + forward.Y * 1000.0 + lateral.Y * 100.0,
+                view.location.Z + forward.Z * 1000.0 + lateral.Z * 100.0};
+            EspNativePoint raw{};
+            double engine_x{};
+            double engine_y{};
+            if (!esp_native_project_raw(
+                    view, world, width, height, raw) ||
+                !sdk_project_world_to_screen(
+                    ref, context, world, engine_x, engine_y))
+            {
+                return false;
+            }
+            const auto candidate =
+                runtime_contract::esp_projection_scale_from_sample(
+                    horizontal
+                        ? static_cast<double>(width) * 0.5
+                        : static_cast<double>(height) * 0.5,
+                    horizontal ? raw.x : raw.y,
+                    horizontal ? engine_x : engine_y);
+            if (candidate < 0.0)
+            {
+                return false;
+            }
+            scale = candidate;
+            return true;
+        };
+        double scale_x{};
+        double scale_y{};
+        if (sample(right, true, scale_x) &&
+            sample(up, false, scale_y))
+        {
+            g_esp_native_projection_scale_x.store(
+                scale_x, std::memory_order_release);
+            g_esp_native_projection_scale_y.store(
+                scale_y, std::memory_order_release);
+            g_esp_native_projection_calibrations.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+    }
+
+    auto esp_native_color(std::uint32_t rgb) -> EspNativeColor
+    {
+        return {static_cast<float>((rgb >> 16) & 0xFFu) / 255.0f,
+                static_cast<float>((rgb >> 8) & 0xFFu) / 255.0f,
+                static_cast<float>(rgb & 0xFFu) / 255.0f,
+                1.0f};
+    }
+
+    auto esp_native_add_line(EspNativeSnapshot& snapshot,
+                             const EspNativePoint& start,
+                             const EspNativePoint& end,
+                             const EspNativeColor& color,
+                             float thickness = 1.75f) -> bool
+    {
+        if (snapshot.line_count >= EspNativeMaxLines || !std::isfinite(start.x) || !std::isfinite(start.y) ||
+            !std::isfinite(end.x) || !std::isfinite(end.y))
+        {
+            return false;
+        }
+        snapshot.lines[snapshot.line_count++] = {
+            static_cast<float>(start.x), static_cast<float>(start.y),
+            static_cast<float>(end.x), static_cast<float>(end.y), thickness, color};
+        return true;
+    }
+
+    auto esp_native_add_text(EspNativeSnapshot& snapshot,
+                             const EspNativePoint& position,
+                             const std::wstring& value,
+                             const EspNativeColor& color) -> bool
+    {
+        if (snapshot.text_count >= EspNativeMaxTexts || value.empty() || !std::isfinite(position.x) || !std::isfinite(position.y))
+        {
+            return false;
+        }
+        auto& text = snapshot.texts[snapshot.text_count++];
+        text.x = static_cast<float>(position.x);
+        text.y = static_cast<float>(position.y);
+        text.color = color;
+        const auto count = std::min(value.size(), EspNativeMaxTextChars - 1);
+        std::wmemcpy(text.value, value.data(), count);
+        text.value[count] = L'\0';
+        return true;
+    }
+
+    auto esp_native_read_scalar_property(Reflection& ref,
+                                         std::uintptr_t object,
+                                         std::initializer_list<const char*> names,
+                                         double& value) -> bool
+    {
+        value = 0.0;
+        if (!live_uobject(object))
+        {
+            return false;
+        }
+        for (const auto* name : names)
+        {
+            const auto property = find_object_property(ref, object, name);
+            const auto offset = property ? prop_offset(property) : -1;
+            const auto size = property ? prop_element_size(property) : 0;
+            if (offset < 0)
+            {
+                continue;
+            }
+            if (size == static_cast<int>(sizeof(float)))
+            {
+                const auto candidate = static_cast<double>(safe_read<float>(object + static_cast<std::uintptr_t>(offset), 0.0f));
+                if (std::isfinite(candidate))
+                {
+                    value = candidate;
+                    return true;
+                }
+            }
+            if (size == static_cast<int>(sizeof(double)))
+            {
+                const auto candidate = safe_read<double>(object + static_cast<std::uintptr_t>(offset), 0.0);
+                if (std::isfinite(candidate))
+                {
+                    value = candidate;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    auto esp_native_component_transform(Reflection& ref,
+                                        std::uintptr_t component,
+                                        sdk::FTransform& transform) -> bool
+    {
+        static int component_to_world_offset = std::numeric_limits<int>::min();
+        if (component_to_world_offset == std::numeric_limits<int>::min())
+        {
+            component_to_world_offset =
+                ref.resolve_property_offset("SceneComponent", "ComponentToWorld");
+        }
+        if (component_to_world_offset >= 0 &&
+            safe_copy(&transform,
+                      reinterpret_cast<const void*>(
+                          component + static_cast<std::uintptr_t>(component_to_world_offset)),
+                      sizeof(transform)) &&
+            sdk_transform_score(transform) > 0)
+        {
+            return true;
+        }
+
+        struct TransformAccessor
+        {
+            std::uintptr_t function{0};
+            std::uintptr_t return_property{0};
+            int params_size{0};
+        };
+        // Snapshot capture runs exclusively after DrawHUD on the game thread.
+        // Cache one ABI per component class so the hot path performs neither
+        // reflection name walks nor dynamic parameter allocation.
+        static std::unordered_map<std::uintptr_t, TransformAccessor> accessors{};
+        const auto component_class = ref.class_ptr(component);
+        if (!component_class)
+        {
+            return false;
+        }
+        auto found = accessors.find(component_class);
+        if (found == accessors.end())
+        {
+            TransformAccessor accessor{};
+            for (const auto* function_name :
+                 {"K2_GetComponentToWorld", "GetComponentTransform"})
+            {
+                const auto function = ref.find_function(component, function_name);
+                const int params_size =
+                    function ? safe_read<int>(function + OffPropertiesSize, 0) : 0;
+                if (!function || params_size <= 0 || params_size > 256)
+                {
+                    continue;
+                }
+                for (auto property = safe_read<std::uintptr_t>(
+                         function + OffChildProperties);
+                     property;
+                     property = safe_read<std::uintptr_t>(property + OffFFieldNext))
+                {
+                    if (lower_copy(ref.names.resolve(
+                            safe_read<std::uint32_t>(property + OffFFieldName))) ==
+                        "returnvalue")
+                    {
+                        accessor = {function, property, params_size};
+                        break;
+                    }
+                }
+                if (accessor.function)
+                {
+                    break;
+                }
+            }
+            found = accessors.emplace(component_class, accessor).first;
+        }
+        const auto& accessor = found->second;
+        if (!accessor.function || !accessor.return_property ||
+            accessor.params_size <= 0 || accessor.params_size > 256)
+        {
+            return false;
+        }
+        std::array<std::uint8_t, 256> params{};
+        std::string failure{};
+        return process_event(component, accessor.function, params.data(), failure) &&
+               sdk_read_transform(ref, accessor.return_property, params.data(), transform) &&
+               sdk_transform_score(transform) > 0;
+    }
+
+    struct EspNativeSkeletonContract
+    {
+        const MeshFirstProfile* profile{nullptr};
+        std::vector<sdk::FTransform> reference_component{};
+    };
+
+    using EspNativePoseTransforms =
+        std::array<sdk::FTransform, EspNativeMaxBones>;
+    using EspNativeBonePositions =
+        std::array<sdk::FVector, EspNativeMaxBones>;
+
+    auto esp_native_mesh_profile_catalog()
+        -> const std::vector<MeshFirstProfile>&
+    {
+        static const auto profiles = load_mesh_first_profile_catalog();
+        return profiles;
+    }
+
+    auto esp_native_skeleton_contracts()
+        -> const std::vector<EspNativeSkeletonContract>&
+    {
+        static const auto contracts = [] {
+            std::vector<EspNativeSkeletonContract> values{};
+            for (const auto& profile : esp_native_mesh_profile_catalog())
+            {
+                if (!profile.ok || profile.bone_count <= 1 ||
+                    profile.bone_count > static_cast<int>(EspNativeMaxBones))
+                {
+                    continue;
+                }
+                std::vector<sdk::FTransform> reference{};
+                std::string failure{};
+                if (!mesh_first_build_reference_component_transforms(
+                        profile, reference, failure))
+                {
+                    continue;
+                }
+                values.push_back({&profile, std::move(reference)});
+            }
+            return values;
+        }();
+        return contracts;
+    }
+
+    auto esp_native_skeleton_contract_for_mesh(
+        Reflection& ref,
+        std::uintptr_t mesh) -> const EspNativeSkeletonContract*
+    {
+        const auto asset = read_object_property_by_names(
+            ref,
+            mesh,
+            {"SkinnedAsset",
+             "SkeletalMesh",
+             "Mesh",
+             "MeshAsset",
+             "SkeletalMeshAsset"});
+        if (!live_uobject(asset))
+        {
+            return nullptr;
+        }
+        static std::unordered_map<std::uintptr_t, const EspNativeSkeletonContract*> cache{};
+        if (const auto found = cache.find(asset); found != cache.end())
+        {
+            return found->second;
+        }
+        const SdkFrontMeshCandidate candidate{mesh, asset, "native_present_esp"};
+        const EspNativeSkeletonContract* selected = nullptr;
+        int best_score{};
+        for (const auto& contract : esp_native_skeleton_contracts())
+        {
+            if (!contract.profile)
+            {
+                continue;
+            }
+            const auto score = mesh_first_profile_candidate_score(
+                ref, *contract.profile, candidate);
+            if (score > best_score)
+            {
+                selected = &contract;
+                best_score = score;
+            }
+        }
+        if (selected)
+        {
+            cache.emplace(asset, selected);
+        }
+        return selected;
+    }
+
+    auto esp_native_read_pose_array_at(
+        std::uintptr_t mesh,
+        int offset,
+        int bone_count,
+        EspNativePoseTransforms& transforms) -> bool
+    {
+        if (!live_uobject(mesh) || offset < 0 || offset > 0x20000 ||
+            bone_count <= 1 ||
+            bone_count > static_cast<int>(EspNativeMaxBones))
+        {
+            return false;
+        }
+        const auto header = safe_read<sdk::TArray<sdk::FTransform>>(
+            mesh + static_cast<std::uintptr_t>(offset));
+        if (!runtime_contract::esp_pose_array_header_usable(
+                reinterpret_cast<std::uintptr_t>(header.Data),
+                header.Num,
+                header.Max,
+                bone_count))
+        {
+            return false;
+        }
+        for (int index = 0; index < bone_count; ++index)
+        {
+            auto& transform = transforms[static_cast<std::size_t>(index)];
+            const auto address =
+                reinterpret_cast<std::uintptr_t>(header.Data) +
+                static_cast<std::uintptr_t>(index) * sizeof(sdk::FTransform);
+            if (!safe_copy(&transform,
+                           reinterpret_cast<const void*>(address),
+                           sizeof(transform)) ||
+                sdk_transform_score(transform) <= 0)
+            {
+                transforms = {};
+                return false;
+            }
+        }
+        return true;
+    }
+
+    auto esp_native_compose_local_pose(
+        const MeshFirstProfile& profile,
+        const EspNativePoseTransforms& local,
+        EspNativePoseTransforms& component) -> bool
+    {
+        if (profile.bone_count <= 1 ||
+            profile.bone_count > static_cast<int>(EspNativeMaxBones) ||
+            static_cast<int>(profile.bones.size()) != profile.bone_count)
+        {
+            return false;
+        }
+        std::array<bool, EspNativeMaxBones> ready{};
+        for (int pass = 0; pass < profile.bone_count; ++pass)
+        {
+            bool progressed{};
+            for (const auto& bone : profile.bones)
+            {
+                if (bone.index < 0 || bone.index >= profile.bone_count ||
+                    ready[static_cast<std::size_t>(bone.index)])
+                {
+                    continue;
+                }
+                if (bone.parent_index < 0)
+                {
+                    component[static_cast<std::size_t>(bone.index)] =
+                        local[static_cast<std::size_t>(bone.index)];
+                    ready[static_cast<std::size_t>(bone.index)] = true;
+                    progressed = true;
+                }
+                else if (bone.parent_index < profile.bone_count &&
+                         ready[static_cast<std::size_t>(bone.parent_index)])
+                {
+                    component[static_cast<std::size_t>(bone.index)] =
+                        mesh_first_transform_compose(
+                            component[static_cast<std::size_t>(bone.parent_index)],
+                            local[static_cast<std::size_t>(bone.index)]);
+                    ready[static_cast<std::size_t>(bone.index)] = true;
+                    progressed = true;
+                }
+            }
+            if (!progressed)
+            {
+                break;
+            }
+        }
+        return std::all_of(
+            ready.begin(),
+            ready.begin() + profile.bone_count,
+            [](bool value) { return value; });
+    }
+
+    auto esp_native_pose_topology_error(
+        const EspNativeSkeletonContract& contract,
+        const EspNativePoseTransforms& transforms) -> double
+    {
+        if (!contract.profile ||
+            contract.reference_component.size() <
+                static_cast<std::size_t>(contract.profile->bone_count))
+        {
+            return -1.0;
+        }
+        double error_sum{};
+        int segment_count{};
+        for (const auto& bone : contract.profile->bones)
+        {
+            if (bone.index < 0 || bone.index >= contract.profile->bone_count ||
+                bone.parent_index < 0 ||
+                bone.parent_index >= contract.profile->bone_count)
+            {
+                continue;
+            }
+            const auto reference_length = sdk_vec_len(sdk_vec_sub(
+                contract.reference_component[static_cast<std::size_t>(bone.index)].Translation,
+                contract.reference_component[static_cast<std::size_t>(bone.parent_index)].Translation));
+            const auto current_length = sdk_vec_len(sdk_vec_sub(
+                transforms[static_cast<std::size_t>(bone.index)].Translation,
+                transforms[static_cast<std::size_t>(bone.parent_index)].Translation));
+            if (!std::isfinite(reference_length) || reference_length <= 0.01 ||
+                !std::isfinite(current_length) || current_length <= 0.01)
+            {
+                continue;
+            }
+            const auto ratio = std::clamp(
+                current_length / reference_length, 0.001, 1000.0);
+            error_sum += std::abs(std::log(ratio));
+            ++segment_count;
+        }
+        return segment_count >= std::max(3, contract.profile->bone_count / 3)
+                   ? error_sum / static_cast<double>(segment_count)
+                   : -1.0;
+    }
+
+    auto esp_native_component_pose(
+        Reflection& ref,
+        std::uintptr_t mesh,
+        const EspNativeSkeletonContract*& contract,
+        EspNativePoseTransforms& transforms,
+        runtime_contract::EspPoseTransformSpace& transform_space) -> bool
+    {
+        struct PoseAccessor
+        {
+            int array_offset{-1};
+            runtime_contract::EspPoseTransformSpace transform_space{
+                runtime_contract::EspPoseTransformSpace::Unavailable};
+            std::uint64_t last_probe_ms{0};
+            const EspNativeSkeletonContract* contract{nullptr};
+        };
+        struct OffsetCandidate
+        {
+            int offset{-1};
+        };
+        constexpr std::array<int, 2> verified_offsets{{0x9B8, 0x5F0}};
+        static std::unordered_map<std::uintptr_t, PoseAccessor> accessors{};
+        contract = esp_native_skeleton_contract_for_mesh(ref, mesh);
+        transform_space = runtime_contract::EspPoseTransformSpace::Unavailable;
+        if (!contract || !contract->profile)
+        {
+            return false;
+        }
+        const auto asset = read_object_property_by_names(
+            ref,
+            mesh,
+            {"SkinnedAsset",
+             "SkeletalMesh",
+             "Mesh",
+             "MeshAsset",
+             "SkeletalMeshAsset"});
+        const auto key = live_uobject(asset) ? asset : ref.class_ptr(mesh);
+        if (!key)
+        {
+            return false;
+        }
+        auto& accessor = accessors[key];
+        const auto bone_count = contract->profile->bone_count;
+        const auto apply_space = [&](const EspNativePoseTransforms& raw,
+                                     runtime_contract::EspPoseTransformSpace space,
+                                     EspNativePoseTransforms& output) {
+            if (space == runtime_contract::EspPoseTransformSpace::Component)
+            {
+                output = raw;
+                return true;
+            }
+            return space == runtime_contract::EspPoseTransformSpace::Local &&
+                   esp_native_compose_local_pose(
+                       *contract->profile, raw, output);
+        };
+        if (accessor.array_offset >= 0 && accessor.contract == contract)
+        {
+            EspNativePoseTransforms raw{};
+            if (esp_native_read_pose_array_at(
+                    mesh, accessor.array_offset, bone_count, raw) &&
+                apply_space(raw, accessor.transform_space, transforms))
+            {
+                transform_space = accessor.transform_space;
+                return true;
+            }
+            accessor.array_offset = -1;
+            accessor.transform_space =
+                runtime_contract::EspPoseTransformSpace::Unavailable;
+        }
+
+        const auto now_ms = static_cast<std::uint64_t>(GetTickCount64());
+        if (accessor.last_probe_ms != 0 &&
+            now_ms >= accessor.last_probe_ms &&
+            now_ms - accessor.last_probe_ms < 2'000)
+        {
+            return false;
+        }
+        accessor.last_probe_ms = now_ms;
+        accessor.contract = contract;
+        std::vector<OffsetCandidate> candidates{};
+        const auto add_candidate = [&](int offset) {
+            if (offset < 0 ||
+                std::any_of(
+                    candidates.begin(),
+                    candidates.end(),
+                    [offset](const auto& candidate) {
+                        return candidate.offset == offset;
+                    }))
+            {
+                return;
+            }
+            candidates.push_back({offset});
+        };
+        for (const auto* property_name :
+             {"ComponentSpaceTransforms",
+              "ComponentSpaceTransformsArray",
+              "CachedComponentSpaceTransforms",
+              "SpaceBases",
+              "BoneSpaceTransforms",
+              "CachedBoneSpaceTransforms"})
+        {
+            const auto property = find_object_property(ref, mesh, property_name);
+            add_candidate(property ? prop_offset(property) : -1);
+        }
+        for (const auto offset : verified_offsets)
+        {
+            add_candidate(offset);
+        }
+
+        double best_error = std::numeric_limits<double>::infinity();
+        int best_offset{-1};
+        auto best_space =
+            runtime_contract::EspPoseTransformSpace::Unavailable;
+        EspNativePoseTransforms best{};
+        for (const auto& candidate : candidates)
+        {
+            EspNativePoseTransforms raw{};
+            if (!esp_native_read_pose_array_at(
+                    mesh, candidate.offset, bone_count, raw))
+            {
+                continue;
+            }
+            const auto component_error =
+                esp_native_pose_topology_error(*contract, raw);
+            EspNativePoseTransforms local_component{};
+            const auto local_error =
+                esp_native_compose_local_pose(
+                    *contract->profile, raw, local_component)
+                    ? esp_native_pose_topology_error(
+                          *contract, local_component)
+                    : -1.0;
+            const auto space = runtime_contract::esp_select_pose_space(
+                component_error, local_error);
+            const auto error =
+                space == runtime_contract::EspPoseTransformSpace::Component
+                    ? component_error
+                    : local_error;
+            if (space ==
+                    runtime_contract::EspPoseTransformSpace::Unavailable ||
+                error < 0.0 || error >= best_error)
+            {
+                continue;
+            }
+            best_error = error;
+            best_offset = candidate.offset;
+            best_space = space;
+            best = space ==
+                           runtime_contract::EspPoseTransformSpace::Component
+                       ? raw
+                       : local_component;
+        }
+        // Bone lengths are invariant under animation. An average logarithmic
+        // error over 0.45 means the candidate differs from the matched
+        // skeleton by more than roughly 57% and must not be rendered.
+        if (best_offset < 0 || best_error > 0.45)
+        {
+            return false;
+        }
+        accessor.array_offset = best_offset;
+        accessor.transform_space = best_space;
+        transforms = best;
+        transform_space = best_space;
+        return true;
+    }
+
+    auto esp_native_project_capsule(const EspNativeView& view,
+                                    const sdk::FTransform& component,
+                                    double radius,
+                                    double half_height,
+                                    int width,
+                                    int height,
+                                    double& left,
+                                    double& top,
+                                    double& right,
+                                    double& bottom) -> bool
+    {
+        if (!std::isfinite(radius) || !std::isfinite(half_height) || radius <= 0.0 || half_height < radius)
+        {
+            return false;
+        }
+        std::array<sdk::FVector, 18> samples{};
+        int count = 0;
+        samples[static_cast<std::size_t>(count++)] = mesh_first_transform_apply_point(component, {0.0, 0.0, half_height});
+        samples[static_cast<std::size_t>(count++)] = mesh_first_transform_apply_point(component, {0.0, 0.0, -half_height});
+        const auto cylinder_half = half_height - radius;
+        constexpr double pi = 3.14159265358979323846;
+        for (int ring = -1; ring <= 1; ring += 2)
+        {
+            for (int step = 0; step < 8; ++step)
+            {
+                const auto angle = static_cast<double>(step) * pi / 4.0;
+                samples[static_cast<std::size_t>(count++)] = mesh_first_transform_apply_point(
+                    component,
+                    {std::cos(angle) * radius, std::sin(angle) * radius, cylinder_half * ring});
+            }
+        }
+        left = std::numeric_limits<double>::infinity();
+        top = std::numeric_limits<double>::infinity();
+        right = -std::numeric_limits<double>::infinity();
+        bottom = -std::numeric_limits<double>::infinity();
+        bool any{};
+        for (int index = 0; index < count; ++index)
+        {
+            EspNativePoint point{};
+            if (!esp_native_project(view, samples[static_cast<std::size_t>(index)], width, height, point))
+            {
+                continue;
+            }
+            any = true;
+            left = std::min(left, point.x);
+            top = std::min(top, point.y);
+            right = std::max(right, point.x);
+            bottom = std::max(bottom, point.y);
+        }
+        return any && std::isfinite(left) && std::isfinite(top) && std::isfinite(right) && std::isfinite(bottom) &&
+               right - left > 1.0 && bottom - top > 1.0;
+    }
+
+    auto esp_native_project_pose_bounds(
+        const EspNativeView& view,
+        const EspNativeSkeletonContract& contract,
+        const EspNativeBonePositions& bones,
+        int width,
+        int height,
+        double& left,
+        double& top,
+        double& right,
+        double& bottom) -> bool
+    {
+        left = std::numeric_limits<double>::max();
+        top = std::numeric_limits<double>::max();
+        right = std::numeric_limits<double>::lowest();
+        bottom = std::numeric_limits<double>::lowest();
+        if (!contract.profile ||
+            contract.profile->bone_count <= 1 ||
+            contract.profile->bone_count >
+                static_cast<int>(EspNativeMaxBones))
+        {
+            return false;
+        }
+        std::array<bool, EspNativeMaxBones> included{};
+        int projected{};
+        for (const auto& bone : contract.profile->bones)
+        {
+            if (bone.index < 0 ||
+                bone.index >= contract.profile->bone_count ||
+                bone.parent_index < 0 ||
+                bone.parent_index >= contract.profile->bone_count)
+            {
+                continue;
+            }
+            for (const auto index : {bone.parent_index, bone.index})
+            {
+                if (included[static_cast<std::size_t>(index)])
+                {
+                    continue;
+                }
+                included[static_cast<std::size_t>(index)] = true;
+                EspNativePoint screen{};
+                if (!esp_native_project(
+                        view,
+                        bones[static_cast<std::size_t>(index)],
+                        width,
+                        height,
+                        screen))
+                {
+                    continue;
+                }
+                left = std::min(left, screen.x);
+                top = std::min(top, screen.y);
+                right = std::max(right, screen.x);
+                bottom = std::max(bottom, screen.y);
+                ++projected;
+            }
+        }
+        if (projected < 8 || right - left < 2.0 || bottom - top < 2.0)
+        {
+            return false;
+        }
+        const auto expanded = runtime_contract::esp_expand_screen_bounds(
+            {left, top, right, bottom}, 0.10, 0.05);
+        left = expanded.left;
+        top = expanded.top;
+        right = expanded.right;
+        bottom = expanded.bottom;
+        return true;
+    }
+
+    auto esp_native_role_from_snapshot(EspSnapshotRole role) -> EspNativeRole
+    {
+        switch (role)
+        {
+        case EspSnapshotRole::Hider: return EspNativeRole::Hider;
+        case EspSnapshotRole::Hunter: return EspNativeRole::Hunter;
+        case EspSnapshotRole::Spectator: return EspNativeRole::Spectator;
+        default: return EspNativeRole::Unknown;
+        }
+    }
+
+    auto esp_native_scope_from_name(const std::string& value) -> EspNativeScope
+    {
+        const auto normalized = lower_copy(value);
+        if (normalized == "hider") return EspNativeScope::Hider;
+        if (normalized == "hunter") return EspNativeScope::Hunter;
+        return EspNativeScope::All;
+    }
+
+    auto esp_native_display_name(const std::string& utf8, std::wstring& output) -> bool
+    {
+        output.clear();
+        if (utf8.empty() || utf8.size() > 256 ||
+            std::all_of(utf8.begin(), utf8.end(), [](unsigned char value) { return value >= '0' && value <= '9'; }))
+        {
+            return false;
+        }
+        const auto count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+        if (count <= 0 || count >= static_cast<int>(EspNativeMaxTextChars))
+        {
+            return false;
+        }
+        output.resize(static_cast<std::size_t>(count));
+        return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()),
+                                   output.data(), count) == count;
+    }
+
+    void esp_native_add_corner_box(EspNativeSnapshot& snapshot,
+                                   double left,
+                                   double top,
+                                   double right,
+                                   double bottom,
+                                   const EspNativeColor& color)
+    {
+        const auto width = right - left;
+        const auto height = bottom - top;
+        const auto horizontal = std::min(std::max(3.0, width * 0.30), width / 2.0);
+        const auto vertical = std::min(std::max(3.0, height * 0.20), height / 2.0);
+        const auto add = [&](double x1, double y1, double x2, double y2) {
+            (void)esp_native_add_line(snapshot, {x1, y1}, {x2, y2}, color, 2.0f);
+        };
+        add(left, top, left + horizontal, top); add(left, top, left, top + vertical);
+        add(right, top, right - horizontal, top); add(right, top, right, top + vertical);
+        add(left, bottom, left + horizontal, bottom); add(left, bottom, left, bottom - vertical);
+        add(right, bottom, right - horizontal, bottom); add(right, bottom, right, bottom - vertical);
+    }
+
+    void esp_native_present_capture_snapshot_impl(void* hud)
+    {
+        g_esp_native_capture_frames.fetch_add(1, std::memory_order_relaxed);
+        g_esp_native_last_capture_tick_ms.store(
+            static_cast<std::uint64_t>(GetTickCount64()), std::memory_order_release);
+        static EspSnapshotResolver resolver{};
+        static bool resolver_initialized{};
+        std::string failure{};
+        if (!resolver_initialized)
+        {
+            if (!resolver.reflection.init(failure))
+            {
+                esp_native_set_state(EspNativePresentState::Unavailable, "native snapshot reflection unavailable: " + failure);
+                g_esp_native_enabled.store(false, std::memory_order_release);
+                return;
+            }
+            resolver_initialized = true;
+        }
+        EspSnapshotContext context{};
+        if (!esp_snapshot_resolve_context(resolver, context, failure))
+        {
+            esp_native_set_state(EspNativePresentState::Initializing, "native snapshot is waiting for game context: " + failure);
+            return;
+        }
+        const auto canvas_offset = g_esp_hud_canvas_offset.load(std::memory_order_acquire);
+        const auto canvas = canvas_offset >= 0
+                                ? safe_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(hud) +
+                                                             static_cast<std::uintptr_t>(canvas_offset), 0)
+                                : 0;
+        const auto size_x_property = canvas ? find_object_property(resolver.reflection, canvas, "SizeX") : 0;
+        const auto size_y_property = canvas ? find_object_property(resolver.reflection, canvas, "SizeY") : 0;
+        const auto size_x_offset = size_x_property ? prop_offset(size_x_property) : -1;
+        const auto size_y_offset = size_y_property ? prop_offset(size_y_property) : -1;
+        const int width = size_x_offset >= 0 ? safe_read<std::int32_t>(canvas + static_cast<std::uintptr_t>(size_x_offset), 0) : 0;
+        const int height = size_y_offset >= 0 ? safe_read<std::int32_t>(canvas + static_cast<std::uintptr_t>(size_y_offset), 0) : 0;
+        if (!live_uobject(canvas) || width <= 0 || height <= 0 || width > 16384 || height > 16384)
+        {
+            esp_native_set_state(EspNativePresentState::Initializing, "native snapshot is waiting for a valid constrained viewport");
+            return;
+        }
+        const auto camera_manager = read_object_property_by_names(
+            resolver.reflection, context.controller, {"PlayerCameraManager", "CameraManager"});
+        EspNativeView view{};
+        if (!live_uobject(camera_manager) ||
+            !safe_copy(&view, reinterpret_cast<const void*>(camera_manager + 0x1540), sizeof(view)))
+        {
+            esp_native_set_state(EspNativePresentState::Initializing, "native snapshot camera cache is unavailable");
+            return;
+        }
+        esp_native_calibrate_projection(
+            resolver.reflection, context.controller, view, width, height);
+        const auto game_state = read_object_property_by_names(resolver.reflection, context.world, {"GameState", "GameStatePrivate"});
+        if (!live_uobject(game_state))
+        {
+            esp_native_set_state(EspNativePresentState::Initializing, "native snapshot game state is unavailable");
+            return;
+        }
+        std::vector<EspSnapshotTarget> targets{};
+        std::vector<EspSnapshotTarget> hiders{};
+        std::vector<EspSnapshotTarget> hunters{};
+        const bool player_array_roster = esp_snapshot_collect_roster(
+            resolver.reflection, game_state, EspSnapshotRole::Unknown, {"PlayerArray"}, targets);
+        (void)esp_snapshot_collect_roster(
+            resolver.reflection, game_state, EspSnapshotRole::Hider,
+            {"Survivors", "LiveSurvivors_PlayerState", "Hiders", "HiderPlayers", "HiderPlayerStates", "HiderPawns", "HiderCharacters", "CurrentHider"},
+            hiders);
+        (void)esp_snapshot_collect_roster(
+            resolver.reflection, game_state, EspSnapshotRole::Hunter,
+            {"Hunters", "HuntersPlayerState", "HunterPlayers", "HunterPlayerStates", "HunterPawns", "HunterCharacters", "CurrentHunter"},
+            hunters);
+        std::unordered_map<std::uintptr_t, EspSnapshotTarget> role_targets{};
+        const auto merge_role_target = [&](const EspSnapshotTarget& role_target) {
+            if (!live_uobject(role_target.player_state))
+            {
+                return;
+            }
+            auto& merged = role_targets[role_target.player_state];
+            if (!live_uobject(merged.player_state))
+            {
+                merged = role_target;
+                return;
+            }
+            if (merged.role == EspSnapshotRole::Unknown &&
+                role_target.role != EspSnapshotRole::Unknown)
+            {
+                merged.role = role_target.role;
+            }
+            if (!live_uobject(merged.pawn) && live_uobject(role_target.pawn))
+            {
+                merged.pawn = role_target.pawn;
+            }
+            if (merged.name.empty() && !role_target.name.empty())
+            {
+                merged.name = role_target.name;
+            }
+        };
+        for (const auto& hider : hiders) merge_role_target(hider);
+        for (const auto& hunter : hunters) merge_role_target(hunter);
+        for (auto& target : targets)
+        {
+            if (const auto found = role_targets.find(target.player_state);
+                found != role_targets.end())
+            {
+                if (found->second.role != EspSnapshotRole::Unknown)
+                {
+                    target.role = found->second.role;
+                }
+                if (!live_uobject(target.pawn) && live_uobject(found->second.pawn))
+                {
+                    target.pawn = found->second.pawn;
+                }
+                if (target.name.empty())
+                {
+                    target.name = found->second.name;
+                }
+                role_targets.erase(found);
+            }
+        }
+        // PlayerArray is authoritative for who exists. If the game update
+        // temporarily withholds it, retain explicitly rostered players rather
+        // than publishing a misleading empty frame.
+        if (!player_array_roster || targets.empty())
+        {
+            for (const auto& [player_state, role_target] : role_targets)
+            {
+                (void)player_state;
+                targets.push_back(role_target);
+            }
+        }
+        const auto token = g_esp_native_snapshot_token.load(std::memory_order_acquire);
+        const auto current_slot = static_cast<std::uint32_t>(token & 1u);
+        const auto target_slot = g_esp_native_snapshot_ready.load(std::memory_order_acquire) ? current_slot ^ 1u : 0u;
+        if (g_esp_native_snapshot_readers[target_slot].load(std::memory_order_acquire) != 0)
+        {
+            g_esp_native_snapshot_drops.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        auto& snapshot = g_esp_native_snapshots[target_slot];
+        snapshot = {};
+        snapshot.viewport_width = static_cast<std::uint32_t>(width);
+        snapshot.viewport_height = static_cast<std::uint32_t>(height);
+        snapshot.roster_source = player_array_roster && !targets.empty() ? 1u : 2u;
+        snapshot.roster_count = static_cast<std::uint32_t>(
+            std::min<std::size_t>(targets.size(), std::numeric_limits<std::uint32_t>::max()));
+        const auto scope = static_cast<EspNativeScope>(g_esp_native_scope.load(std::memory_order_acquire));
+        const bool draw_boxes = g_esp_native_boxes.load(std::memory_order_acquire);
+        const bool draw_skeletons = g_esp_native_skeletons.load(std::memory_order_acquire);
+        const bool draw_names = g_esp_native_names.load(std::memory_order_acquire);
+        const bool draw_distance = g_esp_native_distance.load(std::memory_order_acquire);
+        const bool draw_snaplines = g_esp_native_snaplines.load(std::memory_order_acquire);
+        std::unordered_set<std::uintptr_t> seen{};
+        for (const auto& target : targets)
+        {
+            if (snapshot.players >= EspNativeMaxPlayers)
+            {
+                break;
+            }
+            if (!live_uobject(target.player_state))
+            {
+                continue;
+            }
+            ++snapshot.valid_player_states;
+            if (!live_uobject(target.pawn))
+            {
+                continue;
+            }
+            ++snapshot.valid_pawns;
+            if (target.pawn == context.local_pawn ||
+                target.player_state == context.local_player_state)
+            {
+                ++snapshot.filtered_local;
+                continue;
+            }
+            if (!seen.insert(target.player_state).second)
+            {
+                continue;
+            }
+            bool target_spectator{};
+            if (esp_snapshot_read_bool_property(resolver.reflection, target.player_state,
+                                                {"bIsSpectator", "bOnlySpectator", "bIsSpectatorOnly"}, target_spectator) &&
+                target_spectator)
+            {
+                ++snapshot.filtered_spectators;
+                continue;
+            }
+            const auto target_role = esp_native_role_from_snapshot(target.role);
+            if (!runtime_contract::esp_role_scope_matches(scope, target_role))
+            {
+                ++snapshot.filtered_scope;
+                continue;
+            }
+            const auto color = esp_native_color(runtime_contract::esp_role_color(
+                target_role,
+                g_esp_native_hider_color.load(std::memory_order_acquire),
+                g_esp_native_hunter_color.load(std::memory_order_acquire)));
+            const auto capsule = read_object_property_by_names(
+                resolver.reflection, target.pawn, {"CapsuleComponent", "Capsule", "CollisionCylinder", "RootComponent"});
+            if (live_uobject(capsule))
+            {
+                ++snapshot.capsule_components;
+            }
+            sdk::FTransform capsule_transform{};
+            double capsule_radius{};
+            double capsule_half_height{};
+            const bool capsule_transform_valid =
+                live_uobject(capsule) &&
+                esp_native_component_transform(resolver.reflection, capsule, capsule_transform);
+            if (capsule_transform_valid)
+            {
+                ++snapshot.capsule_transforms;
+            }
+            const bool capsule_size_valid =
+                capsule_transform_valid &&
+                esp_native_read_scalar_property(resolver.reflection, capsule,
+                                                {"CapsuleRadius", "UnscaledCapsuleRadius"}, capsule_radius) &&
+                esp_native_read_scalar_property(resolver.reflection, capsule,
+                                                {"CapsuleHalfHeight", "UnscaledCapsuleHalfHeight"}, capsule_half_height);
+            if (capsule_size_valid)
+            {
+                ++snapshot.capsule_sizes;
+            }
+            double left{};
+            double top{};
+            double right{};
+            double bottom{};
+            bool box_valid = capsule_size_valid && esp_native_project_capsule(
+                view, capsule_transform, capsule_radius, capsule_half_height,
+                width, height, left, top, right, bottom);
+            if (box_valid)
+            {
+                ++snapshot.capsule_projected;
+                const auto expanded = runtime_contract::esp_expand_screen_bounds(
+                    {left, top, right, bottom}, 0.08, 0.04);
+                left = expanded.left;
+                top = expanded.top;
+                right = expanded.right;
+                bottom = expanded.bottom;
+            }
+            bool wrote{};
+            const auto mesh = read_object_property_by_names(
+                resolver.reflection, target.pawn, {"Mesh", "MeshComponent", "SkeletalMeshComponent"});
+            if (live_uobject(mesh))
+            {
+                ++snapshot.mesh_components;
+            }
+            EspNativeBonePositions bones{};
+            bool pose_valid{};
+            const EspNativeSkeletonContract* skeleton_contract = nullptr;
+            auto pose_space =
+                runtime_contract::EspPoseTransformSpace::Unavailable;
+            if ((draw_skeletons || draw_boxes) && live_uobject(mesh))
+            {
+                // The mesh asset selects its staged profile. Bone count,
+                // hierarchy, and edges therefore follow that concrete asset
+                // instead of one fixed 28-index drawing. Candidate arrays are
+                // scored both as component-space and as parent-relative local
+                // transforms against invariant profile bone lengths.
+                EspNativePoseTransforms pose{};
+                sdk::FTransform mesh_transform{};
+                const bool pose_resolved = esp_native_component_pose(
+                        resolver.reflection,
+                        mesh,
+                        skeleton_contract,
+                        pose,
+                        pose_space);
+                if (skeleton_contract && skeleton_contract->profile)
+                {
+                    ++snapshot.pose_profile_matches;
+                }
+                if (pose_resolved &&
+                    skeleton_contract &&
+                    skeleton_contract->profile &&
+                    esp_native_component_transform(resolver.reflection, mesh, mesh_transform))
+                {
+                    pose_valid = true;
+                    for (int index = 0;
+                         index < skeleton_contract->profile->bone_count;
+                         ++index)
+                    {
+                        bones[static_cast<std::size_t>(index)] = mesh_first_transform_apply_point(
+                            mesh_transform,
+                            pose[static_cast<std::size_t>(index)].Translation);
+                    }
+                    snapshot.pose_bones += static_cast<std::uint32_t>(
+                        skeleton_contract->profile->bone_count);
+                    if (pose_space ==
+                        runtime_contract::EspPoseTransformSpace::Local)
+                    {
+                        ++snapshot.pose_local_space;
+                    }
+                    else if (pose_space ==
+                             runtime_contract::EspPoseTransformSpace::Component)
+                    {
+                        ++snapshot.pose_component_space;
+                    }
+                }
+            }
+            if (pose_valid)
+            {
+                ++snapshot.poses;
+            }
+            if (pose_valid)
+            {
+                double pose_left{};
+                double pose_top{};
+                double pose_right{};
+                double pose_bottom{};
+                if (esp_native_project_pose_bounds(
+                        view, *skeleton_contract, bones, width, height,
+                        pose_left, pose_top, pose_right, pose_bottom))
+                {
+                    left = pose_left;
+                    top = pose_top;
+                    right = pose_right;
+                    bottom = pose_bottom;
+                    box_valid = true;
+                }
+            }
+            if (draw_boxes && box_valid)
+            {
+                esp_native_add_corner_box(snapshot, left, top, right, bottom, color);
+                wrote = true;
+            }
+            if (draw_skeletons && pose_valid && skeleton_contract &&
+                skeleton_contract->profile)
+            {
+                for (const auto& bone : skeleton_contract->profile->bones)
+                {
+                    if (bone.index < 0 ||
+                        bone.index >= skeleton_contract->profile->bone_count ||
+                        bone.parent_index < 0 ||
+                        bone.parent_index >=
+                            skeleton_contract->profile->bone_count)
+                    {
+                        continue;
+                    }
+                    EspNativePoint start{};
+                    EspNativePoint end{};
+                    if (esp_native_project(
+                            view,
+                            bones[static_cast<std::size_t>(
+                                bone.parent_index)],
+                            width,
+                            height,
+                            start) &&
+                        esp_native_project(
+                            view,
+                            bones[static_cast<std::size_t>(bone.index)],
+                            width,
+                            height,
+                            end))
+                    {
+                        const bool edge_added = esp_native_add_line(
+                            snapshot, start, end, color, 1.5f);
+                        wrote |= edge_added;
+                        if (edge_added)
+                        {
+                            ++snapshot.pose_edges;
+                        }
+                    }
+                }
+            }
+            if (draw_snaplines && box_valid)
+            {
+                wrote |= esp_native_add_line(snapshot,
+                                              {static_cast<double>(width) / 2.0, static_cast<double>(height) - 2.0},
+                                              {(left + right) / 2.0, bottom}, color, 1.25f);
+            }
+            if ((draw_names || draw_distance) && box_valid)
+            {
+                std::wstring label{};
+                if (draw_names)
+                {
+                    (void)esp_native_display_name(target.name, label);
+                }
+                if (draw_distance)
+                {
+                    const auto origin = capsule_transform.Translation;
+                    const auto dx = origin.X - view.location.X;
+                    const auto dy = origin.Y - view.location.Y;
+                    const auto dz = origin.Z - view.location.Z;
+                    const auto meters = std::sqrt(dx * dx + dy * dy + dz * dz) / 100.0;
+                    if (std::isfinite(meters) && meters >= 0.0 && meters < 100000.0)
+                    {
+                        if (!label.empty()) label += L"  ";
+                        label += std::to_wstring(static_cast<long long>(std::llround(meters))) + L" m";
+                    }
+                }
+                if (!label.empty())
+                {
+                    wrote |= esp_native_add_text(snapshot, {(left + right) / 2.0, std::max(2.0, top - 20.0)}, label, color);
+                }
+            }
+            if (wrote)
+            {
+                ++snapshot.players;
+            }
+        }
+        const auto sequence = (token >> 1u) + 1u;
+        snapshot.sequence = sequence;
+        g_esp_native_snapshot_token.store((sequence << 1u) | target_slot, std::memory_order_release);
+        g_esp_native_snapshot_ready.store(true, std::memory_order_release);
+    }
+
+    void esp_native_present_snapshot_faulted()
+    {
+        esp_native_set_state(EspNativePresentState::Unavailable, "native game-thread ESP snapshot faulted");
+        g_esp_native_enabled.store(false, std::memory_order_release);
+    }
+
+    void esp_native_present_capture_snapshot(void* hud)
+    {
+        __try
+        {
+            esp_native_present_capture_snapshot_impl(hud);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            esp_native_present_snapshot_faulted();
+        }
+    }
+
+    auto esp_native_present_config_native(const std::string& request) -> std::string
+    {
+        const bool enabled = json_bool_field(request, "enabled", false);
+        if (enabled)
+        {
+            g_esp_native_skeleton_contract_count.store(
+                static_cast<std::uint64_t>(
+                    esp_native_skeleton_contracts().size()),
+                std::memory_order_release);
+        }
+        const bool force_rebind = json_bool_field(request, "force_rebind", false);
+        const bool boxes = json_bool_field(request, "boxes", true);
+        const bool skeletons = json_bool_field(request, "skeletons", true);
+        const bool names = json_bool_field(request, "names", true);
+        const bool distance = json_bool_field(request, "distance", true);
+        const bool snaplines = json_bool_field(request, "snaplines", true);
+        const auto scope_name = json_string_field(request, "scope", "all");
+        const auto channel = [&](const char* key, int fallback) {
+            return static_cast<std::uint32_t>(json_int_field(request, key, fallback, 0, 255));
+        };
+        const auto hider = (channel("hider_r", 0) << 16) | (channel("hider_g", 255) << 8) | channel("hider_b", 136);
+        const auto hunter = (channel("hunter_r", 255) << 16) | (channel("hunter_g", 0) << 8) | channel("hunter_b", 0);
+        const auto signature =
+            std::string(enabled ? "1|" : "0|") + scope_name +
+            "|" + (boxes ? "1" : "0") +
+            "|" + (skeletons ? "1" : "0") +
+            "|" + (names ? "1" : "0") +
+            "|" + (distance ? "1" : "0") +
+            "|" + (snaplines ? "1" : "0") +
+            "|" + std::to_string(hider) +
+            "|" + std::to_string(hunter);
+        bool same_configuration{};
+        {
+            std::lock_guard<std::mutex> lock(g_esp_native_config_mutex);
+            same_configuration = signature == g_esp_native_config_signature;
+        }
+        const auto current_state =
+            static_cast<EspNativePresentState>(g_esp_native_state.load(std::memory_order_acquire));
+        const bool active_configuration =
+            runtime_contract::esp_native_renderer_configuration_is_reusable(
+                enabled,
+                same_configuration,
+                g_esp_native_enabled.load(std::memory_order_acquire),
+                current_state == EspNativePresentState::Unavailable);
+        if (active_configuration)
+        {
+            if (force_rebind)
+            {
+                g_esp_native_hud_rebind_attempts.fetch_add(1, std::memory_order_relaxed);
+                const auto rebind_response = esp_hud_callback_probe_native();
+                if (!json_bool_field(rebind_response, "success", false))
+                {
+                    return response_json(false,
+                                         "esp_native_present_rebind_unavailable",
+                                         0,
+                                         1,
+                                         "Native Present ESP could not rebind the current DrawHUD callback");
+                }
+                g_esp_native_hud_rebind_successes.fetch_add(1, std::memory_order_relaxed);
+            }
+            return response_json(true,
+                                 "esp_native_present",
+                                 0,
+                                 0,
+                                 force_rebind
+                                     ? "Native Present ESP rebound the current HUD callback"
+                                     : "Native Present ESP configuration is unchanged",
+                                 "\"renderer\":\"d3d12_direct\",\"status\":\"" +
+                                     std::string(esp_native_state_name(current_state)) +
+                                     "\",\"idempotent\":true");
+        }
+
+        g_esp_native_boxes.store(boxes, std::memory_order_release);
+        g_esp_native_skeletons.store(skeletons, std::memory_order_release);
+        g_esp_native_names.store(names, std::memory_order_release);
+        g_esp_native_distance.store(distance, std::memory_order_release);
+        g_esp_native_snaplines.store(snaplines, std::memory_order_release);
+        g_esp_native_scope.store(static_cast<int>(esp_native_scope_from_name(
+                                     scope_name)), std::memory_order_release);
+        g_esp_native_hider_color.store(hider, std::memory_order_release);
+        g_esp_native_hunter_color.store(hunter, std::memory_order_release);
+        if (!enabled)
+        {
+            if (same_configuration && current_state == EspNativePresentState::Disabled)
+            {
+                return response_json(true,
+                                     "esp_native_present",
+                                     0,
+                                     0,
+                                     "Native Present ESP configuration is unchanged",
+                                     "\"renderer\":\"d3d12_direct\",\"status\":\"disabled\",\"idempotent\":true");
+            }
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            g_esp_native_snapshot_ready.store(false, std::memory_order_release);
+            g_esp_native_hud_rebind_pending.store(false, std::memory_order_release);
+            {
+                esp_native_uninstall_present_sync();
+                std::lock_guard<std::mutex> lock(g_esp_native_compositor_mutex);
+                esp_native_release_compositor_locked(g_esp_native_compositor, true);
+                esp_native_set_state(EspNativePresentState::Disabled, "disabled by configuration");
+            }
+            {
+                std::lock_guard<std::mutex> lock(g_esp_native_config_mutex);
+                g_esp_native_config_signature = signature;
+            }
+            return response_json(true, "esp_native_present", 0, 0, "Native Present ESP disabled",
+                                 "\"renderer\":\"d3d12_direct\",\"status\":\"disabled\"");
+        }
+        g_esp_native_renderer_faulted.store(false, std::memory_order_release);
+        g_esp_native_init_probe_active.store(true, std::memory_order_release);
+        std::string message_hook_failure{};
+        if (!g_message_hook.load(std::memory_order_acquire) &&
+            !install_process_event_hook(message_hook_failure))
+        {
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            esp_native_set_state(
+                EspNativePresentState::Unavailable,
+                "the game-thread HUD rebind route is unavailable: " + message_hook_failure);
+            return response_json(false,
+                                 "esp_native_present_rebind_route_unavailable",
+                                 0,
+                                 1,
+                                 "Native Present ESP requires the game-thread HUD rebind route");
+        }
+        const auto callback_response = esp_hud_callback_probe_native();
+        if (!json_bool_field(callback_response, "success", false) ||
+            !g_esp_hud_callback_target.load(std::memory_order_acquire) ||
+            !g_esp_hud_callback_function.load(std::memory_order_acquire))
+        {
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            esp_native_set_state(EspNativePresentState::Unavailable, "the game DrawHUD callback is unavailable");
+            return response_json(false, "esp_native_present_callback_unavailable", 0, 1,
+                                 "Native Present ESP requires the game DrawHUD callback");
+        }
+        esp_native_set_state(EspNativePresentState::Initializing, "installing D3D12 Present hooks");
+        if (!install_esp_present_sync())
+        {
+            g_esp_native_enabled.store(false, std::memory_order_release);
+            std::string reason{};
+            {
+                std::lock_guard<std::mutex> lock(g_esp_native_status_mutex);
+                reason = g_esp_native_reason;
+            }
+            if (reason.empty() || reason == "installing D3D12 Present hooks")
+            {
+                reason = "D3D12 Present/ExecuteCommandLists hook installation failed";
+                esp_native_set_state(EspNativePresentState::Unavailable, reason);
+            }
+            return response_json(false, "esp_native_present_unavailable", 0, 1, reason);
+        }
+        const auto now_ms = static_cast<std::uint64_t>(GetTickCount64());
+        g_esp_native_enabled_tick_ms.store(now_ms, std::memory_order_release);
+        g_esp_native_last_capture_tick_ms.store(0, std::memory_order_release);
+        g_esp_native_last_rebind_request_tick_ms.store(0, std::memory_order_release);
+        g_esp_native_hud_rebind_pending.store(false, std::memory_order_release);
+        g_esp_native_enabled.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(g_esp_native_config_mutex);
+            g_esp_native_config_signature = signature;
+        }
+        esp_native_set_state(EspNativePresentState::Initializing, "waiting for first game-thread snapshot and command queue");
+        return response_json(true, "esp_native_present", 0, 0, "Native Present ESP is initializing",
+                             "\"renderer\":\"d3d12_direct\",\"status\":\"initializing\",\"fallback\":false");
+    }
+
+    auto esp_native_present_probe_native(const std::string& request) -> std::string
+    {
+        if (!g_esp_native_enabled.load(std::memory_order_acquire))
+        {
+            return response_json(false,
+                                 "esp_native_present_probe_disabled",
+                                 0,
+                                 1,
+                                 "Native Present ESP must be enabled before arming the renderer probe");
+        }
+        const auto frames = static_cast<std::uint32_t>(
+            json_int_field(request, "frames", 120, 1, 120));
+        g_esp_native_probe_frames_remaining.store(frames, std::memory_order_release);
+        return response_json(true,
+                             "esp_native_present_probe",
+                             static_cast<int>(frames),
+                             0,
+                             "Native Present ESP fixed marker armed",
+                             "\"frames\":" + std::to_string(frames) +
+                                 ",\"max_frames\":120");
+    }
+
+    auto esp_native_present_status_native() -> std::string
+    {
+        std::string reason{};
+        std::string format{};
+        {
+            std::lock_guard<std::mutex> lock(g_esp_native_status_mutex);
+            reason = g_esp_native_reason;
+            format = g_esp_native_swapchain_format;
+        }
+        const auto state = static_cast<EspNativePresentState>(g_esp_native_state.load(std::memory_order_acquire));
+        const auto token = g_esp_native_snapshot_token.load(std::memory_order_acquire);
+        const auto sequence = g_esp_native_snapshot_ready.load(std::memory_order_acquire) ? token >> 1u : 0u;
+        const bool enabled = g_esp_native_enabled.load(std::memory_order_acquire);
+        const auto now_ms = static_cast<std::uint64_t>(GetTickCount64());
+        const auto capture_age_ms = enabled ? esp_native_capture_age_ms(now_ms) : 0;
+        const auto last_capture_ms =
+            g_esp_native_last_capture_tick_ms.load(std::memory_order_acquire);
+        const char* capture_status =
+            !enabled ? "disabled" :
+            last_capture_ms == 0 ? "waiting" :
+            capture_age_ms >= runtime_contract::EspHudCaptureStallMs ? "stalled" :
+            "active";
+        const auto diagnostics = esp_native_snapshot_diagnostics();
+        const char* roster_source =
+            diagnostics.roster_source == 1 ? "player_array" :
+            diagnostics.roster_source == 2 ? "role_roster_fallback" :
+            "unavailable";
+        return response_json(state != EspNativePresentState::Unavailable,
+                             "esp_native_present_status",
+                             static_cast<int>(std::min<std::uint64_t>(g_esp_native_rendered_frames.load(), INT_MAX)),
+                             state == EspNativePresentState::Unavailable ? 1 : 0,
+                             reason,
+                             "\"status\":\"" + std::string(esp_native_state_name(state)) + "\"" +
+                                 ",\"renderer\":\"d3d12_direct\"" +
+                                 ",\"swapchain_format\":\"" + json_escape(format) + "\"" +
+                                 ",\"snapshot_sequence\":" + std::to_string(sequence) +
+                                 ",\"capture_frames\":" + std::to_string(g_esp_native_capture_frames.load()) +
+                                 ",\"capture_age_ms\":" + std::to_string(capture_age_ms) +
+                                 ",\"capture_status\":\"" + capture_status + "\"" +
+                                 ",\"present_calls\":" + std::to_string(g_esp_native_present_calls.load()) +
+                                 ",\"hud_rebind_attempts\":" + std::to_string(g_esp_native_hud_rebind_attempts.load()) +
+                                 ",\"hud_rebinds\":" + std::to_string(g_esp_native_hud_rebind_successes.load()) +
+                                 ",\"roster_source\":\"" + roster_source + "\"" +
+                                 ",\"roster_count\":" + std::to_string(diagnostics.roster_count) +
+                                 ",\"valid_player_states\":" + std::to_string(diagnostics.valid_player_states) +
+                                 ",\"valid_pawns\":" + std::to_string(diagnostics.valid_pawns) +
+                                 ",\"filtered_local\":" + std::to_string(diagnostics.filtered_local) +
+                                 ",\"filtered_spectators\":" + std::to_string(diagnostics.filtered_spectators) +
+                                 ",\"filtered_scope\":" + std::to_string(diagnostics.filtered_scope) +
+                                 ",\"capsule_components\":" + std::to_string(diagnostics.capsule_components) +
+                                 ",\"capsule_transforms\":" + std::to_string(diagnostics.capsule_transforms) +
+                                 ",\"capsule_sizes\":" + std::to_string(diagnostics.capsule_sizes) +
+                                 ",\"capsule_projected\":" + std::to_string(diagnostics.capsule_projected) +
+                                 ",\"mesh_components\":" + std::to_string(diagnostics.mesh_components) +
+                                 ",\"skeleton_contracts\":" + std::to_string(g_esp_native_skeleton_contract_count.load()) +
+                                 ",\"pose_profile_matches\":" + std::to_string(diagnostics.pose_profile_matches) +
+                                 ",\"pose_component_space\":" + std::to_string(diagnostics.pose_component_space) +
+                                 ",\"pose_local_space\":" + std::to_string(diagnostics.pose_local_space) +
+                                 ",\"pose_bones\":" + std::to_string(diagnostics.pose_bones) +
+                                 ",\"pose_edges\":" + std::to_string(diagnostics.pose_edges) +
+                                 ",\"poses\":" + std::to_string(diagnostics.poses) +
+                                 ",\"players\":" + std::to_string(diagnostics.players) +
+                                 ",\"lines\":" + std::to_string(diagnostics.lines) +
+                                 ",\"texts\":" + std::to_string(diagnostics.texts) +
+                                 ",\"vertices\":" + std::to_string(g_esp_native_last_vertex_count.load()) +
+                                 ",\"glyph_quads\":" + std::to_string(g_esp_native_last_glyph_quads.load()) +
+                                 ",\"submitted_frames\":" + std::to_string(g_esp_native_submitted_frames.load()) +
+                                 ",\"completed_fences\":" + std::to_string(g_esp_native_completed_fences.load()) +
+                                 ",\"probe_frames_remaining\":" + std::to_string(g_esp_native_probe_frames_remaining.load()) +
+                                 ",\"probe_submitted_frames\":" + std::to_string(g_esp_native_probe_submitted_frames.load()) +
+                                 ",\"projection_scale_x\":" + std::to_string(g_esp_native_projection_scale_x.load()) +
+                                 ",\"projection_scale_y\":" + std::to_string(g_esp_native_projection_scale_y.load()) +
+                                 ",\"projection_calibrations\":" + std::to_string(g_esp_native_projection_calibrations.load()) +
+                                 ",\"rendered_frames\":" + std::to_string(g_esp_native_rendered_frames.load()) +
+                                 ",\"snapshot_drops\":" + std::to_string(g_esp_native_snapshot_drops.load()) +
+                                 ",\"external_overlay\":false");
+    }
+
+    auto esp_present_mutex_name(DWORD process_id) -> std::wstring
+    {
+        return L"Local\\MecchaEspPresentHook-" + std::to_wstring(process_id);
+    }
+
+    auto esp_resolve_game_window() -> HWND
+    {
+        struct Target
+        {
+            DWORD process_id{0};
+            HWND window{nullptr};
+        } target{GetCurrentProcessId(), nullptr};
+        EnumWindows(
+            [](HWND window, LPARAM parameter) -> BOOL {
+                auto* target = reinterpret_cast<Target*>(parameter);
+                DWORD owner_process = 0;
+                (void)GetWindowThreadProcessId(window, &owner_process);
+                if (owner_process == target->process_id && IsWindowVisible(window))
+                {
+                    target->window = window;
+                    return FALSE;
+                }
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&target));
+        return target.window;
+    }
+
+    HRESULT STDMETHODCALLTYPE esp_present_detour(IDXGISwapChain* swapchain, UINT sync_interval, UINT flags)
+    {
+        EspNativePresentHookCallbackScope callback_scope{};
+        const auto original = g_esp_present_original.load(std::memory_order_acquire);
+        if (!original)
+        {
+            return E_FAIL;
+        }
+
+        if ((flags & DXGI_PRESENT_TEST) == 0 && swapchain)
+        {
+            bool is_game_swapchain = swapchain == g_esp_present_swapchain.load(std::memory_order_acquire);
+            if (!is_game_swapchain)
+            {
+                HWND target = g_esp_present_window.load(std::memory_order_acquire);
+                if (!target || !IsWindow(target))
+                {
+                    target = esp_resolve_game_window();
+                    g_esp_present_window.store(target, std::memory_order_release);
+                }
+                DXGI_SWAP_CHAIN_DESC description{};
+                is_game_swapchain = target && SUCCEEDED(swapchain->GetDesc(&description)) &&
+                                   description.OutputWindow == target;
+                if (is_game_swapchain)
+                {
+                    g_esp_present_swapchain.store(swapchain, std::memory_order_release);
+                }
+            }
+            if (is_game_swapchain)
+            {
+                g_esp_native_present_calls.fetch_add(1, std::memory_order_relaxed);
+                post_esp_hud_rebind_if_stalled();
+                // The snapshot has already been completed on the game thread.
+                // Compose it into the current game backbuffer immediately
+                // before DXGI receives Present; this code never reaches into
+                // UObjects or invokes an external overlay renderer.
+                esp_native_render_snapshot_guarded(swapchain);
+            }
+        }
+        return original(swapchain, sync_interval, flags);
+    }
+
+    HRESULT STDMETHODCALLTYPE esp_resize_buffers_detour(IDXGISwapChain* swapchain,
+                                                         UINT buffer_count,
+                                                         UINT width,
+                                                         UINT height,
+                                                         DXGI_FORMAT format,
+                                                         UINT swapchain_flags)
+    {
+        EspNativePresentHookCallbackScope callback_scope{};
+        const auto original = g_esp_resize_buffers_original.load(std::memory_order_acquire);
+        if (!original)
+        {
+            return E_FAIL;
+        }
+        esp_native_prepare_resize(swapchain);
+        return original(swapchain, buffer_count, width, height, format, swapchain_flags);
+    }
+
+    HRESULT STDMETHODCALLTYPE esp_create_swapchain_detour(IDXGIFactory* factory,
+                                                           IUnknown* device_or_queue,
+                                                           DXGI_SWAP_CHAIN_DESC* description,
+                                                           IDXGISwapChain** swapchain)
+    {
+        EspNativePresentHookCallbackScope callback_scope{};
+        const auto original = g_esp_create_swapchain_original.load(std::memory_order_acquire);
+        if (!original) return E_FAIL;
+        const HRESULT result = original(factory, device_or_queue, description, swapchain);
+        if (SUCCEEDED(result) && swapchain && *swapchain)
+        {
+            esp_native_track_swapchain_queue(device_or_queue, *swapchain);
+        }
+        return result;
+    }
+
+    HRESULT STDMETHODCALLTYPE esp_create_swapchain_for_hwnd_detour(
+        IDXGIFactory2* factory, IUnknown* device_or_queue, HWND window,
+        const DXGI_SWAP_CHAIN_DESC1* description, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen,
+        IDXGIOutput* output, IDXGISwapChain1** swapchain)
+    {
+        EspNativePresentHookCallbackScope callback_scope{};
+        const auto original = g_esp_create_swapchain_for_hwnd_original.load(std::memory_order_acquire);
+        if (!original) return E_FAIL;
+        const HRESULT result = original(factory, device_or_queue, window, description, fullscreen, output, swapchain);
+        if (SUCCEEDED(result) && swapchain && *swapchain)
+        {
+            esp_native_track_swapchain_queue(device_or_queue, *swapchain);
+        }
+        return result;
+    }
+
+    HRESULT STDMETHODCALLTYPE esp_create_swapchain_for_core_window_detour(
+        IDXGIFactory2* factory, IUnknown* device_or_queue, IUnknown* window,
+        const DXGI_SWAP_CHAIN_DESC1* description, IDXGIOutput* output, IDXGISwapChain1** swapchain)
+    {
+        EspNativePresentHookCallbackScope callback_scope{};
+        const auto original = g_esp_create_swapchain_for_core_window_original.load(std::memory_order_acquire);
+        if (!original) return E_FAIL;
+        const HRESULT result = original(factory, device_or_queue, window, description, output, swapchain);
+        if (SUCCEEDED(result) && swapchain && *swapchain)
+        {
+            esp_native_track_swapchain_queue(device_or_queue, *swapchain);
+        }
+        return result;
+    }
+
+    HRESULT STDMETHODCALLTYPE esp_create_swapchain_for_composition_detour(
+        IDXGIFactory2* factory, IUnknown* device_or_queue, const DXGI_SWAP_CHAIN_DESC1* description,
+        IDXGIOutput* output, IDXGISwapChain1** swapchain)
+    {
+        EspNativePresentHookCallbackScope callback_scope{};
+        const auto original = g_esp_create_swapchain_for_composition_original.load(std::memory_order_acquire);
+        if (!original) return E_FAIL;
+        const HRESULT result = original(factory, device_or_queue, description, output, swapchain);
+        if (SUCCEEDED(result) && swapchain && *swapchain)
+        {
+            esp_native_track_swapchain_queue(device_or_queue, *swapchain);
+        }
+        return result;
+    }
+
+    void esp_native_uninstall_present_sync()
+    {
+        // The detours patch function prologues through MinHook and call the
+        // library-owned trampolines.  This is deliberately not a raw vtable
+        // chain: Steam and capture layers may dispatch through the vtable from
+        // inside their wrappers, where replacing a shared slot recurses.
+        const auto present_target = g_esp_present_target.load(std::memory_order_acquire);
+        const auto resize_target = g_esp_resize_buffers_target.load(std::memory_order_acquire);
+        const auto execute_target = g_esp_execute_target.load(std::memory_order_acquire);
+        const auto create_swapchain_target = g_esp_create_swapchain_target.load(std::memory_order_acquire);
+        const auto create_swapchain_for_hwnd_target = g_esp_create_swapchain_for_hwnd_target.load(std::memory_order_acquire);
+        const auto create_swapchain_for_core_window_target = g_esp_create_swapchain_for_core_window_target.load(std::memory_order_acquire);
+        const auto create_swapchain_for_composition_target = g_esp_create_swapchain_for_composition_target.load(std::memory_order_acquire);
+        if (g_esp_minhook_initialized.load(std::memory_order_acquire))
+        {
+            // Disable first. Waiting before this point races a new Present
+            // entry and was the source of non-repeatable reinjection teardown.
+            if (present_target) (void)MH_DisableHook(present_target);
+            if (resize_target) (void)MH_DisableHook(resize_target);
+            if (execute_target) (void)MH_DisableHook(execute_target);
+            if (create_swapchain_target) (void)MH_DisableHook(create_swapchain_target);
+            if (create_swapchain_for_hwnd_target) (void)MH_DisableHook(create_swapchain_for_hwnd_target);
+            if (create_swapchain_for_core_window_target) (void)MH_DisableHook(create_swapchain_for_core_window_target);
+            if (create_swapchain_for_composition_target) (void)MH_DisableHook(create_swapchain_for_composition_target);
+        }
+        for (int attempts = 0;
+             attempts < 50 && g_esp_present_hook_callbacks.load(std::memory_order_acquire) != 0;
+             ++attempts)
+        {
+            Sleep(10);
+        }
+        if (g_esp_minhook_initialized.load(std::memory_order_acquire))
+        {
+            if (present_target) (void)MH_RemoveHook(present_target);
+            if (resize_target) (void)MH_RemoveHook(resize_target);
+            if (execute_target) (void)MH_RemoveHook(execute_target);
+            if (create_swapchain_target) (void)MH_RemoveHook(create_swapchain_target);
+            if (create_swapchain_for_hwnd_target) (void)MH_RemoveHook(create_swapchain_for_hwnd_target);
+            if (create_swapchain_for_core_window_target) (void)MH_RemoveHook(create_swapchain_for_core_window_target);
+            if (create_swapchain_for_composition_target) (void)MH_RemoveHook(create_swapchain_for_composition_target);
+            (void)MH_Uninitialize();
+            g_esp_minhook_initialized.store(false, std::memory_order_release);
+        }
+
+        g_esp_present_sync_ready.store(false, std::memory_order_release);
+        g_esp_resize_hook_ready.store(false, std::memory_order_release);
+        g_esp_execute_hook_ready.store(false, std::memory_order_release);
+        g_esp_swapchain_factory_hooks_ready.store(false, std::memory_order_release);
+        g_esp_present_swapchain.store(nullptr, std::memory_order_release);
+        g_esp_present_target.store(nullptr, std::memory_order_release);
+        g_esp_resize_buffers_target.store(nullptr, std::memory_order_release);
+        g_esp_execute_target.store(nullptr, std::memory_order_release);
+        g_esp_create_swapchain_target.store(nullptr, std::memory_order_release);
+        g_esp_create_swapchain_for_hwnd_target.store(nullptr, std::memory_order_release);
+        g_esp_create_swapchain_for_core_window_target.store(nullptr, std::memory_order_release);
+        g_esp_create_swapchain_for_composition_target.store(nullptr, std::memory_order_release);
+        g_esp_create_swapchain_original.store(nullptr, std::memory_order_release);
+        g_esp_create_swapchain_for_hwnd_original.store(nullptr, std::memory_order_release);
+        g_esp_create_swapchain_for_core_window_original.store(nullptr, std::memory_order_release);
+        g_esp_create_swapchain_for_composition_original.store(nullptr, std::memory_order_release);
+        esp_native_clear_swapchain_queues();
+        esp_native_clear_present_thread_queues();
+        if (g_esp_present_hook_mutex)
+        {
+            CloseHandle(g_esp_present_hook_mutex);
+            g_esp_present_hook_mutex = nullptr;
+        }
+    }
+
+    auto esp_create_hidden_sync_window() -> HWND
+    {
+        static constexpr wchar_t class_name[] = L"MecchaEspPresentProbeWindow";
+        static std::atomic<ATOM> atom{0};
+        auto registered = atom.load(std::memory_order_acquire);
+        if (!registered)
+        {
+            WNDCLASSEXW window_class{};
+            window_class.cbSize = sizeof(window_class);
+            window_class.lpfnWndProc = DefWindowProcW;
+            window_class.hInstance = GetModuleHandleW(nullptr);
+            window_class.lpszClassName = class_name;
+            const auto created = RegisterClassExW(&window_class);
+            if (created)
+            {
+                atom.store(created, std::memory_order_release);
+            }
+            else if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+            {
+                return nullptr;
+            }
+        }
+        return CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            class_name,
+            class_name,
+            WS_OVERLAPPED,
+            0,
+            0,
+            1,
+            1,
+            nullptr,
+            nullptr,
+            GetModuleHandleW(nullptr),
+            nullptr);
+    }
+
+    auto install_esp_present_sync() -> bool
+    {
+        if (g_esp_present_sync_ready.load(std::memory_order_acquire) &&
+            g_esp_execute_hook_ready.load(std::memory_order_acquire) &&
+            g_esp_resize_hook_ready.load(std::memory_order_acquire) &&
+            g_esp_swapchain_factory_hooks_ready.load(std::memory_order_acquire))
+        {
+            return true;
+        }
+
+        g_esp_present_window.store(esp_resolve_game_window(), std::memory_order_release);
+
+        g_esp_present_hook_mutex = CreateMutexW(nullptr, FALSE, esp_present_mutex_name(GetCurrentProcessId()).c_str());
+        if (!g_esp_present_hook_mutex)
+        {
+            esp_native_set_state(EspNativePresentState::Unavailable, "CreateMutexW for Present hook failed");
+            return false;
+        }
+        const bool resident_present_hook = GetLastError() == ERROR_ALREADY_EXISTS;
+        if (resident_present_hook)
+        {
+            // The named mutex proves that a prior bridge owns a Present
+            // detour, but it cannot prove what other graphics layers (Steam,
+            // ReShade, capture software) that detour already chains. Raw
+            // vtable-to-vtable chaining can form a cycle through those layers
+            // and has caused stack overflows. Do not replace an unknown target.
+            CloseHandle(g_esp_present_hook_mutex);
+            g_esp_present_hook_mutex = nullptr;
+            esp_native_set_state(EspNativePresentState::Unavailable,
+                                 "an unknown resident Present detour is active; refusing to chain it safely");
+            return false;
+        }
+
+        const auto d3d12_module = GetModuleHandleW(L"d3d12.dll");
+        const auto dxgi_module = GetModuleHandleW(L"dxgi.dll");
+        if (!d3d12_module || !dxgi_module)
+        {
+            return false;
+        }
+        using D3D12CreateDeviceFn = HRESULT(WINAPI*)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
+        using CreateDXGIFactory2Fn = HRESULT(WINAPI*)(UINT, REFIID, void**);
+        const auto create_device = reinterpret_cast<D3D12CreateDeviceFn>(
+            GetProcAddress(d3d12_module, "D3D12CreateDevice"));
+        const auto create_factory = reinterpret_cast<CreateDXGIFactory2Fn>(
+            GetProcAddress(dxgi_module, "CreateDXGIFactory2"));
+        if (!create_device || !create_factory)
+        {
+            return false;
+        }
+
+        const auto window = esp_create_hidden_sync_window();
+        if (!window)
+        {
+            return false;
+        }
+        ID3D12Device* device = nullptr;
+        ID3D12CommandQueue* queue = nullptr;
+        IDXGIFactory2* factory = nullptr;
+        IDXGISwapChain1* swapchain = nullptr;
+        bool present_hook_created = false;
+        bool execute_hook_created = false;
+        bool resize_hook_created = false;
+        bool create_swapchain_hook_created = false;
+        bool create_swapchain_for_hwnd_hook_created = false;
+        bool create_swapchain_for_core_window_hook_created = false;
+        bool create_swapchain_for_composition_hook_created = false;
+        bool minhook_initialized = false;
+        void* present_target = nullptr;
+        void* resize_target = nullptr;
+        void* execute_target = nullptr;
+        void* create_swapchain_target = nullptr;
+        void* create_swapchain_for_hwnd_target = nullptr;
+        void* create_swapchain_for_core_window_target = nullptr;
+        void* create_swapchain_for_composition_target = nullptr;
+        DxgiPresentFn present_original = nullptr;
+        DxgiResizeBuffersFn resize_original = nullptr;
+        D3D12ExecuteCommandListsFn execute_original = nullptr;
+        DxgiCreateSwapChainFn create_swapchain_original = nullptr;
+        DxgiCreateSwapChainForHwndFn create_swapchain_for_hwnd_original = nullptr;
+        DxgiCreateSwapChainForCoreWindowFn create_swapchain_for_core_window_original = nullptr;
+        DxgiCreateSwapChainForCompositionFn create_swapchain_for_composition_original = nullptr;
+        do
+        {
+            if (FAILED(create_device(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
+                                     reinterpret_cast<void**>(&device))))
+            {
+                break;
+            }
+            D3D12_COMMAND_QUEUE_DESC queue_description{};
+            queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+            if (FAILED(device->CreateCommandQueue(&queue_description, __uuidof(ID3D12CommandQueue),
+                                                   reinterpret_cast<void**>(&queue))))
+            {
+                break;
+            }
+            if (FAILED(create_factory(0, __uuidof(IDXGIFactory2), reinterpret_cast<void**>(&factory))))
+            {
+                break;
+            }
+            DXGI_SWAP_CHAIN_DESC1 description{};
+            description.Width = 1;
+            description.Height = 1;
+            description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            description.SampleDesc.Count = 1;
+            description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            description.BufferCount = 2;
+            description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+            description.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+            if (FAILED(factory->CreateSwapChainForHwnd(queue, window, &description, nullptr, nullptr, &swapchain)))
+            {
+                break;
+            }
+            auto* vtable = *reinterpret_cast<void***>(swapchain);
+            auto* queue_vtable = *reinterpret_cast<void***>(queue);
+            auto* factory_vtable = *reinterpret_cast<void***>(factory);
+            // IDXGISwapChain::Present/ResizeBuffers and
+            // ID3D12CommandQueue::ExecuteCommandLists occupy slots 8/13/10.
+            // IDXGIFactory / IDXGIFactory2 CreateSwapChain* occupy slots
+            // 10/15/16/24.  Those calls supply the authoritative D3D12 queue
+            // used by a newly created swapchain.
+            if (!vtable || !vtable[8] || !vtable[13] || !queue_vtable || !queue_vtable[10] ||
+                !factory_vtable || !factory_vtable[10] || !factory_vtable[15] ||
+                !factory_vtable[16] || !factory_vtable[24])
+            {
+                break;
+            }
+            present_target = vtable[8];
+            resize_target = vtable[13];
+            execute_target = queue_vtable[10];
+            create_swapchain_target = factory_vtable[10];
+            create_swapchain_for_hwnd_target = factory_vtable[15];
+            create_swapchain_for_core_window_target = factory_vtable[16];
+            create_swapchain_for_composition_target = factory_vtable[24];
+            const auto initialize_status = MH_Initialize();
+            if (initialize_status != MH_OK && initialize_status != MH_ERROR_ALREADY_INITIALIZED)
+            {
+                esp_native_set_state(EspNativePresentState::Unavailable,
+                                     "MinHook initialization failed: " + std::to_string(initialize_status));
+                break;
+            }
+            minhook_initialized = true;
+            if (MH_CreateHook(create_swapchain_target,
+                              reinterpret_cast<void*>(&esp_create_swapchain_detour),
+                              reinterpret_cast<void**>(&create_swapchain_original)) != MH_OK)
+            {
+                break;
+            }
+            create_swapchain_hook_created = true;
+            if (MH_CreateHook(create_swapchain_for_hwnd_target,
+                              reinterpret_cast<void*>(&esp_create_swapchain_for_hwnd_detour),
+                              reinterpret_cast<void**>(&create_swapchain_for_hwnd_original)) != MH_OK)
+            {
+                break;
+            }
+            create_swapchain_for_hwnd_hook_created = true;
+            if (MH_CreateHook(create_swapchain_for_core_window_target,
+                              reinterpret_cast<void*>(&esp_create_swapchain_for_core_window_detour),
+                              reinterpret_cast<void**>(&create_swapchain_for_core_window_original)) != MH_OK)
+            {
+                break;
+            }
+            create_swapchain_for_core_window_hook_created = true;
+            if (MH_CreateHook(create_swapchain_for_composition_target,
+                              reinterpret_cast<void*>(&esp_create_swapchain_for_composition_detour),
+                              reinterpret_cast<void**>(&create_swapchain_for_composition_original)) != MH_OK)
+            {
+                break;
+            }
+            create_swapchain_for_composition_hook_created = true;
+            if (MH_CreateHook(execute_target,
+                              reinterpret_cast<void*>(&esp_execute_command_lists_detour),
+                              reinterpret_cast<void**>(&execute_original)) != MH_OK)
+            {
+                break;
+            }
+            execute_hook_created = true;
+            if (MH_CreateHook(resize_target,
+                              reinterpret_cast<void*>(&esp_resize_buffers_detour),
+                              reinterpret_cast<void**>(&resize_original)) != MH_OK)
+            {
+                break;
+            }
+            resize_hook_created = true;
+            if (MH_CreateHook(present_target,
+                              reinterpret_cast<void*>(&esp_present_detour),
+                              reinterpret_cast<void**>(&present_original)) != MH_OK)
+            {
+                break;
+            }
+            present_hook_created = true;
+            if (MH_QueueEnableHook(create_swapchain_target) != MH_OK ||
+                MH_QueueEnableHook(create_swapchain_for_hwnd_target) != MH_OK ||
+                MH_QueueEnableHook(create_swapchain_for_core_window_target) != MH_OK ||
+                MH_QueueEnableHook(create_swapchain_for_composition_target) != MH_OK ||
+                MH_QueueEnableHook(execute_target) != MH_OK ||
+                MH_QueueEnableHook(resize_target) != MH_OK ||
+                MH_QueueEnableHook(present_target) != MH_OK ||
+                MH_ApplyQueued() != MH_OK)
+            {
+                break;
+            }
+        } while (false);
+
+        if (!present_hook_created || !execute_hook_created || !resize_hook_created ||
+            !create_swapchain_hook_created || !create_swapchain_for_hwnd_hook_created ||
+            !create_swapchain_for_core_window_hook_created || !create_swapchain_for_composition_hook_created)
+        {
+            if (minhook_initialized)
+            {
+                if (create_swapchain_for_composition_hook_created) (void)MH_DisableHook(create_swapchain_for_composition_target);
+                if (create_swapchain_for_core_window_hook_created) (void)MH_DisableHook(create_swapchain_for_core_window_target);
+                if (create_swapchain_for_hwnd_hook_created) (void)MH_DisableHook(create_swapchain_for_hwnd_target);
+                if (create_swapchain_hook_created) (void)MH_DisableHook(create_swapchain_target);
+                if (present_hook_created) (void)MH_DisableHook(present_target);
+                if (resize_hook_created) (void)MH_DisableHook(resize_target);
+                if (execute_hook_created) (void)MH_DisableHook(execute_target);
+                if (create_swapchain_for_composition_hook_created) (void)MH_RemoveHook(create_swapchain_for_composition_target);
+                if (create_swapchain_for_core_window_hook_created) (void)MH_RemoveHook(create_swapchain_for_core_window_target);
+                if (create_swapchain_for_hwnd_hook_created) (void)MH_RemoveHook(create_swapchain_for_hwnd_target);
+                if (create_swapchain_hook_created) (void)MH_RemoveHook(create_swapchain_target);
+                if (present_hook_created) (void)MH_RemoveHook(present_target);
+                if (resize_hook_created) (void)MH_RemoveHook(resize_target);
+                if (execute_hook_created) (void)MH_RemoveHook(execute_target);
+                (void)MH_Uninitialize();
+            }
+            g_esp_resize_hook_ready.store(false, std::memory_order_release);
+            g_esp_execute_hook_ready.store(false, std::memory_order_release);
+            g_esp_swapchain_factory_hooks_ready.store(false, std::memory_order_release);
+            g_esp_present_sync_ready.store(false, std::memory_order_release);
+            if (swapchain) swapchain->Release();
+            if (factory) factory->Release();
+            if (queue) queue->Release();
+            if (device) device->Release();
+            DestroyWindow(window);
+            if (g_esp_native_state.load(std::memory_order_acquire) != static_cast<int>(EspNativePresentState::Unavailable))
+            {
+                esp_native_set_state(EspNativePresentState::Unavailable,
+                                     "MinHook could not create a safe Present/Resize/Execute detour");
+            }
+            return false;
+        }
+        g_esp_present_original.store(present_original, std::memory_order_release);
+        g_esp_resize_buffers_original.store(resize_original, std::memory_order_release);
+        g_esp_execute_original.store(execute_original, std::memory_order_release);
+        g_esp_create_swapchain_original.store(create_swapchain_original, std::memory_order_release);
+        g_esp_create_swapchain_for_hwnd_original.store(create_swapchain_for_hwnd_original, std::memory_order_release);
+        g_esp_create_swapchain_for_core_window_original.store(create_swapchain_for_core_window_original, std::memory_order_release);
+        g_esp_create_swapchain_for_composition_original.store(create_swapchain_for_composition_original, std::memory_order_release);
+        g_esp_present_target.store(present_target, std::memory_order_release);
+        g_esp_resize_buffers_target.store(resize_target, std::memory_order_release);
+        g_esp_execute_target.store(execute_target, std::memory_order_release);
+        g_esp_create_swapchain_target.store(create_swapchain_target, std::memory_order_release);
+        g_esp_create_swapchain_for_hwnd_target.store(create_swapchain_for_hwnd_target, std::memory_order_release);
+        g_esp_create_swapchain_for_core_window_target.store(create_swapchain_for_core_window_target, std::memory_order_release);
+        g_esp_create_swapchain_for_composition_target.store(create_swapchain_for_composition_target, std::memory_order_release);
+        g_esp_minhook_initialized.store(true, std::memory_order_release);
+        if (swapchain) swapchain->Release();
+        if (factory) factory->Release();
+        if (queue) queue->Release();
+        if (device) device->Release();
+        DestroyWindow(window);
+        g_esp_execute_hook_ready.store(true, std::memory_order_release);
+        g_esp_resize_hook_ready.store(true, std::memory_order_release);
+        g_esp_swapchain_factory_hooks_ready.store(true, std::memory_order_release);
+        g_esp_present_sync_ready.store(true, std::memory_order_release);
+        return true;
+    }
+
+    auto bridge_resident_core_mapping_name(DWORD process_id) -> std::wstring
+    {
+        return L"Local\\MecchaCamouflage.ResidentCore." + std::to_wstring(process_id);
+    }
+
+    auto publish_bridge_resident_core() -> bool
+    {
+        if (g_bridge_resident_core_mapping || g_bridge_resident_core_view ||
+            g_bound_port.load(std::memory_order_acquire) == 0)
+        {
+            return g_bridge_resident_core_mapping && g_bridge_resident_core_view;
+        }
+        const auto name = bridge_resident_core_mapping_name(GetCurrentProcessId());
+        const HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE,
+                                                  nullptr,
+                                                  PAGE_READWRITE,
+                                                  0,
+                                                  static_cast<DWORD>(sizeof(BridgeResidentCoreV1)),
+                                                  name.c_str());
+        if (!mapping || GetLastError() == ERROR_ALREADY_EXISTS)
+        {
+            if (mapping) CloseHandle(mapping);
+            return false;
+        }
+        void* const view = MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, sizeof(BridgeResidentCoreV1));
+        if (!view)
+        {
+            CloseHandle(mapping);
+            return false;
+        }
+        BridgeResidentCoreV1 core{};
+        core.size = sizeof(core);
+        core.pid = GetCurrentProcessId();
+        core.port = g_bound_port.load(std::memory_order_acquire);
+        std::memcpy(core.instance_guid, g_bridge_identity.instance_guid, sizeof(core.instance_guid));
+        std::memcpy(core.token, g_bridge_identity.token, sizeof(core.token));
+        std::memcpy(core.sha256, g_bridge_identity.sha256, sizeof(core.sha256));
+        std::memcpy(view, &core, sizeof(core));
+        FlushViewOfFile(view, sizeof(core));
+        g_bridge_resident_core_mapping = mapping;
+        g_bridge_resident_core_view = view;
+        return true;
+    }
+
+    void unpublish_bridge_resident_core()
+    {
+        if (g_bridge_resident_core_view)
+        {
+            UnmapViewOfFile(g_bridge_resident_core_view);
+            g_bridge_resident_core_view = nullptr;
+        }
+        if (g_bridge_resident_core_mapping)
+        {
+            CloseHandle(g_bridge_resident_core_mapping);
+            g_bridge_resident_core_mapping = nullptr;
+        }
+    }
+
     auto valid_hello(const std::string& request) -> bool
     {
         return g_bridge_started.load(std::memory_order_acquire) &&
@@ -18381,6 +23757,30 @@ namespace
         // Stop and join the writer before a later same-module start can publish a
         // new identity.  The writer snapshots that identity by value, so no old
         // generation can wake and overwrite the new artifact.
+        // The module may remain resident in the game after the host disconnects
+        // (the injector intentionally does not unload a live DLL).  Make the
+        // Present detours inert before the ProcessEvent hook is removed so a
+        // stale snapshot can never be composed after shutdown.
+        g_esp_native_enabled.store(false, std::memory_order_release);
+        g_esp_native_snapshot_ready.store(false, std::memory_order_release);
+        g_esp_native_hud_rebind_pending.store(false, std::memory_order_release);
+        g_esp_native_probe_frames_remaining.store(0, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> config_lock(g_esp_native_config_mutex);
+            g_esp_native_config_signature.clear();
+        }
+        {
+            // Disable detours first, then wait for the callbacks they already
+            // admitted before releasing native D3D12 objects. This makes a
+            // normal GUI close/reinject a clean handoff rather than a graphics
+            // layer stacked over a resident trampoline.
+            esp_native_uninstall_present_sync();
+            {
+                std::lock_guard<std::mutex> compositor_lock(g_esp_native_compositor_mutex);
+                esp_native_release_compositor_locked(g_esp_native_compositor, true);
+            }
+            esp_native_set_state(EspNativePresentState::Disabled, "bridge shutdown");
+        }
         g_accepting_bridge_commands.store(false, std::memory_order_release);
         // A paint TCP handler may have passed its first admission check but not
         // yet created a QueuedPaintJob. Latch that in-flight admission before
@@ -18401,7 +23801,7 @@ namespace
     auto handle_request(const std::string& line) -> std::string
     {
         const std::string request_type = json_string_field(line, "type", "");
-        const bool lifecycle_control = request_type == "cancel_paint" || request_type == "shutdown";
+        const bool lifecycle_control = request_type == "cancel_paint" || request_type == "detach" || request_type == "shutdown";
         if (!lifecycle_control && !g_accepting_bridge_commands.load(std::memory_order_acquire))
         {
             return response_json(false,
@@ -18422,7 +23822,7 @@ namespace
         }
         if (line.find("\"type\":\"capabilities\"") != std::string::npos)
         {
-            std::string commands = "[\"ping\",\"capabilities\",\"paint_full_route\",\"image_guide\",\"cancel_paint\",\"shutdown\"]";
+            std::string commands = "[\"ping\",\"capabilities\",\"esp_native_present\",\"esp_native_present_status\",\"esp_native_present_probe\",\"paint_full_route\",\"image_guide\",\"cancel_paint\",\"detach\",\"shutdown\"]";
             return std::string("{\"success\":true,\"stage\":\"capabilities\",\"applied\":0,\"failures\":0,") +
                    "\"message\":\"ok\",\"timing_ms\":{}," +
                    "\"metadata\":{\"commands\":" + commands + "," +
@@ -18455,6 +23855,15 @@ namespace
                                      std::string(json_bool(
                                          g_paint_request_admission_state.load(std::memory_order_acquire) !=
                                          static_cast<int>(PaintRequestAdmissionState::Idle))));
+        }
+        if (request_type == "detach")
+        {
+            return response_json(true,
+                                 "detach",
+                                 0,
+                                 0,
+                                 "bridge host detached; resident core remains available",
+                                 "\"resident_core\":true");
         }
         if (line.find("\"type\":\"shutdown\"") != std::string::npos)
         {
@@ -18511,6 +23920,18 @@ namespace
                                      std::string(json_bool(paint_request_was_in_progress)) +
                                      ",\"active_paint_quiescent\":true" +
                                      ",\"hook_callbacks_quiescent\":true");
+        }
+        if (request_type == "esp_native_present")
+        {
+            return esp_native_present_config_native(line);
+        }
+        if (request_type == "esp_native_present_status")
+        {
+            return esp_native_present_status_native();
+        }
+        if (request_type == "esp_native_present_probe")
+        {
+            return esp_native_present_probe_native(line);
         }
         if (line.find("\"type\":\"paint_full_route\"") != std::string::npos)
         {
@@ -18646,6 +24067,7 @@ namespace
         {
             std::lock_guard<std::mutex> start_lock(g_bridge_start_mutex);
             g_bound_port.store(0);
+            unpublish_bridge_resident_core();
             if (g_bridge_state.load() != BRIDGE_RUNTIME_FAILED)
             {
                 g_bridge_state.store(BRIDGE_RUNTIME_STOPPED);
@@ -18820,8 +24242,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI BridgeStartV1(void* remote_block)
     }
 
     g_bridge_identity = input;
+    // Do not install graphics hooks merely by connecting the bridge.  ESP
+    // explicitly requests them after the host has selected the native path;
+    // this avoids touching a live game's Present chain while ESP is disabled.
     g_bound_port.store(port);
     g_listener.store(listener);
+    (void)publish_bridge_resident_core();
     g_bridge_last_win32.store(0);
     g_bridge_state.store(BRIDGE_RUNTIME_LISTENING);
     g_bridge_thread_done.store(false);

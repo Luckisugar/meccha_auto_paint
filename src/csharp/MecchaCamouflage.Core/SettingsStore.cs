@@ -57,6 +57,23 @@ public sealed class SettingsStore
         settings.ImageStopHotkey = ReadString(root, "image_stop_hotkey", settings.ImageStopHotkey);
         settings.ActiveImageDesignId = ReadString(root, "active_image_design_id", settings.ActiveImageDesignId);
         settings.LogRetentionDays = ReadInt(root, "log_retention_days", settings.LogRetentionDays);
+        settings.Esp.Enabled = ReadBool(root, "esp_enabled", settings.Esp.Enabled);
+        settings.Esp.TargetScope = NormalizeEspTargetScope(ReadString(root, "esp_target_scope", settings.Esp.TargetScope));
+        settings.Esp.Boxes = ReadBool(root, "esp_boxes", settings.Esp.Boxes);
+        settings.Esp.Skeletons = ReadBool(root, "esp_skeletons", settings.Esp.Skeletons);
+        settings.Esp.Names = ReadBool(root, "esp_names", settings.Esp.Names);
+        settings.Esp.Distance = ReadBool(root, "esp_distance", settings.Esp.Distance);
+        settings.Esp.Snaplines = ReadBool(root, "esp_snaplines", settings.Esp.Snaplines);
+        var hiderColorText = root.ContainsKey("esp_hider_color")
+            ? ReadString(root, "esp_hider_color", settings.Esp.HiderColor.ToHex())
+            : ReadString(root, "esp_color", settings.Esp.HiderColor.ToHex());
+        if (RgbColor.TryParse(hiderColorText, out var hiderColor))
+            settings.Esp.HiderColor = hiderColor;
+        var hunterColorText = root.ContainsKey("esp_hunter_color")
+            ? ReadString(root, "esp_hunter_color", settings.Esp.HunterColor.ToHex())
+            : ReadString(root, "esp_enemy_color", settings.Esp.HunterColor.ToHex());
+        if (RgbColor.TryParse(hunterColorText, out var hunterColor))
+            settings.Esp.HunterColor = hunterColor;
 
         if (root.TryGetPropertyValue("image", out var imageNode) && imageNode is JsonObject)
         {
@@ -168,6 +185,8 @@ public sealed class SettingsStore
         settings.Paint.FillEmissive = Math.Clamp(settings.Paint.FillEmissive, 0.0, 1.0);
         settings.Paint.ColorCompressionTolerance = Math.Clamp(settings.Paint.ColorCompressionTolerance, 0.0, 10.0);
         settings.Image ??= new ImagePaintSettings();
+        settings.Esp ??= new EspSettings();
+        settings.Esp.TargetScope = NormalizeEspTargetScope(settings.Esp.TargetScope);
         settings.Image.ClampDraft();
         if (settings.Image.Enabled && !settings.Image.TryValidate(out _))
             settings.Image = new ImagePaintSettings();
@@ -196,6 +215,15 @@ public sealed class SettingsStore
         image_unpreview_hotkey = settings.ImageUnPreviewHotkey,
         image_stop_hotkey = settings.ImageStopHotkey,
         active_image_design_id = settings.ActiveImageDesignId,
+        esp_enabled = settings.Esp.Enabled,
+        esp_target_scope = settings.Esp.TargetScope,
+        esp_boxes = settings.Esp.Boxes,
+        esp_skeletons = settings.Esp.Skeletons,
+        esp_names = settings.Esp.Names,
+        esp_distance = settings.Esp.Distance,
+        esp_snaplines = settings.Esp.Snaplines,
+        esp_hider_color = settings.Esp.HiderColor.ToHex(),
+        esp_hunter_color = settings.Esp.HunterColor.ToHex(),
         brush_size_texels = settings.Paint.BrushSizeTexels,
         side_source_max_uv = settings.Paint.SideSourceMaxUv,
         front_back_source_max_uv = settings.Paint.FrontBackSourceMaxUv,
@@ -212,6 +240,14 @@ public sealed class SettingsStore
         fill_emissive = settings.Paint.FillEmissive,
         color_compression_tolerance = settings.Paint.ColorCompressionTolerance
     };
+
+    private static string NormalizeEspTargetScope(string? value) =>
+        value?.Trim().ToLowerInvariant() switch
+        {
+            "hider" => "hider",
+            "hunter" => "hunter",
+            _ => "all"
+        };
 
     public static string RegionModeText(RegionMode mode) => mode switch
     {

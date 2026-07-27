@@ -254,7 +254,12 @@ elseif (-not [System.IO.Path]::IsPathRooted($OutDir)) {
     $OutDir = Join-Path $RuntimeRoot $OutDir
 }
 $OutDir = [System.IO.Path]::GetFullPath($OutDir)
-$ObjDir = Join-Path $RuntimeRoot ".build\obj"
+# The game can retain the currently injected bridge DLL for its entire
+# lifetime.  Never reuse that package-native directory for a new development
+# build: clearing a fixed path would fail while the game is still running and
+# would unnecessarily force a game restart just to rebuild the GUI.
+$SafeVersion = $Version -replace '[^A-Za-z0-9._-]', '_'
+$ObjDir = Join-Path (Join-Path $RuntimeRoot ".build\obj") $SafeVersion
 $DotNetArtifactRoot = Join-Path $RuntimeRoot ".build\dotnet-windows"
 $NativePackageDir = Join-Path $ObjDir "package-native"
 $WebView2EvergreenBootstrapperUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
@@ -263,6 +268,14 @@ $WebView2BootstrapperCacheRoot = Join-Path $RuntimeRoot ".build\cache\webview2\e
 $BridgeSource = Join-Path $RuntimeRoot "src\native\bridge\bridge.cpp"
 $InjectorSource = Join-Path $RuntimeRoot "src\native\injector\injector.cpp"
 $TransformValidationTestSource = Join-Path $RuntimeRoot "src\native\tests\transform_validation_test.cpp"
+$MinHookRoot = Join-Path $RuntimeRoot "third_party\minhook"
+$MinHookIncludeDir = Join-Path $MinHookRoot "include"
+$MinHookSources = @(
+    (Join-Path $MinHookRoot "src\buffer.c"),
+    (Join-Path $MinHookRoot "src\hook.c"),
+    (Join-Path $MinHookRoot "src\trampoline.c"),
+    (Join-Path $MinHookRoot "src\hde\hde64.c")
+)
 $WebHostProject = Join-Path $RuntimeRoot "src\csharp\MecchaCamouflage.WebHost\MecchaCamouflage.WebHost.csproj"
 $TestsProject = Join-Path $RuntimeRoot "src\csharp\MecchaCamouflage.Tests\MecchaCamouflage.Tests.csproj"
 $MeshProfilesSourceDir = Join-Path $RuntimeRoot "resources\mesh-profiles"
@@ -270,6 +283,11 @@ $MeshProfilesSourceDir = Join-Path $RuntimeRoot "resources\mesh-profiles"
 foreach ($path in @($BridgeSource, $InjectorSource, $TransformValidationTestSource, $WebHostProject, $TestsProject)) {
     if (-not (Test-Path $path -PathType Leaf)) {
         throw "Required source not found: $path"
+    }
+}
+foreach ($path in @($MinHookIncludeDir) + $MinHookSources) {
+    if (-not (Test-Path $path)) {
+        throw "Required MinHook source not found: $path"
     }
 }
 if (-not (Test-Path $MeshProfilesSourceDir -PathType Container)) {
@@ -289,7 +307,12 @@ Push-Location $RuntimeRoot
 try {
     Invoke-BuildStep -Name "run C# tests" -ScriptBlock {
         Invoke-DotNet -Arguments @(
-            "build", $TestsProject, "-c", "Release", "--no-incremental",
+            # Project-reference outputs live on the WSL UNC share when this
+            # script is invoked through make.  A parallel graph can make a
+            # dependent project observe the DLL/PDB before the share has made
+            # the producer's final rename visible.  Keep this small graph
+            # serial so every make build is deterministic.
+            "build", $TestsProject, "-c", "Release", "--maxcpucount:1", "--no-incremental",
             "/p:MecchaDotNetArtifactRoot=$DotNetArtifactRoot"
         )
         Invoke-DotNet -Arguments @(
@@ -314,10 +337,29 @@ try {
     $BridgeOutput = Join-Path $NativePackageDir "runtime-bridge.dll"
     $InjectorOutput = Join-Path $NativePackageDir "runtime-injector.exe"
     Invoke-BuildStep -Name "compile native bridge" -ScriptBlock {
+        foreach ($source in $MinHookSources) {
+            $object = Join-Path $ObjDir (([System.IO.Path]::GetFileNameWithoutExtension($source)) + ".obj")
+            Invoke-VsToolCommand -ToolName "cl.exe" -ToolArgs @(
+                "/nologo", "/std:c17", "/O2", "/TC", "/c", $source,
+                "/Fo:$object"
+            )
+        }
+        # Keep the linker inputs explicit.  Passing a nested PowerShell array
+        # through the VS command wrapper can stringify one entry as `.obj` on
+        # UNC-backed make builds.
+        $MinHookBufferObject = Join-Path $ObjDir "buffer.obj"
+        $MinHookHookObject = Join-Path $ObjDir "hook.obj"
+        $MinHookTrampolineObject = Join-Path $ObjDir "trampoline.obj"
+        $MinHookHdeObject = Join-Path $ObjDir "hde64.obj"
         Invoke-VsToolCommand -ToolName "cl.exe" -ToolArgs @(
             "/nologo", "/std:c++17", "/EHsc", "/O2", "/LD", $BridgeSource,
+            "/I$MinHookIncludeDir",
             "/Fo:$(Join-Path $ObjDir 'bridge.obj')",
             "/Fe:$BridgeOutput",
+            $MinHookBufferObject,
+            $MinHookHookObject,
+            $MinHookTrampolineObject,
+            $MinHookHdeObject,
             "Ws2_32.lib",
             "User32.lib",
             "/link",
@@ -341,7 +383,7 @@ try {
         throw "Injector EXE was not produced: $InjectorOutput"
     }
     Invoke-BuildStep -Name "check native dependencies" -ScriptBlock {
-        Assert-NativeDependencyAllowList -Path $BridgeOutput -Allowed @("KERNEL32.dll", "USER32.dll", "WS2_32.dll") -Label "runtime-bridge.dll"
+        Assert-NativeDependencyAllowList -Path $BridgeOutput -Allowed @("KERNEL32.dll", "USER32.dll", "WS2_32.dll", "D3D11.dll", "D2D1.dll", "DWrite.dll") -Label "runtime-bridge.dll"
     }
 
     $MeshProfiles = @(Get-ChildItem -Path $MeshProfilesSourceDir -Filter "*.json" -File)
@@ -353,6 +395,7 @@ try {
         $publishArgs = @(
             "publish", $WebHostProject,
             "-c", "Release",
+            "--maxcpucount:1",
             "-r", "win-x64",
             "--self-contained", "true",
             "-o", $OutDir,

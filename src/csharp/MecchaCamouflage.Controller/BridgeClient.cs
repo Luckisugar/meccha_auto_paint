@@ -79,6 +79,9 @@ public sealed class BridgeClient
     public Task<BridgeReply> ShutdownAsync(CancellationToken cancellationToken = default) =>
         RequestAsync("{\"type\":\"shutdown\"}", cancellationToken, TimeSpan.FromSeconds(10));
 
+    public Task<BridgeReply> DetachAsync(CancellationToken cancellationToken = default) =>
+        RequestAsync("{\"type\":\"detach\"}", cancellationToken, TimeSpan.FromSeconds(5));
+
     private static async Task WriteLineAsync(NetworkStream stream, string line, CancellationToken cancellationToken)
     {
         var value = line.EndsWith('\n') ? line : line + "\n";

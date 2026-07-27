@@ -1,7 +1,10 @@
 using System.ComponentModel;
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO.MemoryMappedFiles;
 using System.Security.Cryptography;
+using System.Text.Json;
 using MecchaCamouflage.Core;
 
 namespace MecchaCamouflage.Controller;
@@ -66,6 +69,9 @@ public static class ResearchBridgeArtifacts
 public sealed class RuntimeBridgeService
 {
     public static readonly TimeSpan BridgeProbeTimeout = TimeSpan.FromMilliseconds(300);
+    private const uint ResidentCoreMagic = 0x3152434D; // "MCR1"
+    private const uint ResidentCoreAbi = 1;
+    private const int ResidentCoreSize = 104;
 
     private readonly AppPaths paths;
     private readonly RuntimeLog log;
@@ -118,6 +124,16 @@ public sealed class RuntimeBridgeService
         }
     }
 
+    /// <summary>Identifies the currently connected, uniquely staged bridge instance.</summary>
+    public Guid? ActiveBridgeInstanceId
+    {
+        get
+        {
+            lock (bridgeStateGate)
+                return activeInstance?.InstanceId;
+        }
+    }
+
     public ResearchBridgeIdentity? ActiveResearchBridgeIdentity
     {
         get
@@ -155,6 +171,69 @@ public sealed class RuntimeBridgeService
 
     public Task<BridgeReply> SendPaintAsync(string payload, CancellationToken cancellationToken = default) =>
         RequestActiveAsync(client => client.RequestAsync(payload, cancellationToken));
+
+    /// <summary>
+    /// Configures the in-process D3D12 Present compositor. The host supplies
+    /// settings only; it never reads game memory or owns an overlay window.
+    /// </summary>
+    public Task<BridgeReply> ConfigureNativePresentEspAsync(
+        EspSettings settings,
+        CancellationToken cancellationToken = default) =>
+        ConfigureNativePresentEspAsync(
+            settings, forceRebind: false, cancellationToken: cancellationToken);
+
+    public Task<BridgeReply> ConfigureNativePresentEspAsync(
+        EspSettings settings,
+        bool forceRebind,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        var payload = JsonSerializer.Serialize(new
+        {
+            type = "esp_native_present",
+            enabled = settings.Enabled,
+            scope = settings.TargetScope,
+            boxes = settings.Boxes,
+            skeletons = settings.Skeletons,
+            names = settings.Names,
+            distance = settings.Distance,
+            snaplines = settings.Snaplines,
+            hider_r = settings.HiderColor.R,
+            hider_g = settings.HiderColor.G,
+            hider_b = settings.HiderColor.B,
+            hunter_r = settings.HunterColor.R,
+            hunter_g = settings.HunterColor.G,
+            hunter_b = settings.HunterColor.B,
+            force_rebind = forceRebind
+        });
+        return RequestActiveAsync(client => client.RequestAsync(
+            payload,
+            cancellationToken,
+            TimeSpan.FromSeconds(2)));
+    }
+
+    public Task<BridgeReply> ArmNativePresentEspProbeAsync(
+        int frames = 120,
+        CancellationToken cancellationToken = default)
+    {
+        if (frames is < 1 or > 120)
+            throw new ArgumentOutOfRangeException(nameof(frames));
+        var payload = JsonSerializer.Serialize(new
+        {
+            type = "esp_native_present_probe",
+            frames
+        });
+        return RequestActiveAsync(client => client.RequestAsync(
+            payload,
+            cancellationToken,
+            TimeSpan.FromSeconds(2)));
+    }
+
+    public Task<BridgeReply> GetNativePresentEspStatusAsync(CancellationToken cancellationToken = default) =>
+        RequestActiveAsync(client => client.RequestAsync(
+            "{\"type\":\"esp_native_present_status\"}",
+            cancellationToken,
+            TimeSpan.FromMilliseconds(500)));
 
     /// <summary>
     /// Sends one whitelisted, authenticated research request through the controller-owned bridge.
@@ -200,6 +279,28 @@ public sealed class RuntimeBridgeService
     public async Task<BridgeReply> ShutdownAsync(CancellationToken cancellationToken = default)
     {
         var result = await RequestActiveWithInstanceAsync(client => client.ShutdownAsync(cancellationToken));
+        if (result.Reply.Ok && result.Reply.Success)
+        {
+            lock (bridgeStateGate)
+            {
+                if (ReferenceEquals(activeInstance, result.Instance))
+                {
+                    bridgeConnected = false;
+                    activeInstance = null;
+                }
+            }
+        }
+        return result.Reply;
+    }
+
+    /// <summary>
+    /// Releases this host's connection but intentionally leaves the process-resident native
+    /// graphics core alive. A later GUI discovers and authenticates to that same core rather
+    /// than stacking another Present hook over a live game.
+    /// </summary>
+    public async Task<BridgeReply> DetachAsync(CancellationToken cancellationToken = default)
+    {
+        var result = await RequestActiveWithInstanceAsync(client => client.DetachAsync(cancellationToken));
         if (result.Reply.Ok && result.Reply.Success)
         {
             lock (bridgeStateGate)
@@ -324,7 +425,82 @@ public sealed class RuntimeBridgeService
             MarkDisconnectedIfCurrent(matchingInstance);
         }
 
+        var resident = TryAttachResidentCore(target);
+        if (resident is not null)
+        {
+            lock (bridgeStateGate)
+            {
+                activeInstance = resident;
+                bridgeConnected = false;
+            }
+            var ping = await PingAsync(cancellationToken, BridgeProbeTimeout);
+            if (IsBridgeReadyForInstance(ping, resident))
+            {
+                bridgeReadyTimeoutLogged = false;
+                return RestoreConnectedState(resident);
+            }
+            // A published core is either still bootstrapping or is otherwise
+            // unhealthy. Do not inject another graphics owner on top of it.
+            MarkDisconnectedIfCurrent(resident);
+            return false;
+        }
+
         return await InjectDirectInstanceAsync(target, null, cancellationToken);
+    }
+
+    private static BridgeInstance? TryAttachResidentCore(TargetProcessIdentity target)
+    {
+        if (!OperatingSystem.IsWindows())
+            return null;
+        try
+        {
+            using var mapping = MemoryMappedFile.OpenExisting(
+                $@"Local\MecchaCamouflage.ResidentCore.{target.ProcessId}",
+                MemoryMappedFileRights.Read);
+            using var view = mapping.CreateViewStream(0, ResidentCoreSize, MemoryMappedFileAccess.Read);
+            var bytes = new byte[ResidentCoreSize];
+            var read = 0;
+            while (read < bytes.Length)
+            {
+                var count = view.Read(bytes, read, bytes.Length - read);
+                if (count == 0)
+                    return null;
+                read += count;
+            }
+            var span = bytes.AsSpan();
+            var magic = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(0, 4));
+            var size = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4, 4));
+            var abi = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(8, 4));
+            var pid = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(12, 4));
+            var port = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(16, 4));
+            var protocol = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(20, 4));
+            if (magic != ResidentCoreMagic || size != ResidentCoreSize || abi != ResidentCoreAbi ||
+                pid != target.ProcessId || protocol != BridgeProtocolV1.Version || port is 0 or > 65535 ||
+                !BridgeStartBlockV1.HasEntropy(span.Slice(40, BridgeStartBlockV1.TokenLength)))
+                return null;
+            var instance = new BridgeInstance(
+                target,
+                new Guid(span.Slice(24, BridgeStartBlockV1.GuidLength), bigEndian: true),
+                span.Slice(40, BridgeStartBlockV1.TokenLength),
+                Convert.ToHexString(span.Slice(72, BridgeStartBlockV1.HashLength)).ToLowerInvariant(),
+                bridgePath: "",
+                injectorPath: "",
+                progressPath: "");
+            instance.SetPort((int)port);
+            return instance;
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
     }
 
     private Task<bool> InjectDirectInstanceAsync(

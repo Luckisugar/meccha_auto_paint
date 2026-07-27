@@ -32,6 +32,15 @@ public sealed class HostSession
         "paint.fillMetallic",
         "paint.fillRoughness",
         "paint.fillEmissive",
+        "esp.enabled",
+        "esp.scope",
+        "esp.boxes",
+        "esp.skeletons",
+        "esp.names",
+        "esp.distance",
+        "esp.snaplines",
+        "esp.hiderColor",
+        "esp.hunterColor",
         "app.processName",
         "app.alwaysOnTop",
         "app.opacity",
@@ -80,6 +89,26 @@ public sealed class HostSession
     public RuntimeBridgeService Runtime { get; }
     public AppSettings Settings { get; private set; }
     public bool PaintRunning { get; private set; }
+
+    public Task<BridgeReply> ConfigureNativePresentEspAsync(
+        EspSettings settings,
+        CancellationToken cancellationToken = default) =>
+        Runtime.ConfigureNativePresentEspAsync(settings, cancellationToken);
+
+    public Task<BridgeReply> ConfigureNativePresentEspAsync(
+        EspSettings settings,
+        bool forceRebind,
+        CancellationToken cancellationToken = default) =>
+        Runtime.ConfigureNativePresentEspAsync(settings, forceRebind, cancellationToken);
+
+    public Task<BridgeReply> ArmNativePresentEspProbeAsync(
+        int frames = 120,
+        CancellationToken cancellationToken = default) =>
+        Runtime.ArmNativePresentEspProbeAsync(frames, cancellationToken);
+
+    public Task<BridgeReply> GetNativePresentEspStatusAsync(CancellationToken cancellationToken = default) =>
+        Runtime.GetNativePresentEspStatusAsync(cancellationToken);
+
     private readonly SemaphoreSlim bridgeWarmupGate = new(1, 1);
     private readonly object paintStateGate = new();
     private ImagePaintOptions? imagePaint;
@@ -557,7 +586,11 @@ public sealed class HostSession
             if (process is null)
             {
                 _ = await Runtime.EnsureReadyAsync(Settings.GameProcessName, cancellationToken);
-                nextBridgeWarmupAttempt = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(2);
+                // Keep the desktop host armed before game startup. The native
+                // Present core records the authoritative queue only at the
+                // initial DXGI CreateSwapChain* call, so a multi-second retry
+                // can arrive after the only safe capture point.
+                nextBridgeWarmupAttempt = DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(250);
                 return;
             }
             var ready = await Runtime.EnsureReadyAsync(process, cancellationToken);
@@ -652,6 +685,10 @@ public sealed class HostSession
                 break;
             case "image":
                 next.Image = defaults.Image;
+                break;
+            case "misc":
+            case "esp":
+                next.Esp = defaults.Esp;
                 break;
             case "app":
                 next.GameProcessName = defaults.GameProcessName;
@@ -1252,7 +1289,7 @@ public sealed class HostSession
     {
         var response = await Runtime.PingAsync();
         if (response.Ok)
-            _ = await Runtime.ShutdownAsync();
+            _ = await Runtime.DetachAsync();
     }
 
     private HostCommandResult CommitSettings(AppSettings next, AppSettings previous)
@@ -1576,7 +1613,17 @@ public sealed class HostSession
                 settings.Image.FillRoughness,
                 settings.Image.FillEmissive,
                 settings.Image.Layers.Count,
-                !string.IsNullOrWhiteSpace(settings.Image.CanvasRgbaBase64)));
+                !string.IsNullOrWhiteSpace(settings.Image.CanvasRgbaBase64)),
+            new EspSnapshot(
+                settings.Esp.Enabled,
+                settings.Esp.TargetScope,
+                settings.Esp.Boxes,
+                settings.Esp.Skeletons,
+                settings.Esp.Names,
+                settings.Esp.Distance,
+                settings.Esp.Snaplines,
+                settings.Esp.HiderColor.ToHex(),
+                settings.Esp.HunterColor.ToHex()));
     }
 
     private static ResetSnapshot BuildResetSnapshot(AppSettings settings, AppSettings defaults)
@@ -1589,6 +1636,9 @@ public sealed class HostSession
             ["regions"] = map["paint.frontRegionMode"] || map["paint.sideRegionMode"] || map["paint.backRegionMode"],
             ["fill.material"] = map["paint.fillColor"] || map["paint.fillMetallic"] || map["paint.fillRoughness"] || map["paint.fillEmissive"],
             ["image"] = settings.Image.Enabled != defaults.Image.Enabled || settings.Image.Revision != defaults.Image.Revision,
+            ["misc"] = map["esp.enabled"] || map["esp.scope"] || map["esp.boxes"] || map["esp.skeletons"] ||
+                       map["esp.names"] || map["esp.distance"] || map["esp.snaplines"] || map["esp.hiderColor"] ||
+                       map["esp.hunterColor"],
             ["app"] = map["app.processName"] || map["app.alwaysOnTop"] || map["app.opacity"] || map["app.themeColor"] ||
                     map["app.startHotkey"] || map["app.previewHotkey"] || map["app.unpreviewHotkey"] || map["app.stopHotkey"] ||
                     map["app.imageStartHotkey"] || map["app.imagePreviewHotkey"] || map["app.imageUnpreviewHotkey"] || map["app.imageStopHotkey"]
@@ -1611,6 +1661,15 @@ public sealed class HostSession
         "paint.fillRoughness" => Nearly(left.Paint.FillRoughness, right.Paint.FillRoughness),
         "paint.fillEmissive" => Nearly(left.Paint.FillEmissive, right.Paint.FillEmissive),
         "paint.colorCompressionTolerance" => Nearly(left.Paint.ColorCompressionTolerance, right.Paint.ColorCompressionTolerance),
+        "esp.enabled" => left.Esp.Enabled == right.Esp.Enabled,
+        "esp.scope" => left.Esp.TargetScope == right.Esp.TargetScope,
+        "esp.boxes" => left.Esp.Boxes == right.Esp.Boxes,
+        "esp.skeletons" => left.Esp.Skeletons == right.Esp.Skeletons,
+        "esp.names" => left.Esp.Names == right.Esp.Names,
+        "esp.distance" => left.Esp.Distance == right.Esp.Distance,
+        "esp.snaplines" => left.Esp.Snaplines == right.Esp.Snaplines,
+        "esp.hiderColor" => left.Esp.HiderColor == right.Esp.HiderColor,
+        "esp.hunterColor" => left.Esp.HunterColor == right.Esp.HunterColor,
         "app.processName" => left.GameProcessName == right.GameProcessName,
         "app.alwaysOnTop" => left.AlwaysOnTop == right.AlwaysOnTop,
         "app.opacity" => Nearly(left.Opacity, right.Opacity),
@@ -1643,6 +1702,15 @@ public sealed class HostSession
             case "paint.fillRoughness": settings.Paint.FillRoughness = defaults.Paint.FillRoughness; break;
             case "paint.fillEmissive": settings.Paint.FillEmissive = defaults.Paint.FillEmissive; break;
             case "paint.colorCompressionTolerance": settings.Paint.ColorCompressionTolerance = defaults.Paint.ColorCompressionTolerance; break;
+            case "esp.enabled": settings.Esp.Enabled = defaults.Esp.Enabled; break;
+            case "esp.scope": settings.Esp.TargetScope = defaults.Esp.TargetScope; break;
+            case "esp.boxes": settings.Esp.Boxes = defaults.Esp.Boxes; break;
+            case "esp.skeletons": settings.Esp.Skeletons = defaults.Esp.Skeletons; break;
+            case "esp.names": settings.Esp.Names = defaults.Esp.Names; break;
+            case "esp.distance": settings.Esp.Distance = defaults.Esp.Distance; break;
+            case "esp.snaplines": settings.Esp.Snaplines = defaults.Esp.Snaplines; break;
+            case "esp.hiderColor": settings.Esp.HiderColor = defaults.Esp.HiderColor; break;
+            case "esp.hunterColor": settings.Esp.HunterColor = defaults.Esp.HunterColor; break;
             case "app.processName": settings.GameProcessName = defaults.GameProcessName; break;
             case "app.alwaysOnTop": settings.AlwaysOnTop = defaults.AlwaysOnTop; break;
             case "app.opacity": settings.Opacity = defaults.Opacity; break;
@@ -1680,6 +1748,23 @@ public sealed class HostSession
             case "paint.fillRoughness": settings.Paint.FillRoughness = value.GetDouble(); break;
             case "paint.fillEmissive": settings.Paint.FillEmissive = value.GetDouble(); break;
             case "paint.colorCompressionTolerance": settings.Paint.ColorCompressionTolerance = value.GetDouble(); break;
+            case "esp.enabled": settings.Esp.Enabled = value.GetBoolean(); break;
+            case "esp.scope": settings.Esp.TargetScope = value.GetString() ?? settings.Esp.TargetScope; break;
+            case "esp.boxes": settings.Esp.Boxes = value.GetBoolean(); break;
+            case "esp.skeletons": settings.Esp.Skeletons = value.GetBoolean(); break;
+            case "esp.names": settings.Esp.Names = value.GetBoolean(); break;
+            case "esp.distance": settings.Esp.Distance = value.GetBoolean(); break;
+            case "esp.snaplines": settings.Esp.Snaplines = value.GetBoolean(); break;
+            case "esp.hiderColor":
+                if (!RgbColor.TryParse(value.GetString(), out var hiderColor))
+                    throw new ArgumentException("Hider ESP color must be #RRGGBB.");
+                settings.Esp.HiderColor = hiderColor;
+                break;
+            case "esp.hunterColor":
+                if (!RgbColor.TryParse(value.GetString(), out var hunterColor))
+                    throw new ArgumentException("Hunter ESP color must be #RRGGBB.");
+                settings.Esp.HunterColor = hunterColor;
+                break;
             case "app.language": settings.Language = value.GetString() ?? settings.Language; break;
             case "app.processName": settings.GameProcessName = value.GetString() ?? settings.GameProcessName; break;
             case "app.alwaysOnTop": settings.AlwaysOnTop = value.GetBoolean(); break;

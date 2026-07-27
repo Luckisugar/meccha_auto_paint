@@ -13,6 +13,7 @@ var tests = new List<(string Name, Action Run)>
     ("single brush persists and migrates legacy detail settings", SingleBrushPersistsAndMigratesLegacyDetailSettings),
     ("single brush settings clamp to supported range", SingleBrushSettingsClampToSupportedRange),
     ("app defaults use 99 percent opacity", AppDefaultsUse99PercentOpacity),
+    ("ESP persists role colors and migrates legacy team-relative settings", EspRoleColorsPersistAndMigrateLegacySettings),
     ("payload sends a single brush and compression tolerance", PayloadSendsSingleBrushPipeline),
     ("image payload carries a full canonical canvas", ImagePayloadCarriesFullCanonicalCanvas),
     ("image transparency fills regions before painting opaque pixels", ImageTransparencyFillsRegionsBeforePaintingOpaquePixels),
@@ -24,7 +25,20 @@ var tests = new List<(string Name, Action Run)>
     ("native image paint uses the live profile when the selected body differs", NativeImagePaintUsesLiveProfileWhenSelectedBodyDiffers),
     ("image unpreview omits paint-plan diagnostics", ImageUnpreviewOmitsPaintPlanDiagnostics),
     ("custom freecam surface is absent", CustomFreecamSurfaceIsAbsent),
-    ("misc is an empty extension surface", MiscIsAnEmptyExtensionSurface),
+    ("misc configures the native Present ESP renderer", MiscUsesNativePresentEspRenderer),
+    ("native Present ESP command uses role-fixed scope and colors", NativePresentEspCommandUsesRoleFixedScopeAndColors),
+    ("native Present status logging ignores healthy counter churn", NativePresentStatusLoggingIgnoresHealthyCounterChurn),
+    ("native Present ESP has no external frame-render fallback", NativePresentEspHasNoExternalFallback),
+    ("native Present ESP hooks queue, owns wrapped backbuffers, and reports lifecycle state", NativePresentEspOwnsRendererLifecycle),
+    ("runtime keeps one resident bridge across GUI updates", RuntimeKeepsResidentBridgeAcrossGuiUpdates),
+    ("native Present reports the failing direct backbuffer setup step", NativePresentReportsBackbufferSetupStep),
+    ("native Present pipeline initializes valid D3D12 defaults", NativePresentPipelineInitializesValidD3d12Defaults),
+    ("native Present has an opaque R10 PSO fallback", NativePresentHasOpaqueR10PipelineFallback),
+    ("native Present pipeline uses explicit shader linkage semantics", NativePresentPipelineUsesExplicitShaderLinkageSemantics),
+    ("native Present ESP restores its own hook without chaining unknown hooks", NativePresentEspRestoresOwnHookWithoutChaining),
+    ("native Present capsule projection honors UE camera axes and constrained aspect", NativePresentCapsuleProjectionHonorsCameraAxes),
+    ("native Present box prefers validated pose bounds with a capsule fallback", NativePresentBoxUsesPoseBoundsWithCapsuleFallback),
+    ("native Present snapshot double buffer never publishes a partial frame", NativePresentSnapshotDoubleBufferIsAtomic),
     ("spectator paint resolution requires local controller identity", SpectatorPaintResolutionRequiresLocalControllerIdentity),
     ("diagnostic stroke limit requires explicit option", DiagnosticStrokeLimitRequiresExplicitOption),
     ("native accepts the single brush configured range", NativeAcceptsSingleBrushConfiguredRange),
@@ -56,6 +70,7 @@ var tests = new List<(string Name, Action Run)>
     ("diagnostics log write is best effort when file is locked", DiagnosticsLogWriteIsBestEffortWhenFileLocked),
     ("runtime log write is best effort when file is locked", RuntimeLogWriteIsBestEffortWhenFileLocked),
     ("auto material defaults off", AutoMaterialDefaultsOff),
+    ("ESP snaplines default on", EspSnaplinesDefaultOn),
     ("regions default to side and back paint", RegionsDefaultToSideAndBackPaint),
     ("image design defaults are safe and persist", ImageDesignDefaultsAreSafeAndPersist),
     ("web Image Fill payload uses an RGB object", WebImageFillPayloadUsesRgbObject),
@@ -862,7 +877,7 @@ static void CustomFreecamSurfaceIsAbsent()
         "the application must not expose or invoke its own freecam implementation");
 }
 
-static void MiscIsAnEmptyExtensionSurface()
+static void MiscUsesNativePresentEspRenderer()
 {
     var root = FindRepositoryRoot();
     var bridge = File.ReadAllText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
@@ -873,19 +888,434 @@ static void MiscIsAnEmptyExtensionSurface()
     var app = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "web", "app.js"));
 
     Assert(markup.Contains("data-settings-panel=\"misc\"", StringComparison.Ordinal) &&
-           !markup.Contains("misc-walk-speed", StringComparison.Ordinal) &&
-           !markup.Contains("misc-jump-power", StringComparison.Ordinal) &&
-           !markup.Contains("misc-gravity", StringComparison.Ordinal) &&
-           !markup.Contains("data-settings-actions=\"misc\"", StringComparison.Ordinal) &&
-           !app.Contains("getMiscState", StringComparison.Ordinal) &&
-           !app.Contains("applyMiscState", StringComparison.Ordinal) &&
-           !mainForm.Contains("getMiscState", StringComparison.Ordinal) &&
-           !mainForm.Contains("applyMiscState", StringComparison.Ordinal) &&
-           !runtime.Contains("MiscState", StringComparison.Ordinal) &&
-           !session.Contains("MiscState", StringComparison.Ordinal) &&
-           !bridge.Contains("misc_state", StringComparison.Ordinal) &&
+           markup.Contains("data-settings-actions=\"misc\"", StringComparison.Ordinal) &&
+           markup.Contains("id=\"esp-enabled\"", StringComparison.Ordinal) &&
+           markup.Contains("id=\"esp-boxes\"", StringComparison.Ordinal) &&
+           markup.Contains("id=\"esp-skeletons\"", StringComparison.Ordinal) &&
+           markup.Contains("id=\"esp-hider-color\"", StringComparison.Ordinal) &&
+           markup.Contains("data-esp-scope", StringComparison.Ordinal) &&
+           markup.Contains("id=\"esp-hunter-color\"", StringComparison.Ordinal) &&
+           markup.Contains("Hider color", StringComparison.Ordinal) &&
+           markup.Contains("Hunter color", StringComparison.Ordinal) &&
+           app.Contains("bindCheckbox(\"esp-enabled\", \"esp.enabled\")", StringComparison.Ordinal) &&
+           app.Contains("for (const scope of [\"all\", \"hider\", \"hunter\"])", StringComparison.Ordinal) &&
+           app.Contains("bindColorPair(\"esp-hider-color-picker\", \"esp-hider-color\", \"esp.hiderColor\")", StringComparison.Ordinal) &&
+           app.Contains("bindColorPair(\"esp-hunter-color-picker\", \"esp-hunter-color\", \"esp.hunterColor\")", StringComparison.Ordinal) &&
+           !app.Contains("esp.enemyColor", StringComparison.Ordinal) &&
+           mainForm.Contains("QueueNativePresentEspConfiguration", StringComparison.Ordinal) &&
+           mainForm.Contains("\"hiderColor\"", StringComparison.Ordinal) &&
+           mainForm.Contains("\"hunterColor\"", StringComparison.Ordinal) &&
+           !mainForm.Contains("EspOverlayForm", StringComparison.Ordinal) &&
+           runtime.Contains("ConfigureNativePresentEspAsync", StringComparison.Ordinal) &&
+           session.Contains("esp.enabled", StringComparison.Ordinal) &&
+           !File.Exists(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs")) &&
+           bridge.Contains("esp_native_present", StringComparison.Ordinal) &&
+           bridge.Contains("d3d12_direct", StringComparison.Ordinal) &&
            !bridge.Contains("misc_apply", StringComparison.Ordinal),
-        "Misc must remain an empty UI extension surface until a verified action is available");
+        "Misc must configure only the in-process Native Present ESP renderer; the WinForms/RPM overlay is not a production path");
+}
+
+static void NativePresentEspCommandUsesRoleFixedScopeAndColors() =>
+    NativePresentEspCommandUsesRoleFixedScopeAndColorsAsync().GetAwaiter().GetResult();
+
+static async Task NativePresentEspCommandUsesRoleFixedScopeAndColorsAsync()
+{
+    using var temp = new TempHome();
+    var paths = new AppPaths("esp-role-command-test");
+    var service = new RuntimeBridgeService(paths, new RuntimeLog(paths));
+    var instanceId = Guid.Parse("10213243-5465-7687-98a9-bacbdcedfe0f");
+    var token = Enumerable.Range(1, BridgeStartBlockV1.TokenLength).Select(value => (byte)value).ToArray();
+    var hash = string.Concat(Enumerable.Repeat("cd", 32));
+    using var listener = new TcpListener(IPAddress.Loopback, 0);
+    listener.Start();
+    var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+    var target = TargetProcessIdentity.Create(4242, 1, Path.Combine(Path.GetTempPath(), "game.exe"));
+    var instance = new BridgeInstance(target, instanceId, token, hash, "bridge.dll", "injector.exe", "progress.json");
+    instance.SetPort(port);
+    typeof(RuntimeBridgeService)
+        .GetField("activeInstance", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .SetValue(service, instance);
+    typeof(RuntimeBridgeService)
+        .GetField("bridgeConnected", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .SetValue(service, true);
+
+    string command = "";
+    var server = Task.Run(async () =>
+    {
+        using var accepted = await listener.AcceptTcpClientAsync();
+        await using var stream = accepted.GetStream();
+        using var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
+        await using var writer = new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        _ = await reader.ReadLineAsync();
+        await writer.WriteLineAsync(JsonSerializer.Serialize(new
+        {
+            success = true,
+            stage = "hello",
+            message = "ok",
+            metadata = new { pid = 4242, instance_id = instanceId.ToString("N"), bridge_hash = hash, protocol_version = 1 }
+        }));
+        command = await reader.ReadLineAsync() ?? "";
+        await writer.WriteLineAsync("{\"success\":true,\"stage\":\"esp_native_present\",\"message\":\"ok\"}");
+    });
+
+    var settings = new EspSettings
+    {
+        TargetScope = "hunter",
+        HiderColor = new RgbColor(1, 2, 3),
+        HunterColor = new RgbColor(4, 5, 6)
+    };
+    var reply = await service.ConfigureNativePresentEspAsync(settings);
+    await server;
+    using var document = JsonDocument.Parse(command);
+    var root = document.RootElement;
+    Assert(reply.Ok && reply.Success &&
+           root.GetProperty("scope").GetString() == "hunter" &&
+           root.GetProperty("hider_r").GetInt32() == 1 &&
+           root.GetProperty("hider_g").GetInt32() == 2 &&
+           root.GetProperty("hider_b").GetInt32() == 3 &&
+           root.GetProperty("hunter_r").GetInt32() == 4 &&
+           root.GetProperty("hunter_g").GetInt32() == 5 &&
+           root.GetProperty("hunter_b").GetInt32() == 6 &&
+           !root.TryGetProperty("ally_r", out _) &&
+           !root.TryGetProperty("enemy_r", out _),
+        "native Present ESP command should express fixed Hider/Hunter scope and colors");
+}
+
+static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
+{
+    var first = new NativePresentStatusLogSample
+    {
+        Status = "ready",
+        Reason = "native D3D12 Present compositor active",
+        Format = "R10G10B10A2_UNORM",
+        CaptureStatus = "active",
+        CaptureAgeMs = 16,
+        HudRebinds = 0,
+        RosterSource = "player_array",
+        RosterCount = 10,
+        ValidPawns = 9,
+        CapsuleComponents = 9,
+        CapsuleTransforms = 9,
+        CapsuleSizes = 9,
+        CapsuleProjected = 9,
+        SkeletonContracts = 2,
+        PoseProfileMatches = 9,
+        PoseComponentSpace = 9,
+        PoseBones = 252,
+        PoseEdges = 243,
+        Poses = 9,
+        Players = 9,
+        Lines = 324,
+        Texts = 9,
+        Vertices = 14694,
+        GlyphQuads = 2132,
+        ProjectionCalibrations = 2,
+        SnapshotSequence = 71,
+        SubmittedFrames = 71,
+        CompletedFences = 68,
+        RenderedFrames = 71
+    };
+    var later = first with
+    {
+        CaptureAgeMs = 0,
+        RosterCount = 9,
+        ValidPawns = 8,
+        CapsuleComponents = 8,
+        CapsuleTransforms = 8,
+        CapsuleSizes = 8,
+        CapsuleProjected = 8,
+        PoseProfileMatches = 8,
+        PoseComponentSpace = 8,
+        PoseBones = 224,
+        PoseEdges = 216,
+        Poses = 8,
+        Players = 8,
+        Lines = 288,
+        Texts = 8,
+        Vertices = 13434,
+        GlyphQuads = 1956,
+        ProjectionCalibrations = 6,
+        SnapshotSequence = 311,
+        SubmittedFrames = 311,
+        CompletedFences = 308,
+        RenderedFrames = 311
+    };
+
+    Assert(
+        NativePresentStatusLogPolicy.Signature(first, verbose: false) ==
+        NativePresentStatusLogPolicy.Signature(later, verbose: false),
+        "normal ESP logging must ignore healthy roster and progress counter churn");
+    Assert(
+        NativePresentStatusLogPolicy.Signature(first, verbose: true) !=
+        NativePresentStatusLogPolicy.Signature(later, verbose: true),
+        "explicit verbose ESP logging must retain raw diagnostic counter changes");
+
+    var stalled = later with { CaptureStatus = "stalled", CaptureAgeMs = 1500 };
+    Assert(
+        NativePresentStatusLogPolicy.Signature(later, verbose: false) !=
+        NativePresentStatusLogPolicy.Signature(stalled, verbose: false) &&
+        NativePresentStatusLogPolicy.ShouldWarn(stalled),
+        "capture stalls must remain visible as a warning state transition");
+
+    var offscreen = later with
+    {
+        Reason = "native D3D12 Present compositor active (no geometry in current snapshot)",
+        Players = 0,
+        Lines = 0,
+        Texts = 0,
+        Vertices = 0,
+        GlyphQuads = 0
+    };
+    Assert(
+        NativePresentStatusLogPolicy.Signature(later, verbose: true) !=
+        NativePresentStatusLogPolicy.Signature(offscreen, verbose: true) &&
+        NativePresentStatusLogPolicy.Signature(later, verbose: false) ==
+        NativePresentStatusLogPolicy.Signature(offscreen, verbose: false),
+        "normal ESP logging must ignore visibility-only geometry churn while verbose mode retains it");
+
+    var brokenTransform = later with { CapsuleTransforms = 0, CapsuleSizes = 0 };
+    Assert(
+        NativePresentStatusLogPolicy.Signature(later, verbose: false) !=
+        NativePresentStatusLogPolicy.Signature(brokenTransform, verbose: false),
+        "normal ESP logging must retain upstream capture-stage failures");
+
+    var previousFlag = Environment.GetEnvironmentVariable("MECCHA_ESP_VERBOSE_STATUS");
+    try
+    {
+        Environment.SetEnvironmentVariable("MECCHA_ESP_VERBOSE_STATUS", null);
+        Assert(!BuildFeatures.NativeEspVerboseStatusEnabled,
+            "verbose ESP logging must default off");
+        Environment.SetEnvironmentVariable("MECCHA_ESP_VERBOSE_STATUS", "1");
+        Assert(BuildFeatures.NativeEspVerboseStatusEnabled,
+            "verbose ESP logging must require its explicit environment flag");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("MECCHA_ESP_VERBOSE_STATUS", previousFlag);
+    }
+}
+
+static void NativePresentEspHasNoExternalFallback()
+{
+    var root = FindRepositoryRoot();
+    var mainForm = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "MainForm.cs"));
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(!mainForm.Contains("EspOverlayForm", StringComparison.Ordinal) &&
+           !mainForm.Contains("EspMemoryReader", StringComparison.Ordinal) &&
+           !File.Exists(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspOverlayForm.cs")) &&
+           !File.Exists(Path.Combine(root, "src", "csharp", "MecchaCamouflage.WebHost", "EspMemoryReader.cs")) &&
+           bridge.Contains("external_overlay\\\":false", StringComparison.Ordinal) &&
+           !bridge.Contains("SetEvent(signal);", StringComparison.Ordinal),
+        "native Present ESP must fail closed instead of signalling or starting an external overlay frame renderer");
+}
+
+static void NativePresentEspOwnsRendererLifecycle()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var runtime = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
+
+    Assert(bridge.Contains("esp_execute_command_lists_detour", StringComparison.Ordinal) &&
+           bridge.Contains("esp_resize_buffers_detour", StringComparison.Ordinal) &&
+           bridge.Contains("esp_create_swapchain_for_hwnd_detour", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_track_swapchain_queue", StringComparison.Ordinal) &&
+           bridge.Contains("BridgeResidentCoreV1", StringComparison.Ordinal) &&
+           bridge.Contains("bridge host detached; resident core remains available", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_queue_for_late_present", StringComparison.Ordinal) &&
+           bridge.Contains("same-thread Present submission", StringComparison.Ordinal) &&
+           bridge.Contains("DXGI_FORMAT_R10G10B10A2_UNORM", StringComparison.Ordinal) &&
+           bridge.Contains("D3D12_RESOURCE_STATE_PRESENT", StringComparison.Ordinal) &&
+           bridge.Contains("D3D12_RESOURCE_STATE_RENDER_TARGET", StringComparison.Ordinal) &&
+           bridge.Contains("CreateRenderTargetView", StringComparison.Ordinal) &&
+           bridge.Contains("CreateCommandAllocator", StringComparison.Ordinal) &&
+           bridge.Contains("CreateFence", StringComparison.Ordinal) &&
+           bridge.Contains("ExecuteCommandLists(1, lists)", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_render_snapshot_guarded", StringComparison.Ordinal) &&
+           bridge.Contains("native Present compositor faulted", StringComparison.Ordinal) &&
+           bridge.Contains("GetCurrentBackBufferIndex", StringComparison.Ordinal) &&
+           bridge.Contains("g_esp_native_snapshot_readers", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_present_status_native", StringComparison.Ordinal) &&
+           bridge.Contains("snapshot_sequence", StringComparison.Ordinal) &&
+           bridge.Contains("capture_age_ms", StringComparison.Ordinal) &&
+           bridge.Contains("hud_rebinds", StringComparison.Ordinal) &&
+           bridge.Contains("valid_pawns", StringComparison.Ordinal) &&
+           bridge.Contains("capsule_projected", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_skeleton_contract_for_mesh", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_compose_local_pose", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_pose_topology_error", StringComparison.Ordinal) &&
+           bridge.Contains("pose_local_space", StringComparison.Ordinal) &&
+           bridge.Contains("runtime_contract::esp_ascii_glyph_rows", StringComparison.Ordinal) &&
+           bridge.Contains("glyph_quads", StringComparison.Ordinal) &&
+           bridge.Contains("snapshot.text_count", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_calibrate_projection", StringComparison.Ordinal) &&
+           bridge.Contains("sdk_project_world_to_screen", StringComparison.Ordinal) &&
+           bridge.Contains("projection_scale_x", StringComparison.Ordinal) &&
+           bridge.Contains("submitted_frames", StringComparison.Ordinal) &&
+           bridge.Contains("completed_fences", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_present_probe", StringComparison.Ordinal) &&
+           bridge.Contains("runtime_contract::esp_hud_callback_matches", StringComparison.Ordinal) &&
+           !bridge.Contains("reinterpret_cast<std::uintptr_t>(object) ==\n                g_esp_hud_callback_target", StringComparison.Ordinal) &&
+           bridge.Contains("rendered_frames", StringComparison.Ordinal) &&
+           runtime.Contains("ConfigureNativePresentEspAsync", StringComparison.Ordinal) &&
+           runtime.Contains("force_rebind", StringComparison.Ordinal) &&
+           runtime.Contains("ArmNativePresentEspProbeAsync", StringComparison.Ordinal) &&
+           runtime.Contains("TryAttachResidentCore", StringComparison.Ordinal) &&
+           runtime.Contains("GetNativePresentEspStatusAsync", StringComparison.Ordinal),
+        "native Present ESP must capture the exact swapchain queue, use profile-driven local/component pose selection and direct glyph geometry, retain one resident renderer across host reconnects, publish completed snapshots, and expose lifecycle status");
+}
+
+static void RuntimeKeepsResidentBridgeAcrossGuiUpdates()
+{
+    var root = FindRepositoryRoot();
+    var runtime = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
+
+    Assert(runtime.Contains("TryAttachResidentCore", StringComparison.Ordinal) &&
+           !runtime.Contains("ReplaceObsoleteResidentCoreAsync", StringComparison.Ordinal) &&
+           !runtime.Contains("TryGetPackagedBridgeHash", StringComparison.Ordinal) &&
+           !runtime.Contains("WaitForResidentCoreExitAsync", StringComparison.Ordinal),
+        "a GUI update must reconnect to its authenticated resident bridge instead of stacking another native DLL in a live game");
+}
+
+static void NativePresentReportsBackbufferSetupStep()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("native D3D12 backbuffer setup failed at ", StringComparison.Ordinal) &&
+           bridge.Contains("CheckFeatureSupport(format)", StringComparison.Ordinal) &&
+           bridge.Contains("CreateGraphicsPipelineState(pipeline)", StringComparison.Ordinal) &&
+           bridge.Contains("failure_step", StringComparison.Ordinal),
+        "native Present diagnostics must identify the exact D3D12 initialization call that rejected the swapchain");
+}
+
+static void NativePresentPipelineInitializesValidD3d12Defaults()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("D3D12_COMPARISON_FUNC_LESS", StringComparison.Ordinal) &&
+           bridge.Contains("D3D12_DEFAULT_STENCIL_READ_MASK", StringComparison.Ordinal) &&
+           bridge.Contains("D3D12_BLEND_ONE", StringComparison.Ordinal) &&
+           bridge.Contains("D3D12_BLEND_ZERO", StringComparison.Ordinal),
+        "the direct PSO must explicitly initialize all depth-stencil and blend fields that D3D12 validates");
+}
+
+static void NativePresentHasOpaqueR10PipelineFallback()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("opaque R10 fallback", StringComparison.Ordinal) &&
+           bridge.Contains("blend.BlendEnable = FALSE", StringComparison.Ordinal),
+        "the R10 Present path must retain a non-blended PSO candidate when a driver rejects alpha blending");
+}
+
+static void NativePresentPipelineUsesExplicitShaderLinkageSemantics()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("struct EspDirectPixelInput", StringComparison.Ordinal) &&
+           bridge.Contains("float4 color : COLOR0", StringComparison.Ordinal) &&
+           bridge.Contains(": SV_TARGET0", StringComparison.Ordinal),
+        "the production vertex and pixel shaders must use an explicit matching COLOR0 linkage");
+}
+
+static void NativePresentEspRestoresOwnHookWithoutChaining()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var build = ReadRepositoryText(Path.Combine(root, "scripts", "build.ps1"));
+
+    Assert(bridge.Contains("MH_CreateHook", StringComparison.Ordinal) &&
+           bridge.Contains("MH_ApplyQueued", StringComparison.Ordinal) &&
+           bridge.Contains("MH_RemoveHook", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_uninstall_present_sync", StringComparison.Ordinal) &&
+           bridge.Contains("not a raw vtable", StringComparison.Ordinal) &&
+           !bridge.Contains("*present_slot = reinterpret_cast<void*>(&esp_present_detour)", StringComparison.Ordinal) &&
+           build.Contains("third_party\\minhook", StringComparison.Ordinal),
+        "the bridge must use trampoline detours and remove only its own hooks instead of replacing a shared graphics vtable");
+}
+
+static void NativePresentCapsuleProjectionHonorsCameraAxes()
+{
+    var view = new NativePresentCamera(
+        new NativePresentVector3(0, 0, 0),
+        new NativePresentRotator(0, 0, 0),
+        90,
+        16.0 / 9.0,
+        NativePresentFovAxis.MaintainY);
+
+    Assert(NativePresentProjection.TryProject(
+               view,
+               new NativePresentVector3(1000, 0, 0),
+               3440,
+               1440,
+               out var centre) &&
+           Math.Abs(centre.X - 1720) < 0.001 && Math.Abs(centre.Y - 720) < 0.001,
+        "a MaintainY 90 degree UE camera must put its forward vector at the constrained viewport centre");
+
+    Assert(NativePresentProjection.TryProject(
+               view,
+               new NativePresentVector3(1000, 100, 0),
+               3440,
+               1440,
+               out var right) &&
+           Math.Abs(right.X - 1848) < 0.001 && Math.Abs(right.Y - 720) < 0.001,
+        "MaintainY must use height × aspect ratio as its horizontal focal length");
+
+    var rolled = view with { Rotation = new NativePresentRotator(0, 0, 90) };
+    Assert(NativePresentProjection.TryProject(
+               rolled,
+               new NativePresentVector3(1000, 0, 100),
+               3440,
+               1440,
+               out var rollPoint) &&
+           Math.Abs(rollPoint.X - 1592) < 0.001 && Math.Abs(rollPoint.Y - 720) < 0.001,
+        "roll must be part of the UE camera rotation matrix rather than an ignored overlay approximation");
+}
+
+static void NativePresentBoxUsesPoseBoundsWithCapsuleFallback()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var view = new NativePresentCamera(
+        new NativePresentVector3(0, 0, 0),
+        new NativePresentRotator(0, 0, 0),
+        90,
+        16.0 / 9.0,
+        NativePresentFovAxis.MaintainY);
+    var capsule = new NativePresentCapsule(
+        new NativePresentVector3(1000, 0, 0),
+        new NativePresentRotator(0, 0, 0),
+        Radius: 50,
+        HalfHeight: 100);
+
+    Assert(NativePresentProjection.TryProject(view, new NativePresentVector3(1000, 0, 100), 3440, 1440, out var apex) &&
+           Math.Abs(apex.Y - 648) < 0.001,
+        $"the collision capsule apex itself must project before building its bounds (actual={apex})");
+    Assert(NativePresentProjection.TryProjectCapsuleBounds(view, capsule, 3440, 1440, out var box) &&
+           box.Left <= 1656 && box.Right >= 1784 && box.Top <= 648 && box.Bottom >= 792 &&
+           box.Width > 100 && box.Height > 100 &&
+           bridge.Contains("esp_native_component_pose", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_project_pose_bounds", StringComparison.Ordinal) &&
+           bridge.Contains("esp_expand_screen_bounds", StringComparison.Ordinal),
+        $"the renderer must prefer validated animated pose bounds while retaining a stable collision-capsule fallback (actual={box})");
+}
+
+static void NativePresentSnapshotDoubleBufferIsAtomic()
+{
+    var publisher = new NativePresentSnapshotBuffer<int>(capacity: 4);
+    Assert(!publisher.TryRead(out _), "an empty native snapshot buffer must not expose an incomplete frame");
+
+    var writer = publisher.BeginWrite();
+    writer.Add(17);
+    Assert(!publisher.TryRead(out _), "the reader must not observe a writer-owned frame before publication");
+    publisher.Publish(writer);
+
+    Assert(publisher.TryRead(out var frame) && frame.Sequence == 1 && frame.Items.Span.SequenceEqual([17]),
+        "publication must atomically hand off the complete snapshot and sequence number");
 }
 
 static void SpectatorPaintResolutionRequiresLocalControllerIdentity()
@@ -1351,6 +1781,51 @@ static void AutoMaterialDefaultsOff()
     Assert(!new AppSettings().Paint.AutoMaterial, "auto material should default off");
 }
 
+static void EspSnaplinesDefaultOn()
+{
+    var esp = new AppSettings().Esp;
+    Assert(esp.Enabled && esp.Snaplines && esp.TargetScope == "all" &&
+           esp.HiderColor == new RgbColor(0, 255, 136) &&
+           esp.HunterColor == new RgbColor(255, 0, 0),
+        "ESP should start enabled for all targets, with green Hiders, red Hunters, and visible snaplines");
+}
+
+static void EspRoleColorsPersistAndMigrateLegacySettings()
+{
+    using var temp = new TempHome();
+    var paths = new AppPaths("esp-role-color-persistence-test");
+    var store = new SettingsStore(paths);
+    var settings = new AppSettings();
+    settings.Esp.TargetScope = "hider";
+    settings.Esp.HiderColor = new RgbColor(1, 2, 3);
+    settings.Esp.HunterColor = new RgbColor(4, 5, 6);
+
+    store.Save(settings);
+    var saved = File.ReadAllText(paths.ConfigPath);
+    var loaded = store.Load();
+    Assert(saved.Contains("\"esp_hider_color\"", StringComparison.Ordinal) &&
+           saved.Contains("\"esp_hunter_color\"", StringComparison.Ordinal) &&
+           !saved.Contains("\"esp_enemy_color\"", StringComparison.Ordinal) &&
+           loaded.Esp.TargetScope == "hider" &&
+           loaded.Esp.HiderColor == settings.Esp.HiderColor &&
+           loaded.Esp.HunterColor == settings.Esp.HunterColor,
+        "ESP settings should persist role-fixed scope and colors");
+
+    File.WriteAllText(paths.ConfigPath,
+        """
+        {
+          "esp_target_scope": "enemy",
+          "esp_color": "#112233",
+          "esp_enemy_color": "#445566"
+        }
+        """);
+    var migrated = store.Load();
+    Assert(migrated.Esp.TargetScope == "all" &&
+           migrated.Esp.HiderColor == new RgbColor(0x11, 0x22, 0x33) &&
+           migrated.Esp.HunterColor == new RgbColor(0x44, 0x55, 0x66),
+        "legacy ally/enemy settings should migrate colors by their historical defaults and reset relative scope to all");
+}
+
 static void RegionsDefaultToSideAndBackPaint()
 {
     var paint = new AppSettings().Paint;
@@ -1748,9 +2223,10 @@ static void WebUiScopesEditActionsToActiveSettingsTab()
     var styles = ReadRepositoryText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "styles.css"));
     var catalog = LocalizationCatalog.Load();
 
-    Assert(CountOccurrences(markup, "data-settings-actions=") == 3 &&
+    Assert(CountOccurrences(markup, "data-settings-actions=") == 4 &&
            markup.Contains("data-settings-actions=\"paint\"", StringComparison.Ordinal) &&
            markup.Contains("data-settings-actions=\"image\"", StringComparison.Ordinal) &&
+           markup.Contains("data-settings-actions=\"misc\"", StringComparison.Ordinal) &&
            markup.Contains("data-settings-actions=\"application\"", StringComparison.Ordinal),
         "each editable settings tab must own its Edit, Reset, Cancel, and Save action bar");
     Assert(app.Contains("if (editing && tab.dataset.settingsTab !== activeSettingsTab)", StringComparison.Ordinal) &&
@@ -1759,6 +2235,8 @@ static void WebUiScopesEditActionsToActiveSettingsTab()
     Assert(app.Contains("if (activeSettingsTab === \"paint\")", StringComparison.Ordinal) &&
            app.Contains("draftSnapshot.settings.paint = clone(liveSnapshot.defaults.paint);", StringComparison.Ordinal) &&
            app.Contains("if (activeSettingsTab === \"image\")", StringComparison.Ordinal) &&
+           app.Contains("if (activeSettingsTab === \"misc\")", StringComparison.Ordinal) &&
+           app.Contains("draftSnapshot.settings.esp = clone(liveSnapshot.defaults.esp);", StringComparison.Ordinal) &&
            app.Contains("draftSnapshot.settings.app = clone(liveSnapshot.defaults.app);", StringComparison.Ordinal),
         "Reset must restore only the settings belonging to the active tab");
     Assert(styles.Contains(".action-bar[hidden] {\n  display: none;\n}", StringComparison.Ordinal),
