@@ -32,6 +32,9 @@ var tests = new List<(string Name, Action Run)>
     ("native Present ESP has no external frame-render fallback", NativePresentEspHasNoExternalFallback),
     ("native Present ESP hooks queue, owns wrapped backbuffers, and reports lifecycle state", NativePresentEspOwnsRendererLifecycle),
     ("runtime keeps one resident bridge across GUI updates", RuntimeKeepsResidentBridgeAcrossGuiUpdates),
+    ("connected game process remains pinned", ConnectedGameProcessRemainsPinned),
+    ("live game identity blocks target replacement", LiveGameIdentityBlocksTargetReplacement),
+    ("unresponsive matching bridge is not reinjected", UnresponsiveMatchingBridgeIsNotReinjected),
     ("native Present reports the failing direct backbuffer setup step", NativePresentReportsBackbufferSetupStep),
     ("native Present pipeline initializes valid D3D12 defaults", NativePresentPipelineInitializesValidD3d12Defaults),
     ("native Present has an opaque R10 PSO fallback", NativePresentHasOpaqueR10PipelineFallback),
@@ -142,6 +145,7 @@ var tests = new List<(string Name, Action Run)>
     ("host session keeps cancellation pending until native terminal reply", HostSessionKeepsCancellationPendingUntilNativeTerminalReply),
     ("bridge start block has a fixed portable layout", BridgeStartBlockHasFixedPortableLayout),
     ("injector result requires matching bridge identity", InjectorResultRequiresMatchingBridgeIdentity),
+    ("injector distinguishes identity and load failures", InjectorDistinguishesIdentityAndLoadFailures),
     ("bridge hello serializes and validates identity", BridgeHelloSerializesAndValidatesIdentity),
     ("bridge client sends hello before the command", BridgeClientSendsHelloBeforeCommand),
     ("bridge shutdown client outlives native quiescence budget", BridgeShutdownClientOutlivesNativeQuiescenceBudget),
@@ -1227,6 +1231,75 @@ static void RuntimeKeepsResidentBridgeAcrossGuiUpdates()
            !runtime.Contains("TryGetPackagedBridgeHash", StringComparison.Ordinal) &&
            !runtime.Contains("WaitForResidentCoreExitAsync", StringComparison.Ordinal),
         "a GUI update must reconnect to its authenticated resident bridge instead of stacking another native DLL in a live game");
+}
+
+static void ConnectedGameProcessRemainsPinned()
+{
+    var selected = GameProcessSelectionPolicy.SelectProcessId(
+        [3180, 8860],
+        pinnedProcessId: 8860);
+    var ambiguous = GameProcessSelectionPolicy.SelectProcessId(
+        [3180, 8860],
+        pinnedProcessId: null);
+    var unique = GameProcessSelectionPolicy.SelectProcessId(
+        [3180],
+        pinnedProcessId: null);
+
+    Assert(selected == 8860 &&
+           ambiguous is null &&
+           unique == 3180,
+        "the connected PID must remain pinned, and an unpinned target must be unambiguous");
+}
+
+static void LiveGameIdentityBlocksTargetReplacement()
+{
+    Assert(!GameProcessSelectionPolicy.MayReplacePinnedTarget(
+               hasPinnedTarget: true,
+               pinnedTargetIsAlive: true) &&
+           GameProcessSelectionPolicy.MayReplacePinnedTarget(
+               hasPinnedTarget: true,
+               pinnedTargetIsAlive: false) &&
+           GameProcessSelectionPolicy.MayReplacePinnedTarget(
+               hasPinnedTarget: false,
+               pinnedTargetIsAlive: false),
+        "a new target may be selected only after the pinned game identity exits");
+}
+
+static void UnresponsiveMatchingBridgeIsNotReinjected()
+{
+    var root = FindRepositoryRoot();
+    var runtime = ReadRepositoryText(Path.Combine(
+        root, "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
+    var injectionMethod = runtime.IndexOf(
+        "private bool InjectDirectInstanceOnMutexThread(",
+        StringComparison.Ordinal);
+    var mutexAcquired = runtime.IndexOf(
+        "if (!ownsMutex)",
+        injectionMethod,
+        StringComparison.Ordinal);
+    var residentRecheck = runtime.IndexOf(
+        "TryAttachResidentCore(target)",
+        mutexAcquired,
+        StringComparison.Ordinal);
+    var staging = runtime.IndexOf(
+        "PrepareDirectBridgeInstance(target, researchOptions)",
+        mutexAcquired,
+        StringComparison.Ordinal);
+
+    Assert(!GameProcessSelectionPolicy.MayStageDirectInstance(
+               hasMatchingBridge: true,
+               hasPublishedResident: false) &&
+           !GameProcessSelectionPolicy.MayStageDirectInstance(
+               hasMatchingBridge: false,
+               hasPublishedResident: true) &&
+           GameProcessSelectionPolicy.MayStageDirectInstance(
+               hasMatchingBridge: false,
+               hasPublishedResident: false) &&
+           injectionMethod >= 0 &&
+           mutexAcquired > injectionMethod &&
+           residentRecheck > mutexAcquired &&
+           staging > residentRecheck,
+        "automatic warmup must recheck for a matching or published resident after acquiring the injection mutex and before staging");
 }
 
 static void NativePresentReportsBackbufferSetupStep()
@@ -4281,6 +4354,23 @@ static void DirectBridgeNamesAvoidHistoricalLoaderPattern()
     Assert(name.StartsWith("meccha-direct-bridge-v1-", StringComparison.Ordinal), "direct bridge prefix missing");
     Assert(name.Contains(hash, StringComparison.Ordinal), "direct bridge must include its full build hash");
     Assert(!name.Contains("runtime-bridge", StringComparison.OrdinalIgnoreCase), "historical loader pattern must not be used");
+}
+
+static void InjectorDistinguishesIdentityAndLoadFailures()
+{
+    var root = FindRepositoryRoot();
+    var injector = ReadRepositoryText(Path.Combine(
+        root, "src", "native", "injector", "injector.cpp"));
+    var runtime = ReadRepositoryText(Path.Combine(
+        root, "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
+
+    Assert(injector.Contains("\"target_creation_time_query_failed\"", StringComparison.Ordinal) &&
+           injector.Contains("\"target_image_path_query_failed\"", StringComparison.Ordinal) &&
+           injector.Contains("\"target_exited_during_loadlibrary\"", StringComparison.Ordinal) &&
+           injector.Contains("\"remote_loadlibrary_failed\"", StringComparison.Ordinal) &&
+           injector.Contains("load_exit == 0", StringComparison.Ordinal) &&
+           runtime.Contains("win32=", StringComparison.Ordinal),
+        "injector failures must identify the exact API stage, zero LoadLibrary result, process exit, and Win32 code");
 }
 
 static void AppCloseShutsDownActiveBridge()

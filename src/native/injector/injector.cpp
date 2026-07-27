@@ -219,6 +219,12 @@ namespace
         return true;
     }
 
+    auto process_has_exited(HANDLE process, DWORD& exit_code) -> bool
+    {
+        exit_code = STILL_ACTIVE;
+        return GetExitCodeProcess(process, &exit_code) && exit_code != STILL_ACTIVE;
+    }
+
     auto remote_module_base(DWORD pid, const std::wstring& expected_path, DWORD& win32_error) -> std::uintptr_t
     {
         win32_error = ERROR_MOD_NOT_FOUND;
@@ -625,12 +631,38 @@ namespace
         }
 
         std::uint64_t actual_creation = 0;
-        std::wstring actual_executable{};
-        if (!query_creation_filetime(process, actual_creation, win32_error) ||
-            !query_process_image_path(process, actual_executable, win32_error))
+        if (!query_creation_filetime(process, actual_creation, win32_error))
         {
+            const DWORD query_error = win32_error;
+            DWORD process_exit = STILL_ACTIVE;
+            const bool exited = process_has_exited(process, process_exit);
             CloseHandle(process);
-            write_result(false, "failed", pid, &input, 0, win32_error, 0, "target_identity_query_failed");
+            write_result(false,
+                         "failed",
+                         pid,
+                         &input,
+                         0,
+                         query_error,
+                         0,
+                         exited ? "target_exited_during_identity_query" : "target_creation_time_query_failed");
+            return 4;
+        }
+
+        std::wstring actual_executable{};
+        if (!query_process_image_path(process, actual_executable, win32_error))
+        {
+            const DWORD query_error = win32_error;
+            DWORD process_exit = STILL_ACTIVE;
+            const bool exited = process_has_exited(process, process_exit);
+            CloseHandle(process);
+            write_result(false,
+                         "failed",
+                         pid,
+                         &input,
+                         0,
+                         query_error,
+                         0,
+                         exited ? "target_exited_during_identity_query" : "target_image_path_query_failed");
             return 4;
         }
         if (actual_creation != expected_creation || !same_path(actual_executable, expected_executable))
@@ -676,8 +708,8 @@ namespace
             return 6;
         }
 
-        DWORD ignored_load_exit = 0;
-        if (wait_remote_thread(load_thread, RemoteLoadTimeoutMs, ignored_load_exit, win32_error) == RemoteWaitResult::Indeterminate)
+        DWORD load_exit = 0;
+        if (wait_remote_thread(load_thread, RemoteLoadTimeoutMs, load_exit, win32_error) == RemoteWaitResult::Indeterminate)
         {
             CloseHandle(load_thread);
             CloseHandle(process);
@@ -687,6 +719,21 @@ namespace
         }
         CloseHandle(load_thread);
         VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
+        if (load_exit == 0)
+        {
+            DWORD process_exit = STILL_ACTIVE;
+            const bool exited = process_has_exited(process, process_exit);
+            CloseHandle(process);
+            write_result(false,
+                         "failed",
+                         pid,
+                         &input,
+                         0,
+                         exited ? ERROR_PROCESS_ABORTED : ERROR_DLL_INIT_FAILED,
+                         0,
+                         exited ? "target_exited_during_loadlibrary" : "remote_loadlibrary_failed");
+            return 7;
+        }
 
         const auto remote_base = remote_module_base(pid, bridge_path, win32_error);
         if (!remote_base)

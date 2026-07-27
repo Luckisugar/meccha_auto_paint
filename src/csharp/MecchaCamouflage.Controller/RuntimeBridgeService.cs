@@ -61,6 +61,36 @@ public static class ResearchBridgeArtifacts
     }
 }
 
+public static class GameProcessSelectionPolicy
+{
+    public static int? SelectProcessId(
+        IEnumerable<int> candidateProcessIds,
+        int? pinnedProcessId)
+    {
+        ArgumentNullException.ThrowIfNull(candidateProcessIds);
+        var candidates = candidateProcessIds
+            .Where(processId => processId > 0)
+            .Distinct()
+            .ToArray();
+        if (pinnedProcessId is > 0 &&
+            candidates.Contains(pinnedProcessId.Value))
+        {
+            return pinnedProcessId.Value;
+        }
+        return candidates.Length == 1 ? candidates[0] : null;
+    }
+
+    public static bool MayReplacePinnedTarget(
+        bool hasPinnedTarget,
+        bool pinnedTargetIsAlive) =>
+        !hasPinnedTarget || !pinnedTargetIsAlive;
+
+    public static bool MayStageDirectInstance(
+        bool hasMatchingBridge,
+        bool hasPublishedResident) =>
+        !hasMatchingBridge && !hasPublishedResident;
+}
+
 /// <summary>
 /// Stages and starts one uniquely named direct bridge per attempt. Existing bridge modules are
 /// intentionally outside this service's control: they are neither enumerated, switched,
@@ -78,6 +108,9 @@ public sealed class RuntimeBridgeService
     private readonly object bridgeStateGate = new();
     private BridgeInstance? activeInstance;
     private string waitingForProcessName = "";
+    private string lastAmbiguousProcessKey = "";
+    private string lastBlockedTargetSwitchKey = "";
+    private string lastUnresponsiveBridgeKey = "";
     private string lastBridgeReadyLogKey = "";
     private bool bridgeReadyTimeoutLogged;
     private bool bridgeConnected;
@@ -160,7 +193,48 @@ public sealed class RuntimeBridgeService
     public Process? FindGameProcess(string processName)
     {
         var name = Path.GetFileNameWithoutExtension(processName);
-        return Process.GetProcessesByName(name).OrderBy(process => process.Id).FirstOrDefault();
+        TargetProcessIdentity? pinnedTarget;
+        lock (bridgeStateGate)
+            pinnedTarget = activeInstance?.Target;
+        var pinnedProcess = TryOpenPinnedProcess(pinnedTarget);
+        if (pinnedProcess is not null)
+            return pinnedProcess;
+
+        var candidates = Process.GetProcessesByName(name);
+        var candidateProcessIds =
+            candidates.Select(process => process.Id).ToArray();
+        var selectedProcessId = GameProcessSelectionPolicy.SelectProcessId(
+            candidateProcessIds,
+            pinnedProcessId: null);
+        Process? selected = null;
+        foreach (var candidate in candidates)
+        {
+            if (selected is null && candidate.Id == selectedProcessId)
+                selected = candidate;
+            else
+                candidate.Dispose();
+        }
+        if (selected is null && candidates.Length > 1)
+        {
+            var candidateKey = string.Join(
+                ",",
+                candidateProcessIds.Order());
+            if (!string.Equals(
+                    lastAmbiguousProcessKey,
+                    candidateKey,
+                    StringComparison.Ordinal))
+            {
+                lastAmbiguousProcessKey = candidateKey;
+                waitingForProcessName = processName;
+                log.Warn(
+                    $"Game process: multiple candidates ({candidateKey}); waiting for one unambiguous target.");
+            }
+        }
+        else
+        {
+            lastAmbiguousProcessKey = "";
+        }
+        return selected;
     }
 
     public Task<BridgeReply> PingAsync(CancellationToken cancellationToken = default, TimeSpan? timeoutOverride = null) =>
@@ -412,6 +486,44 @@ public sealed class RuntimeBridgeService
     {
         ArgumentNullException.ThrowIfNull(target);
         waitingForProcessName = "";
+        BridgeInstance? previousInstance;
+        lock (bridgeStateGate)
+            previousInstance = activeInstance;
+        if (previousInstance is not null &&
+            !SameTargetIdentity(previousInstance.Target, target))
+        {
+            var previousTargetIsAlive =
+                TargetIdentityIsAlive(previousInstance.Target);
+            if (!GameProcessSelectionPolicy.MayReplacePinnedTarget(
+                    hasPinnedTarget: true,
+                    pinnedTargetIsAlive: previousTargetIsAlive))
+            {
+                var blockedKey =
+                    $"{previousInstance.Target.ProcessId}:{target.ProcessId}";
+                if (!string.Equals(
+                        lastBlockedTargetSwitchKey,
+                        blockedKey,
+                        StringComparison.Ordinal))
+                {
+                    lastBlockedTargetSwitchKey = blockedKey;
+                    log.Warn(
+                        $"Game process: keeping connected pid={previousInstance.Target.ProcessId}; ignored competing pid={target.ProcessId}.");
+                }
+                return false;
+            }
+
+            lock (bridgeStateGate)
+            {
+                if (ReferenceEquals(activeInstance, previousInstance))
+                {
+                    activeInstance = null;
+                    bridgeConnected = false;
+                }
+            }
+            lastBlockedTargetSwitchKey = "";
+            log.Info(
+                $"Game process: previous pid={previousInstance.Target.ProcessId} exited; selecting pid={target.ProcessId}.");
+        }
         var matchingInstance = MatchingActiveInstance(target);
         if (matchingInstance is not null)
         {
@@ -419,10 +531,30 @@ public sealed class RuntimeBridgeService
             if (IsBridgeReadyForInstance(ping, matchingInstance))
             {
                 bridgeReadyTimeoutLogged = false;
+                lastUnresponsiveBridgeKey = "";
                 if (RestoreConnectedState(matchingInstance))
                     return true;
             }
             MarkDisconnectedIfCurrent(matchingInstance);
+            if (!GameProcessSelectionPolicy.MayStageDirectInstance(
+                    hasMatchingBridge: true,
+                    hasPublishedResident: false))
+            {
+                var unresponsiveKey =
+                    $"{matchingInstance.Target.ProcessId}:{matchingInstance.InstanceId:N}";
+                if (!string.Equals(
+                        lastUnresponsiveBridgeKey,
+                        unresponsiveKey,
+                        StringComparison.Ordinal))
+                {
+                    lastUnresponsiveBridgeKey = unresponsiveKey;
+                    DiagnosticsState.SetBridgeInjection(
+                        $"existing bridge unresponsive pid={matchingInstance.Target.ProcessId} instance={matchingInstance.InstanceId:N}");
+                    log.Warn(
+                        $"Bridge: existing instance in game process pid={matchingInstance.Target.ProcessId} is not responding; automatic reinjection was suppressed.");
+                }
+                return false;
+            }
         }
 
         var resident = TryAttachResidentCore(target);
@@ -532,6 +664,56 @@ public sealed class RuntimeBridgeService
             if (!ownsMutex)
             {
                 DiagnosticsState.SetBridgeInjection($"waiting for another direct injection pid={target.ProcessId}");
+                return false;
+            }
+
+            // Another warmup or GUI may have published the resident core while
+            // this caller waited for the cross-process injection mutex. Recheck
+            // under the mutex so repeated startup requests cannot stack DLLs.
+            var matchingInstance = MatchingActiveInstance(target);
+            var residentInstance = matchingInstance is null
+                ? TryAttachResidentCore(target)
+                : null;
+            if (!GameProcessSelectionPolicy.MayStageDirectInstance(
+                    hasMatchingBridge: matchingInstance is not null,
+                    hasPublishedResident: residentInstance is not null))
+            {
+                var existingInstance = matchingInstance ?? residentInstance!;
+                if (residentInstance is not null)
+                {
+                    lock (bridgeStateGate)
+                    {
+                        activeInstance = residentInstance;
+                        bridgeConnected = false;
+                    }
+                }
+
+                var existingPing = PingAsync(
+                        cancellationToken,
+                        BridgeProbeTimeout)
+                    .GetAwaiter()
+                    .GetResult();
+                if (IsBridgeReadyForInstance(existingPing, existingInstance))
+                {
+                    bridgeReadyTimeoutLogged = false;
+                    lastUnresponsiveBridgeKey = "";
+                    return RestoreConnectedState(existingInstance);
+                }
+
+                MarkDisconnectedIfCurrent(existingInstance);
+                var unresponsiveKey =
+                    $"{existingInstance.Target.ProcessId}:{existingInstance.InstanceId:N}";
+                if (!string.Equals(
+                        lastUnresponsiveBridgeKey,
+                        unresponsiveKey,
+                        StringComparison.Ordinal))
+                {
+                    lastUnresponsiveBridgeKey = unresponsiveKey;
+                    DiagnosticsState.SetBridgeInjection(
+                        $"existing bridge unresponsive pid={existingInstance.Target.ProcessId} instance={existingInstance.InstanceId:N}");
+                    log.Warn(
+                        $"Bridge: existing instance in game process pid={existingInstance.Target.ProcessId} is not responding; automatic reinjection was suppressed.");
+                }
                 return false;
             }
 
@@ -808,6 +990,65 @@ public sealed class RuntimeBridgeService
         return TargetProcessIdentity.Create(process.Id, process.StartTime.ToUniversalTime().ToFileTimeUtc(), executablePath);
     }
 
+    private static bool SameTargetIdentity(
+        TargetProcessIdentity left,
+        TargetProcessIdentity right) =>
+        left.ProcessId == right.ProcessId &&
+        left.CreationTimeUtcFileTime == right.CreationTimeUtcFileTime &&
+        string.Equals(
+            left.ExecutablePath,
+            right.ExecutablePath,
+            StringComparison.OrdinalIgnoreCase);
+
+    private static Process? TryOpenPinnedProcess(
+        TargetProcessIdentity? target)
+    {
+        if (target is null)
+            return null;
+        try
+        {
+            var process = Process.GetProcessById(target.ProcessId);
+            if (process.HasExited)
+            {
+                process.Dispose();
+                return null;
+            }
+            try
+            {
+                var creationTime = process.StartTime
+                    .ToUniversalTime()
+                    .ToFileTimeUtc();
+                if (creationTime != target.CreationTimeUtcFileTime)
+                {
+                    process.Dispose();
+                    return null;
+                }
+            }
+            catch (Exception ex) when (
+                ex is Win32Exception or
+                InvalidOperationException or
+                UnauthorizedAccessException)
+            {
+                // Retain the pinned PID when Windows temporarily denies
+                // identity inspection. Switching targets is less safe.
+            }
+            return process;
+        }
+        catch (Exception ex) when (
+            ex is ArgumentException or
+            InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static bool TargetIdentityIsAlive(
+        TargetProcessIdentity target)
+    {
+        using var process = TryOpenPinnedProcess(target);
+        return process is not null;
+    }
+
     private static string ResolvePackagedNativeAsset(string root, string fileName)
     {
         var inNativeDirectory = Path.Combine(root, "native", fileName);
@@ -921,15 +1162,19 @@ public sealed class RuntimeBridgeService
     {
         if (invocation.Result?.State.Equals("indeterminate_timeout", StringComparison.OrdinalIgnoreCase) == true)
             return "the remote operation did not finish. Its target memory was intentionally retained; retry explicitly after confirming the game is responsive.";
+        var win32Error = invocation.Result?.Win32Error ?? 0;
+        var win32Detail = win32Error > 0
+            ? $" (win32={win32Error}: {new Win32Exception(win32Error).Message})"
+            : "";
         var detail = invocation.Result?.Detail;
         if (string.IsNullOrWhiteSpace(detail))
             detail = invocation.ParseError;
         if (string.IsNullOrWhiteSpace(detail))
             detail = invocation.StandardError;
         var lower = detail.ToLowerInvariant();
-        if (lower.Contains("access denied") || lower.Contains("win32=5"))
-            return "access denied while opening the selected game process. Run Meccha Camouflage with the same privileges as the game, or try Run as administrator.";
-        return detail;
+        if (lower.Contains("access denied") || win32Error == 5)
+            return "access denied while opening the selected game process. Run Meccha Camouflage with the same privileges as the game, or try Run as administrator." + win32Detail;
+        return detail + win32Detail;
     }
 
     private static string FriendlyAccessFailure(string message)
