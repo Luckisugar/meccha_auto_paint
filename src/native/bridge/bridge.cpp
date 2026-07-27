@@ -408,6 +408,8 @@ namespace
         std::uint32_t capsule_transforms{0};
         std::uint32_t capsule_sizes{0};
         std::uint32_t capsule_projected{0};
+        std::uint32_t actor_bounds{0};
+        std::uint32_t actor_bounds_projected{0};
         std::uint32_t mesh_components{0};
         std::uint32_t pose_profile_matches{0};
         std::uint32_t pose_component_space{0};
@@ -18954,15 +18956,17 @@ namespace
         int viewport_world_offset{-2};
     };
 
-    auto esp_snapshot_role_name(EspSnapshotRole role) -> const char*
+    auto esp_snapshot_pawn_is_spectator(
+        Reflection& ref,
+        std::uintptr_t pawn) -> bool
     {
-        switch (role)
+        if (!live_uobject(pawn))
         {
-        case EspSnapshotRole::Hider: return "hider";
-        case EspSnapshotRole::Hunter: return "hunter";
-        case EspSnapshotRole::Spectator: return "spectator";
-        default: return "unknown";
+            return false;
         }
+        const auto class_name = lower_copy(ref.class_name(pawn));
+        return contains_text(class_name, "spectatepawn") ||
+               contains_text(class_name, "spectatorpawn");
     }
 
     auto esp_snapshot_read_bool_property(Reflection& ref,
@@ -19172,7 +19176,10 @@ namespace
             // when present, then use the standard UE fallback names.  This is
             // a property schema decision, never a player-name hard-code.
             ref, player_state, {"CustomPlayerName", "PlayerNamePrivate", "PlayerName"}, name);
-        out = {player_state, pawn, role, name};
+        out.player_state = player_state;
+        out.pawn = pawn;
+        out.role = role;
+        out.name = std::move(name);
         return true;
     }
 
@@ -21065,6 +21072,8 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         std::uint32_t capsule_transforms{0};
         std::uint32_t capsule_sizes{0};
         std::uint32_t capsule_projected{0};
+        std::uint32_t actor_bounds{0};
+        std::uint32_t actor_bounds_projected{0};
         std::uint32_t mesh_components{0};
         std::uint32_t pose_profile_matches{0};
         std::uint32_t pose_component_space{0};
@@ -21100,6 +21109,8 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
             snapshot->capsule_transforms,
             snapshot->capsule_sizes,
             snapshot->capsule_projected,
+            snapshot->actor_bounds,
+            snapshot->actor_bounds_projected,
             snapshot->mesh_components,
             snapshot->pose_profile_matches,
             snapshot->pose_component_space,
@@ -21732,6 +21743,108 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         return std::isfinite(screen.x) && std::isfinite(screen.y);
     }
 
+    auto esp_native_project_snapline_target(
+        const EspNativeView& view,
+        const sdk::FVector& world,
+        int width,
+        int height,
+        EspNativePoint& screen) -> bool
+    {
+        if (esp_native_project(view, world, width, height, screen))
+        {
+            return true;
+        }
+        screen = {};
+        if (width <= 0 || height <= 0 ||
+            !esp_native_finite(view.location) ||
+            !esp_native_finite(world))
+        {
+            return false;
+        }
+        sdk::FVector forward{};
+        sdk::FVector right{};
+        sdk::FVector up{};
+        esp_native_axes(view.rotation, forward, right, up);
+        const sdk::FVector delta{
+            world.X - view.location.X,
+            world.Y - view.location.Y,
+            world.Z - view.location.Z};
+        auto horizontal = esp_native_dot(delta, right);
+        const auto vertical = esp_native_dot(delta, up);
+        if (!std::isfinite(horizontal) || !std::isfinite(vertical))
+        {
+            return false;
+        }
+        if (std::abs(horizontal) < 0.000001 &&
+            std::abs(vertical) < 0.000001)
+        {
+            horizontal = 1.0;
+        }
+        const auto normalization = std::max(
+            {std::abs(horizontal), std::abs(vertical), 1.0});
+        const auto extent =
+            static_cast<double>(std::max(width, height)) * 2.0;
+        screen = {
+            static_cast<double>(width) / 2.0 +
+                horizontal / normalization * extent,
+            static_cast<double>(height) / 2.0 -
+                vertical / normalization * extent};
+        return std::isfinite(screen.x) && std::isfinite(screen.y);
+    }
+
+    auto esp_native_clip_line_endpoint_to_viewport(
+        const EspNativePoint& start,
+        const EspNativePoint& target,
+        int width,
+        int height,
+        EspNativePoint& endpoint) -> bool
+    {
+        endpoint = {};
+        if (width <= 0 || height <= 0 ||
+            !std::isfinite(start.x) || !std::isfinite(start.y) ||
+            !std::isfinite(target.x) || !std::isfinite(target.y) ||
+            start.x < 0.0 || start.x > width ||
+            start.y < 0.0 || start.y > height)
+        {
+            return false;
+        }
+        const auto dx = target.x - start.x;
+        const auto dy = target.y - start.y;
+        if (std::abs(dx) < 0.000001 && std::abs(dy) < 0.000001)
+        {
+            return false;
+        }
+        double scale = 1.0;
+        if (target.x < 0.0)
+        {
+            scale = std::min(scale, -start.x / dx);
+        }
+        else if (target.x > width)
+        {
+            scale = std::min(
+                scale, (static_cast<double>(width) - start.x) / dx);
+        }
+        if (target.y < 0.0)
+        {
+            scale = std::min(scale, -start.y / dy);
+        }
+        else if (target.y > height)
+        {
+            scale = std::min(
+                scale, (static_cast<double>(height) - start.y) / dy);
+        }
+        if (!std::isfinite(scale) || scale <= 0.0)
+        {
+            return false;
+        }
+        endpoint = {
+            std::clamp(start.x + dx * scale, 0.0,
+                       static_cast<double>(width)),
+            std::clamp(start.y + dy * scale, 0.0,
+                       static_cast<double>(height))};
+        return std::isfinite(endpoint.x) && std::isfinite(endpoint.y);
+    }
+
     void esp_native_calibrate_projection(Reflection& ref,
                                          std::uintptr_t controller,
                                          const EspNativeView& view,
@@ -22061,6 +22174,147 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         return selected;
     }
 
+    struct EspNativeMeshSearch
+    {
+        std::uint32_t count{0};
+        std::array<std::uintptr_t, 64> components{};
+    };
+
+    auto esp_native_profile_mesh_for_pawn(
+        Reflection& ref,
+        std::uintptr_t pawn,
+        EspNativeMeshSearch* search = nullptr)
+        -> std::uintptr_t
+    {
+        if (search)
+        {
+            *search = {};
+        }
+        if (!live_uobject(pawn))
+        {
+            return 0;
+        }
+
+        static int root_component_offset = std::numeric_limits<int>::min();
+        static int attach_children_offset = std::numeric_limits<int>::min();
+        if (root_component_offset == std::numeric_limits<int>::min())
+        {
+            root_component_offset =
+                ref.resolve_property_offset("Actor", "RootComponent");
+            attach_children_offset =
+                ref.resolve_property_offset(
+                    "SceneComponent", "AttachChildren");
+        }
+
+        std::array<std::uintptr_t, 64> candidates{};
+        std::size_t candidate_count{};
+        const auto add_candidate = [&](std::uintptr_t candidate) {
+            if (!live_uobject(candidate) ||
+                candidate_count >= candidates.size())
+            {
+                return;
+            }
+            const auto class_name = lower_copy(ref.class_name(candidate));
+            if (!contains_text(class_name, "skeletalmesh") &&
+                !contains_text(class_name, "skinnedmesh"))
+            {
+                return;
+            }
+            if (std::find(
+                    candidates.begin(),
+                    candidates.begin() +
+                        static_cast<std::ptrdiff_t>(candidate_count),
+                    candidate) !=
+                candidates.begin() +
+                    static_cast<std::ptrdiff_t>(candidate_count))
+            {
+                return;
+            }
+            candidates[candidate_count++] = candidate;
+        };
+        for (const auto* property_name :
+             {"Mesh",
+              "MeshComponent",
+              "SkeletalMeshComponent",
+              "BodyMesh",
+              "CharacterMesh",
+              "FirstPersonMesh",
+              "TargetMeshComponent",
+              "TargetMesh"})
+        {
+            add_candidate(read_object_property_by_names(
+                ref, pawn, {property_name}));
+        }
+        // Body meshes may sit below intermediate scene components. Walk the
+        // attachment tree instead of assuming every mesh is a direct child of
+        // RootComponent.
+        std::array<std::uintptr_t, 128> scene_components{};
+        std::size_t scene_count{};
+        const auto add_scene_component = [&](std::uintptr_t component) {
+            if (!live_uobject(component) ||
+                scene_count >= scene_components.size() ||
+                std::find(
+                    scene_components.begin(),
+                    scene_components.begin() +
+                        static_cast<std::ptrdiff_t>(scene_count),
+                    component) !=
+                    scene_components.begin() +
+                        static_cast<std::ptrdiff_t>(scene_count))
+            {
+                return;
+            }
+            scene_components[scene_count++] = component;
+        };
+        if (root_component_offset >= 0 && attach_children_offset >= 0)
+        {
+            add_scene_component(safe_read<std::uintptr_t>(
+                pawn +
+                static_cast<std::uintptr_t>(root_component_offset)));
+            for (std::size_t index = 0; index < scene_count; ++index)
+            {
+                const auto component = scene_components[index];
+                add_candidate(component);
+                const auto data = safe_read<std::uintptr_t>(
+                    component +
+                    static_cast<std::uintptr_t>(attach_children_offset));
+                const auto count = safe_read<int>(
+                    component +
+                    static_cast<std::uintptr_t>(attach_children_offset) + 8);
+                if (!data || count <= 0 || count > 512)
+                {
+                    continue;
+                }
+                for (int child = 0; child < count; ++child)
+                {
+                    add_scene_component(safe_read<std::uintptr_t>(
+                        data + static_cast<std::uintptr_t>(child) *
+                                   sizeof(std::uintptr_t)));
+                }
+            }
+        }
+        if (search)
+        {
+            search->count =
+                static_cast<std::uint32_t>(candidate_count);
+            std::copy_n(
+                candidates.begin(),
+                candidate_count,
+                search->components.begin());
+        }
+        for (std::size_t index = 0; index < candidate_count; ++index)
+        {
+            if (esp_native_skeleton_contract_for_mesh(
+                    ref, candidates[index]))
+            {
+                return candidates[index];
+            }
+        }
+        // Asset names can change while bone topology remains compatible.
+        // Return a discovered skeletal component so pose validation can select
+        // a profile from bone count and invariant parent/child lengths.
+        return candidate_count > 0 ? candidates[0] : 0;
+    }
+
     auto esp_native_read_pose_array_at(
         std::uintptr_t mesh,
         int offset,
@@ -22215,11 +22469,8 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         constexpr std::array<int, 2> verified_offsets{{0x9B8, 0x5F0}};
         static std::unordered_map<std::uintptr_t, PoseAccessor> accessors{};
         contract = esp_native_skeleton_contract_for_mesh(ref, mesh);
+        const bool profile_from_asset = contract != nullptr;
         transform_space = runtime_contract::EspPoseTransformSpace::Unavailable;
-        if (!contract || !contract->profile)
-        {
-            return false;
-        }
         const auto asset = read_object_property_by_names(
             ref,
             mesh,
@@ -22234,8 +22485,12 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
             return false;
         }
         auto& accessor = accessors[key];
-        const auto bone_count = contract->profile->bone_count;
+        if (!contract && accessor.contract && accessor.contract->profile)
+        {
+            contract = accessor.contract;
+        }
         const auto apply_space = [&](const EspNativePoseTransforms& raw,
+                                     const EspNativeSkeletonContract& candidate_contract,
                                      runtime_contract::EspPoseTransformSpace space,
                                      EspNativePoseTransforms& output) {
             if (space == runtime_contract::EspPoseTransformSpace::Component)
@@ -22245,14 +22500,19 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
             }
             return space == runtime_contract::EspPoseTransformSpace::Local &&
                    esp_native_compose_local_pose(
-                       *contract->profile, raw, output);
+                       *candidate_contract.profile, raw, output);
         };
-        if (accessor.array_offset >= 0 && accessor.contract == contract)
+        if (contract && contract->profile &&
+            accessor.array_offset >= 0 && accessor.contract == contract)
         {
             EspNativePoseTransforms raw{};
             if (esp_native_read_pose_array_at(
-                    mesh, accessor.array_offset, bone_count, raw) &&
-                apply_space(raw, accessor.transform_space, transforms))
+                    mesh,
+                    accessor.array_offset,
+                    contract->profile->bone_count,
+                    raw) &&
+                apply_space(
+                    raw, *contract, accessor.transform_space, transforms))
             {
                 transform_space = accessor.transform_space;
                 return true;
@@ -22265,12 +22525,11 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         const auto now_ms = static_cast<std::uint64_t>(GetTickCount64());
         if (accessor.last_probe_ms != 0 &&
             now_ms >= accessor.last_probe_ms &&
-            now_ms - accessor.last_probe_ms < 2'000)
+            now_ms - accessor.last_probe_ms < 250)
         {
             return false;
         }
         accessor.last_probe_ms = now_ms;
-        accessor.contract = contract;
         std::vector<OffsetCandidate> candidates{};
         const auto add_candidate = [&](int offset) {
             if (offset < 0 ||
@@ -22301,57 +22560,93 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
             add_candidate(offset);
         }
 
+        std::vector<const EspNativeSkeletonContract*> candidate_contracts{};
+        if (profile_from_asset)
+        {
+            candidate_contracts.push_back(contract);
+        }
+        else
+        {
+            for (const auto& candidate_contract :
+                 esp_native_skeleton_contracts())
+            {
+                if (candidate_contract.profile)
+                {
+                    candidate_contracts.push_back(&candidate_contract);
+                }
+            }
+        }
+
         double best_error = std::numeric_limits<double>::infinity();
         int best_offset{-1};
         auto best_space =
             runtime_contract::EspPoseTransformSpace::Unavailable;
+        const EspNativeSkeletonContract* best_contract = nullptr;
         EspNativePoseTransforms best{};
-        for (const auto& candidate : candidates)
+        for (const auto* candidate_contract : candidate_contracts)
         {
-            EspNativePoseTransforms raw{};
-            if (!esp_native_read_pose_array_at(
-                    mesh, candidate.offset, bone_count, raw))
+            if (!candidate_contract || !candidate_contract->profile)
             {
                 continue;
             }
-            const auto component_error =
-                esp_native_pose_topology_error(*contract, raw);
-            EspNativePoseTransforms local_component{};
-            const auto local_error =
-                esp_native_compose_local_pose(
-                    *contract->profile, raw, local_component)
-                    ? esp_native_pose_topology_error(
-                          *contract, local_component)
-                    : -1.0;
-            const auto space = runtime_contract::esp_select_pose_space(
-                component_error, local_error);
-            const auto error =
-                space == runtime_contract::EspPoseTransformSpace::Component
-                    ? component_error
-                    : local_error;
-            if (space ==
-                    runtime_contract::EspPoseTransformSpace::Unavailable ||
-                error < 0.0 || error >= best_error)
+            for (const auto& candidate : candidates)
             {
-                continue;
+                EspNativePoseTransforms raw{};
+                if (!esp_native_read_pose_array_at(
+                        mesh,
+                        candidate.offset,
+                        candidate_contract->profile->bone_count,
+                        raw))
+                {
+                    continue;
+                }
+                const auto component_error =
+                    esp_native_pose_topology_error(
+                        *candidate_contract, raw);
+                EspNativePoseTransforms local_component{};
+                const auto local_error =
+                    esp_native_compose_local_pose(
+                        *candidate_contract->profile,
+                        raw,
+                        local_component)
+                        ? esp_native_pose_topology_error(
+                              *candidate_contract, local_component)
+                        : -1.0;
+                const auto space =
+                    runtime_contract::esp_select_pose_space(
+                        component_error, local_error);
+                const auto error =
+                    space ==
+                            runtime_contract::EspPoseTransformSpace::Component
+                        ? component_error
+                        : local_error;
+                if (space ==
+                        runtime_contract::EspPoseTransformSpace::Unavailable ||
+                    error < 0.0 || error >= best_error)
+                {
+                    continue;
+                }
+                best_error = error;
+                best_offset = candidate.offset;
+                best_space = space;
+                best_contract = candidate_contract;
+                best = space ==
+                               runtime_contract::EspPoseTransformSpace::Component
+                           ? raw
+                           : local_component;
             }
-            best_error = error;
-            best_offset = candidate.offset;
-            best_space = space;
-            best = space ==
-                           runtime_contract::EspPoseTransformSpace::Component
-                       ? raw
-                       : local_component;
         }
         // Bone lengths are invariant under animation. An average logarithmic
         // error over 0.45 means the candidate differs from the matched
         // skeleton by more than roughly 57% and must not be rendered.
-        if (best_offset < 0 || best_error > 0.45)
+        if (best_offset < 0 || !best_contract || best_error > 0.45)
         {
             return false;
         }
         accessor.array_offset = best_offset;
         accessor.transform_space = best_space;
+        accessor.contract = best_contract;
+        contract = best_contract;
         transforms = best;
         transform_space = best_space;
         return true;
@@ -22407,6 +22702,119 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
             bottom = std::max(bottom, point.y);
         }
         return any && std::isfinite(left) && std::isfinite(top) && std::isfinite(right) && std::isfinite(bottom) &&
+               right - left > 1.0 && bottom - top > 1.0;
+    }
+
+    struct EspNativeWorldBounds
+    {
+        sdk::FVector origin{};
+        sdk::FVector extent{};
+    };
+
+    auto esp_native_actor_bounds(Reflection& ref,
+                                 std::uintptr_t actor,
+                                 EspNativeWorldBounds& bounds) -> bool
+    {
+        struct ActorBoundsAccessor
+        {
+            std::uintptr_t function{0};
+            std::uintptr_t origin_property{0};
+            std::uintptr_t extent_property{0};
+            int params_size{0};
+        };
+        bounds = {};
+        if (!live_uobject(actor))
+        {
+            return false;
+        }
+        static std::unordered_map<std::uintptr_t, ActorBoundsAccessor> accessors{};
+        const auto actor_class = ref.class_ptr(actor);
+        if (!actor_class)
+        {
+            return false;
+        }
+        auto found = accessors.find(actor_class);
+        if (found == accessors.end())
+        {
+            ActorBoundsAccessor accessor{};
+            accessor.function = ref.find_function(actor, "GetActorBounds");
+            if (accessor.function)
+            {
+                accessor.params_size =
+                    safe_read<int>(accessor.function + OffPropertiesSize, 0);
+                accessor.origin_property =
+                    find_property_any(ref, accessor.function, {"Origin"});
+                accessor.extent_property =
+                    find_property_any(ref, accessor.function, {"BoxExtent"});
+            }
+            found = accessors.emplace(actor_class, accessor).first;
+        }
+        const auto& accessor = found->second;
+        if (!accessor.function || !accessor.origin_property ||
+            !accessor.extent_property || accessor.params_size <= 0 ||
+            accessor.params_size > 256)
+        {
+            return false;
+        }
+        std::array<std::uint8_t, 256> params{};
+        std::string failure{};
+        if (!process_event(actor, accessor.function, params.data(), failure) ||
+            !sdk_read_vector3(
+                ref, accessor.origin_property, params.data(), bounds.origin) ||
+            !sdk_read_vector3(
+                ref, accessor.extent_property, params.data(), bounds.extent) ||
+            !esp_native_finite(bounds.origin) ||
+            !esp_native_finite(bounds.extent))
+        {
+            bounds = {};
+            return false;
+        }
+        constexpr double max_extent = 100'000.0;
+        return bounds.extent.X > 0.01 && bounds.extent.X < max_extent &&
+               bounds.extent.Y > 0.01 && bounds.extent.Y < max_extent &&
+               bounds.extent.Z > 0.01 && bounds.extent.Z < max_extent;
+    }
+
+    auto esp_native_project_world_bounds(const EspNativeView& view,
+                                         const EspNativeWorldBounds& bounds,
+                                         int width,
+                                         int height,
+                                         double& left,
+                                         double& top,
+                                         double& right,
+                                         double& bottom) -> bool
+    {
+        left = std::numeric_limits<double>::infinity();
+        top = std::numeric_limits<double>::infinity();
+        right = -std::numeric_limits<double>::infinity();
+        bottom = -std::numeric_limits<double>::infinity();
+        bool any{};
+        for (int x = -1; x <= 1; x += 2)
+        {
+            for (int y = -1; y <= 1; y += 2)
+            {
+                for (int z = -1; z <= 1; z += 2)
+                {
+                    const sdk::FVector corner{
+                        bounds.origin.X + bounds.extent.X * x,
+                        bounds.origin.Y + bounds.extent.Y * y,
+                        bounds.origin.Z + bounds.extent.Z * z};
+                    EspNativePoint point{};
+                    if (!esp_native_project(
+                            view, corner, width, height, point))
+                    {
+                        continue;
+                    }
+                    any = true;
+                    left = std::min(left, point.x);
+                    top = std::min(top, point.y);
+                    right = std::max(right, point.x);
+                    bottom = std::max(bottom, point.y);
+                }
+            }
+        }
+        return any && std::isfinite(left) && std::isfinite(top) &&
+               std::isfinite(right) && std::isfinite(bottom) &&
                right - left > 1.0 && bottom - top > 1.0;
     }
 
@@ -22719,9 +23127,18 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                 continue;
             }
             bool target_spectator{};
-            if (esp_snapshot_read_bool_property(resolver.reflection, target.player_state,
-                                                {"bIsSpectator", "bOnlySpectator", "bIsSpectatorOnly"}, target_spectator) &&
-                target_spectator)
+            const bool spectator_pawn =
+                esp_snapshot_pawn_is_spectator(
+                    resolver.reflection, target.pawn);
+            if ((esp_snapshot_read_bool_property(
+                     resolver.reflection,
+                     target.player_state,
+                     {"bIsSpectator",
+                      "bOnlySpectator",
+                      "bIsSpectatorOnly"},
+                     target_spectator) &&
+                 target_spectator) ||
+                spectator_pawn)
             {
                 ++snapshot.filtered_spectators;
                 continue;
@@ -22737,7 +23154,8 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                 g_esp_native_hider_color.load(std::memory_order_acquire),
                 g_esp_native_hunter_color.load(std::memory_order_acquire)));
             const auto capsule = read_object_property_by_names(
-                resolver.reflection, target.pawn, {"CapsuleComponent", "Capsule", "CollisionCylinder", "RootComponent"});
+                resolver.reflection, target.pawn,
+                {"CapsuleComponent", "Capsule", "CollisionCylinder"});
             if (live_uobject(capsule))
             {
                 ++snapshot.capsule_components;
@@ -22751,6 +23169,12 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
             if (capsule_transform_valid)
             {
                 ++snapshot.capsule_transforms;
+            }
+            sdk::FVector target_origin{};
+            bool target_origin_valid = capsule_transform_valid;
+            if (target_origin_valid)
+            {
+                target_origin = capsule_transform.Translation;
             }
             const bool capsule_size_valid =
                 capsule_transform_valid &&
@@ -22780,8 +23204,9 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                 bottom = expanded.bottom;
             }
             bool wrote{};
-            const auto mesh = read_object_property_by_names(
-                resolver.reflection, target.pawn, {"Mesh", "MeshComponent", "SkeletalMeshComponent"});
+            EspNativeMeshSearch mesh_search{};
+            auto mesh = esp_native_profile_mesh_for_pawn(
+                resolver.reflection, target.pawn, &mesh_search);
             if (live_uobject(mesh))
             {
                 ++snapshot.mesh_components;
@@ -22793,29 +23218,77 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                 runtime_contract::EspPoseTransformSpace::Unavailable;
             if ((draw_skeletons || draw_boxes) && live_uobject(mesh))
             {
-                // The mesh asset selects its staged profile. Bone count,
-                // hierarchy, and edges therefore follow that concrete asset
-                // instead of one fixed 28-index drawing. Candidate arrays are
-                // scored both as component-space and as parent-relative local
-                // transforms against invariant profile bone lengths.
+                // Prefer the staged profile selected by the mesh asset. When
+                // an update or Pawn transition changes that identity, select
+                // among staged profiles by bone count and invariant topology.
+                // Candidate arrays are scored both as component-space and as
+                // parent-relative local transforms.
                 EspNativePoseTransforms pose{};
                 sdk::FTransform mesh_transform{};
-                const bool pose_resolved = esp_native_component_pose(
-                        resolver.reflection,
-                        mesh,
-                        skeleton_contract,
-                        pose,
-                        pose_space);
+                const auto resolve_pose_candidate =
+                    [&](std::uintptr_t candidate) {
+                        if (!live_uobject(candidate))
+                        {
+                            return false;
+                        }
+                        const EspNativeSkeletonContract*
+                            candidate_contract = nullptr;
+                        EspNativePoseTransforms candidate_pose{};
+                        auto candidate_space =
+                            runtime_contract::EspPoseTransformSpace::
+                                Unavailable;
+                        sdk::FTransform candidate_transform{};
+                        if (!esp_native_component_pose(
+                                resolver.reflection,
+                                candidate,
+                                candidate_contract,
+                                candidate_pose,
+                                candidate_space) ||
+                            !candidate_contract ||
+                            !candidate_contract->profile ||
+                            !esp_native_component_transform(
+                                resolver.reflection,
+                                candidate,
+                                candidate_transform))
+                        {
+                            return false;
+                        }
+                        mesh = candidate;
+                        skeleton_contract = candidate_contract;
+                        pose = candidate_pose;
+                        pose_space = candidate_space;
+                        mesh_transform = candidate_transform;
+                        return true;
+                    };
+                bool pose_resolved = resolve_pose_candidate(mesh);
+                for (std::uint32_t index = 0;
+                     !pose_resolved &&
+                     index < mesh_search.count &&
+                     index < mesh_search.components.size();
+                     ++index)
+                {
+                    const auto candidate =
+                        mesh_search.components[index];
+                    if (candidate != mesh)
+                    {
+                        pose_resolved =
+                            resolve_pose_candidate(candidate);
+                    }
+                }
                 if (skeleton_contract && skeleton_contract->profile)
                 {
                     ++snapshot.pose_profile_matches;
                 }
                 if (pose_resolved &&
                     skeleton_contract &&
-                    skeleton_contract->profile &&
-                    esp_native_component_transform(resolver.reflection, mesh, mesh_transform))
+                    skeleton_contract->profile)
                 {
                     pose_valid = true;
+                    if (!target_origin_valid)
+                    {
+                        target_origin = mesh_transform.Translation;
+                        target_origin_valid = esp_native_finite(target_origin);
+                    }
                     for (int index = 0;
                          index < skeleton_contract->profile->bone_count;
                          ++index)
@@ -22857,6 +23330,34 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                     right = pose_right;
                     bottom = pose_bottom;
                     box_valid = true;
+                }
+            }
+            if (!box_valid && !capsule_size_valid && !pose_valid)
+            {
+                EspNativeWorldBounds actor_bounds{};
+                if (esp_native_actor_bounds(
+                        resolver.reflection, target.pawn, actor_bounds))
+                {
+                    ++snapshot.actor_bounds;
+                    if (esp_native_project_world_bounds(
+                            view, actor_bounds, width, height,
+                            left, top, right, bottom))
+                    {
+                        ++snapshot.actor_bounds_projected;
+                        const auto expanded =
+                            runtime_contract::esp_expand_screen_bounds(
+                                {left, top, right, bottom}, 0.04, 0.02);
+                        left = expanded.left;
+                        top = expanded.top;
+                        right = expanded.right;
+                        bottom = expanded.bottom;
+                        box_valid = true;
+                        if (!target_origin_valid)
+                        {
+                            target_origin = actor_bounds.origin;
+                            target_origin_valid = true;
+                        }
+                    }
                 }
             }
             if (draw_boxes && box_valid)
@@ -22903,11 +23404,45 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                     }
                 }
             }
-            if (draw_snaplines && box_valid)
+            if (draw_snaplines)
             {
-                wrote |= esp_native_add_line(snapshot,
-                                              {static_cast<double>(width) / 2.0, static_cast<double>(height) - 2.0},
-                                              {(left + right) / 2.0, bottom}, color, 1.25f);
+                const EspNativePoint start{
+                    static_cast<double>(width) / 2.0,
+                    static_cast<double>(height) - 2.0};
+                EspNativePoint projected_target{};
+                bool target_projected{};
+                if (box_valid)
+                {
+                    projected_target = {(left + right) / 2.0, bottom};
+                    target_projected = true;
+                }
+                else if (target_origin_valid)
+                {
+                    target_projected =
+                        esp_native_project_snapline_target(
+                        view,
+                        target_origin,
+                        width,
+                        height,
+                        projected_target);
+                }
+                EspNativePoint clipped_target{};
+                if (target_projected &&
+                    esp_native_clip_line_endpoint_to_viewport(
+                        start,
+                        projected_target,
+                        width,
+                        height,
+                        clipped_target))
+                {
+                    const bool snapline_added = esp_native_add_line(
+                        snapshot,
+                        start,
+                        clipped_target,
+                        color,
+                        1.25f);
+                    wrote |= snapline_added;
+                }
             }
             if ((draw_names || draw_distance) && box_valid)
             {
@@ -22918,15 +23453,22 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                 }
                 if (draw_distance)
                 {
-                    const auto origin = capsule_transform.Translation;
-                    const auto dx = origin.X - view.location.X;
-                    const auto dy = origin.Y - view.location.Y;
-                    const auto dz = origin.Z - view.location.Z;
-                    const auto meters = std::sqrt(dx * dx + dy * dy + dz * dz) / 100.0;
-                    if (std::isfinite(meters) && meters >= 0.0 && meters < 100000.0)
+                    if (target_origin_valid)
                     {
-                        if (!label.empty()) label += L"  ";
-                        label += std::to_wstring(static_cast<long long>(std::llround(meters))) + L" m";
+                        const auto dx = target_origin.X - view.location.X;
+                        const auto dy = target_origin.Y - view.location.Y;
+                        const auto dz = target_origin.Z - view.location.Z;
+                        const auto meters =
+                            std::sqrt(dx * dx + dy * dy + dz * dz) / 100.0;
+                        if (std::isfinite(meters) && meters >= 0.0 &&
+                            meters < 100000.0)
+                        {
+                            if (!label.empty()) label += L"  ";
+                            label += std::to_wstring(
+                                         static_cast<long long>(
+                                             std::llround(meters))) +
+                                     L" m";
+                        }
                     }
                 }
                 if (!label.empty())
@@ -23205,6 +23747,8 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                                  ",\"capsule_transforms\":" + std::to_string(diagnostics.capsule_transforms) +
                                  ",\"capsule_sizes\":" + std::to_string(diagnostics.capsule_sizes) +
                                  ",\"capsule_projected\":" + std::to_string(diagnostics.capsule_projected) +
+                                 ",\"actor_bounds\":" + std::to_string(diagnostics.actor_bounds) +
+                                 ",\"actor_bounds_projected\":" + std::to_string(diagnostics.actor_bounds_projected) +
                                  ",\"mesh_components\":" + std::to_string(diagnostics.mesh_components) +
                                  ",\"skeleton_contracts\":" + std::to_string(g_esp_native_skeleton_contract_count.load()) +
                                  ",\"pose_profile_matches\":" + std::to_string(diagnostics.pose_profile_matches) +

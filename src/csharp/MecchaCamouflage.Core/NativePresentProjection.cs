@@ -41,6 +41,10 @@ public readonly record struct NativePresentCapsule(
     double Radius,
     double HalfHeight);
 
+public readonly record struct NativePresentWorldBounds(
+    NativePresentVector3 Origin,
+    NativePresentVector3 Extent);
+
 public readonly record struct NativePresentPoint(double X, double Y);
 
 public readonly record struct NativePresentRectangle(double Left, double Top, double Right, double Bottom)
@@ -150,6 +154,140 @@ public static class NativePresentProjection
 
         bounds = new NativePresentRectangle(left, top, rightEdge, bottom);
         return true;
+    }
+
+    /// <summary>
+    /// Projects an actor's world-space axis-aligned bounds. This preserves a
+    /// stable box for pawn variants that expose neither a capsule nor a known
+    /// skeletal-mesh profile.
+    /// </summary>
+    public static bool TryProjectWorldBounds(
+        NativePresentCamera camera,
+        NativePresentWorldBounds worldBounds,
+        int viewportWidth,
+        int viewportHeight,
+        out NativePresentRectangle bounds)
+    {
+        bounds = default;
+        if (!IsFinite(worldBounds.Origin) || !IsFinite(worldBounds.Extent) ||
+            worldBounds.Extent.X <= 0 || worldBounds.Extent.Y <= 0 || worldBounds.Extent.Z <= 0)
+            return false;
+
+        Span<NativePresentVector3> corners = stackalloc NativePresentVector3[8];
+        var index = 0;
+        for (var x = -1; x <= 1; x += 2)
+        {
+            for (var y = -1; y <= 1; y += 2)
+            {
+                for (var z = -1; z <= 1; z += 2)
+                {
+                    corners[index++] = worldBounds.Origin + new NativePresentVector3(
+                        worldBounds.Extent.X * x,
+                        worldBounds.Extent.Y * y,
+                        worldBounds.Extent.Z * z);
+                }
+            }
+        }
+
+        var any = false;
+        var left = double.PositiveInfinity;
+        var top = double.PositiveInfinity;
+        var right = double.NegativeInfinity;
+        var bottom = double.NegativeInfinity;
+        foreach (var corner in corners)
+        {
+            if (!TryProject(camera, corner, viewportWidth, viewportHeight, out var point))
+                continue;
+            any = true;
+            left = Math.Min(left, point.X);
+            top = Math.Min(top, point.Y);
+            right = Math.Max(right, point.X);
+            bottom = Math.Max(bottom, point.Y);
+        }
+        if (!any || !double.IsFinite(left) || !double.IsFinite(top) ||
+            !double.IsFinite(right) || !double.IsFinite(bottom) ||
+            right - left < 1 || bottom - top < 1)
+            return false;
+
+        bounds = new NativePresentRectangle(left, top, right, bottom);
+        return true;
+    }
+
+    public static bool TryClipLineEndpointToViewport(
+        NativePresentPoint start,
+        NativePresentPoint target,
+        int viewportWidth,
+        int viewportHeight,
+        out NativePresentPoint endpoint)
+    {
+        endpoint = default;
+        if (!double.IsFinite(start.X) || !double.IsFinite(start.Y) ||
+            !double.IsFinite(target.X) || !double.IsFinite(target.Y) ||
+            viewportWidth <= 0 || viewportHeight <= 0 ||
+            start.X < 0 || start.X > viewportWidth ||
+            start.Y < 0 || start.Y > viewportHeight)
+            return false;
+
+        var dx = target.X - start.X;
+        var dy = target.Y - start.Y;
+        if (Math.Abs(dx) < 0.000001 && Math.Abs(dy) < 0.000001)
+            return false;
+
+        var scale = 1.0;
+        if (target.X < 0)
+            scale = Math.Min(scale, -start.X / dx);
+        else if (target.X > viewportWidth)
+            scale = Math.Min(scale, (viewportWidth - start.X) / dx);
+        if (target.Y < 0)
+            scale = Math.Min(scale, -start.Y / dy);
+        else if (target.Y > viewportHeight)
+            scale = Math.Min(scale, (viewportHeight - start.Y) / dy);
+        if (!double.IsFinite(scale) || scale <= 0)
+            return false;
+
+        endpoint = new NativePresentPoint(
+            Math.Clamp(start.X + dx * scale, 0, viewportWidth),
+            Math.Clamp(start.Y + dy * scale, 0, viewportHeight));
+        return double.IsFinite(endpoint.X) && double.IsFinite(endpoint.Y);
+    }
+
+    public static bool TryProjectSnaplineTarget(
+        NativePresentCamera camera,
+        NativePresentVector3 world,
+        int viewportWidth,
+        int viewportHeight,
+        out NativePresentPoint screen)
+    {
+        if (TryProject(
+                camera,
+                world,
+                viewportWidth,
+                viewportHeight,
+                out screen))
+            return true;
+        screen = default;
+        if (!IsFinite(camera.Location) || !IsFinite(world) ||
+            viewportWidth <= 0 || viewportHeight <= 0)
+            return false;
+
+        var (_, right, up) = GetAxes(camera.Rotation);
+        var delta = world - camera.Location;
+        var horizontal = Dot(delta, right);
+        var vertical = Dot(delta, up);
+        if (!double.IsFinite(horizontal) || !double.IsFinite(vertical))
+            return false;
+        if (Math.Abs(horizontal) < 0.000001 &&
+            Math.Abs(vertical) < 0.000001)
+            horizontal = 1;
+
+        var normalization = Math.Max(
+            Math.Max(Math.Abs(horizontal), Math.Abs(vertical)),
+            1.0);
+        var extent = Math.Max(viewportWidth, viewportHeight) * 2.0;
+        screen = new NativePresentPoint(
+            viewportWidth / 2.0 + horizontal / normalization * extent,
+            viewportHeight / 2.0 - vertical / normalization * extent);
+        return double.IsFinite(screen.X) && double.IsFinite(screen.Y);
     }
 
     public static (NativePresentVector3 Forward, NativePresentVector3 Right, NativePresentVector3 Up) GetAxes(

@@ -600,6 +600,8 @@ public sealed class MainForm : Form
                 var capsuleTransforms = metadata.TryGetProperty("capsule_transforms", out var capsuleTransformsValue) ? capsuleTransformsValue.GetUInt32() : 0;
                 var capsuleSizes = metadata.TryGetProperty("capsule_sizes", out var capsuleSizesValue) ? capsuleSizesValue.GetUInt32() : 0;
                 var capsuleProjected = metadata.TryGetProperty("capsule_projected", out var capsuleProjectedValue) ? capsuleProjectedValue.GetUInt32() : 0;
+                var actorBounds = metadata.TryGetProperty("actor_bounds", out var actorBoundsValue) ? actorBoundsValue.GetUInt32() : 0;
+                var actorBoundsProjected = metadata.TryGetProperty("actor_bounds_projected", out var actorBoundsProjectedValue) ? actorBoundsProjectedValue.GetUInt32() : 0;
                 var skeletonContracts = metadata.TryGetProperty("skeleton_contracts", out var skeletonContractsValue) ? skeletonContractsValue.GetUInt64() : 0;
                 var poseProfiles = metadata.TryGetProperty("pose_profile_matches", out var poseProfilesValue) ? poseProfilesValue.GetUInt32() : 0;
                 var poseComponent = metadata.TryGetProperty("pose_component_space", out var poseComponentValue) ? poseComponentValue.GetUInt32() : 0;
@@ -634,6 +636,8 @@ public sealed class MainForm : Form
                     CapsuleTransforms = capsuleTransforms,
                     CapsuleSizes = capsuleSizes,
                     CapsuleProjected = capsuleProjected,
+                    ActorBounds = actorBounds,
+                    ActorBoundsProjected = actorBoundsProjected,
                     SkeletonContracts = skeletonContracts,
                     PoseProfileMatches = poseProfiles,
                     PoseComponentSpace = poseComponent,
@@ -664,6 +668,7 @@ public sealed class MainForm : Form
                     $"roles={hiderRoster}/{hunterRoster}; " +
                     $"roster={rosterSource}:{roster}; pawns={pawns}; " +
                     $"capsule={capsuleComponents}/{capsuleTransforms}/{capsuleSizes}/{capsuleProjected}; " +
+                    $"actor_bounds={actorBounds}/{actorBoundsProjected}; " +
                     $"pose=contracts:{skeletonContracts} profiles:{poseProfiles} " +
                     $"space:{poseComponent}/{poseLocal} bones:{poseBones} edges:{poseEdges} ready:{poses}; " +
                     $"geometry={players}/{lines}/{texts}; vertices={vertices}; glyph_quads={glyphQuads}; " +

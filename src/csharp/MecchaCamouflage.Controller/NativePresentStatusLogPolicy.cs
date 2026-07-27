@@ -17,6 +17,8 @@ public sealed record NativePresentStatusLogSample
     public uint CapsuleTransforms { get; init; }
     public uint CapsuleSizes { get; init; }
     public uint CapsuleProjected { get; init; }
+    public uint ActorBounds { get; init; }
+    public uint ActorBoundsProjected { get; init; }
     public ulong SkeletonContracts { get; init; }
     public uint PoseProfileMatches { get; init; }
     public uint PoseComponentSpace { get; init; }
@@ -55,6 +57,7 @@ public static class NativePresentStatusLogPolicy
             Coverage(sample.CapsuleComponents, sample.ValidPawns),
             Coverage(sample.CapsuleTransforms, sample.CapsuleComponents),
             Coverage(sample.CapsuleSizes, sample.CapsuleTransforms),
+            Presence(sample.ActorBoundsProjected),
             Presence(sample.SkeletonContracts),
             Coverage(sample.PoseProfileMatches, sample.ValidPawns),
             Coverage((ulong)sample.PoseComponentSpace + sample.PoseLocalSpace, sample.PoseProfileMatches),
@@ -78,6 +81,8 @@ public static class NativePresentStatusLogPolicy
             sample.CapsuleTransforms,
             sample.CapsuleSizes,
             sample.CapsuleProjected,
+            sample.ActorBounds,
+            sample.ActorBoundsProjected,
             sample.SkeletonContracts,
             sample.PoseProfileMatches,
             sample.PoseComponentSpace,

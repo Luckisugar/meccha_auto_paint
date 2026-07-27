@@ -42,6 +42,11 @@ var tests = new List<(string Name, Action Run)>
     ("native Present ESP restores its own hook without chaining unknown hooks", NativePresentEspRestoresOwnHookWithoutChaining),
     ("native Present capsule projection honors UE camera axes and constrained aspect", NativePresentCapsuleProjectionHonorsCameraAxes),
     ("native Present box prefers validated pose bounds with a capsule fallback", NativePresentBoxUsesPoseBoundsWithCapsuleFallback),
+    ("native Present projects profile-independent actor bounds", NativePresentProjectsProfileIndependentActorBounds),
+    ("native Present snaplines reach the viewport edge for distant targets", NativePresentSnaplinesReachViewportEdge),
+    ("native Present keeps unknown pawn variants visible", NativePresentKeepsUnknownPawnVariantsVisible),
+    ("native Present excludes spectator pawns from actor-bounds fallback", NativePresentExcludesSpectatorPawns),
+    ("native Present can select a skeleton profile from bone topology", NativePresentSelectsSkeletonProfileFromBoneTopology),
     ("native Present snapshot double buffer never publishes a partial frame", NativePresentSnapshotDoubleBufferIsAtomic),
     ("spectator paint resolution requires local controller identity", SpectatorPaintResolutionRequiresLocalControllerIdentity),
     ("diagnostic stroke limit requires explicit option", DiagnosticStrokeLimitRequiresExplicitOption),
@@ -1136,6 +1141,12 @@ static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
         NativePresentStatusLogPolicy.Signature(brokenTransform, verbose: false),
         "normal ESP logging must retain upstream capture-stage failures");
 
+    var actorBoundsFallback = later with { ActorBoundsProjected = 2 };
+    Assert(
+        NativePresentStatusLogPolicy.Signature(later, verbose: false) !=
+        NativePresentStatusLogPolicy.Signature(actorBoundsFallback, verbose: false),
+        "normal ESP logging must report when profile-independent actor bounds recover missing pawns");
+
     var previousFlag = Environment.GetEnvironmentVariable("MECCHA_ESP_VERBOSE_STATUS");
     try
     {
@@ -1428,6 +1439,174 @@ static void NativePresentBoxUsesPoseBoundsWithCapsuleFallback()
            bridge.Contains("esp_native_project_pose_bounds", StringComparison.Ordinal) &&
            bridge.Contains("esp_expand_screen_bounds", StringComparison.Ordinal),
         $"the renderer must prefer validated animated pose bounds while retaining a stable collision-capsule fallback (actual={box})");
+}
+
+static void NativePresentProjectsProfileIndependentActorBounds()
+{
+    var view = new NativePresentCamera(
+        new NativePresentVector3(0, 0, 0),
+        new NativePresentRotator(0, 0, 0),
+        90,
+        16.0 / 9.0,
+        NativePresentFovAxis.MaintainY);
+    var actorBounds = new NativePresentWorldBounds(
+        new NativePresentVector3(1000, 0, 0),
+        new NativePresentVector3(50, 75, 100));
+
+    Assert(NativePresentProjection.TryProjectWorldBounds(
+               view,
+               actorBounds,
+               3440,
+               1440,
+           out var box) &&
+           box.Left <= 1624 && box.Right >= 1816 &&
+           box.Top <= 645 && box.Bottom >= 795 &&
+           box.Width > 100 && box.Height > 100,
+        $"a pawn without a known capsule or mesh profile must retain screen bounds from its actor bounds (actual={box})");
+}
+
+static void NativePresentKeepsUnknownPawnVariantsVisible()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains("esp_native_actor_bounds", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_project_world_bounds", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_profile_mesh_for_pawn", StringComparison.Ordinal) &&
+           bridge.Contains(
+               "auto mesh = esp_native_profile_mesh_for_pawn(",
+               StringComparison.Ordinal) &&
+           bridge.Contains(
+               "if (!box_valid && !capsule_size_valid && !pose_valid)",
+               StringComparison.Ordinal) &&
+           !bridge.Contains(
+               "{\"CapsuleComponent\", \"Capsule\", \"CollisionCylinder\", \"RootComponent\"}",
+               StringComparison.Ordinal),
+        "a pawn without a capsule or known mesh profile must use actor world bounds instead of disappearing");
+}
+
+static void NativePresentSnaplinesReachViewportEdge()
+{
+    var start = new NativePresentPoint(1720, 1438);
+
+    Assert(NativePresentProjection.TryClipLineEndpointToViewport(
+               start,
+               new NativePresentPoint(-4000, 300),
+               3440,
+               1440,
+               out var left) &&
+           Math.Abs(left.X) < 0.001 &&
+           left.Y is >= 0 and <= 1440,
+        $"a projected target beyond the left edge must retain a clipped snapline endpoint (actual={left})");
+    Assert(NativePresentProjection.TryClipLineEndpointToViewport(
+               start,
+               new NativePresentPoint(1900, 700),
+               3440,
+               1440,
+               out var inside) &&
+           Math.Abs(inside.X - 1900) < 0.001 &&
+           Math.Abs(inside.Y - 700) < 0.001,
+        $"an on-screen target must keep its exact projected endpoint (actual={inside})");
+
+    var camera = new NativePresentCamera(
+        new NativePresentVector3(0, 0, 0),
+        new NativePresentRotator(0, 0, 0),
+        90,
+        16.0 / 9.0,
+        NativePresentFovAxis.MaintainY);
+    var behind = default(NativePresentPoint);
+    var behindEdge = default(NativePresentPoint);
+    Assert(
+        NativePresentProjection.TryProjectSnaplineTarget(
+            camera,
+            new NativePresentVector3(-1000, 100, 0),
+            3440,
+            1440,
+            out behind) &&
+        NativePresentProjection.TryClipLineEndpointToViewport(
+            start,
+            behind,
+            3440,
+            1440,
+            out behindEdge) &&
+        (Math.Abs(behindEdge.X) < 0.001 ||
+         Math.Abs(behindEdge.X - 3440) < 0.001 ||
+         Math.Abs(behindEdge.Y) < 0.001),
+        $"a target behind the camera must retain a directional snapline at the viewport edge (actual={behindEdge})");
+
+    var bridge = ReadRepositoryText(Path.Combine(
+        FindRepositoryRoot(), "src", "native", "bridge", "bridge.cpp"));
+    Assert(
+        bridge.Contains(
+            "esp_native_clip_line_endpoint_to_viewport(",
+            StringComparison.Ordinal) &&
+        bridge.Contains(
+            "esp_native_project_snapline_target(",
+            StringComparison.Ordinal) &&
+        bridge.Contains(
+            "else if (target_origin_valid)",
+            StringComparison.Ordinal) &&
+        !bridge.Contains(
+            "if (draw_snaplines && box_valid)",
+            StringComparison.Ordinal),
+        "snapline generation must use the current projected target origin when distant pose bounds collapse below box size");
+}
+
+static void NativePresentExcludesSpectatorPawns()
+{
+    var bridge = ReadRepositoryText(Path.Combine(
+        FindRepositoryRoot(), "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(
+        bridge.Contains(
+            "esp_snapshot_pawn_is_spectator(",
+            StringComparison.Ordinal) &&
+        bridge.Contains(
+            "contains_text(class_name, \"spectatepawn\")",
+            StringComparison.Ordinal) &&
+        bridge.Contains(
+            "contains_text(class_name, \"spectatorpawn\")",
+            StringComparison.Ordinal) &&
+        bridge.IndexOf(
+            "spectator_pawn)",
+            StringComparison.Ordinal) <
+        bridge.IndexOf(
+            "esp_native_actor_bounds(",
+            bridge.IndexOf(
+                "void esp_native_present_capture_snapshot_impl",
+                StringComparison.Ordinal),
+            StringComparison.Ordinal),
+        "spectator Pawn classes must be filtered before actor-bounds fallback can create empty boxes");
+}
+
+static void NativePresentSelectsSkeletonProfileFromBoneTopology()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(bridge.Contains(
+               "const bool profile_from_asset = contract != nullptr;",
+               StringComparison.Ordinal) &&
+           bridge.Contains(
+               "candidate_contracts.push_back(&candidate_contract);",
+               StringComparison.Ordinal) &&
+           bridge.Contains(
+               "esp_native_skeleton_contracts()",
+               StringComparison.Ordinal) &&
+           bridge.Contains(
+               "best_contract = candidate_contract;",
+               StringComparison.Ordinal) &&
+           bridge.Contains(
+               "scene_components[scene_count++] = component;",
+               StringComparison.Ordinal) &&
+           bridge.Contains(
+               "resolve_pose_candidate(candidate)",
+               StringComparison.Ordinal) &&
+           bridge.Contains(
+               "now_ms - accessor.last_probe_ms < 250",
+               StringComparison.Ordinal) &&
+           bridge.Contains("\"BodyMesh\"", StringComparison.Ordinal),
+        "an asset-name miss must still be able to select a validated profile from bone count and topology");
 }
 
 static void NativePresentSnapshotDoubleBufferIsAtomic()
