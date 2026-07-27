@@ -27,6 +27,7 @@ var tests = new List<(string Name, Action Run)>
     ("custom freecam surface is absent", CustomFreecamSurfaceIsAbsent),
     ("misc configures the native Present ESP renderer", MiscUsesNativePresentEspRenderer),
     ("native Present ESP command uses role-fixed scope and colors", NativePresentEspCommandUsesRoleFixedScopeAndColors),
+    ("native Present status logging ignores healthy counter churn", NativePresentStatusLoggingIgnoresHealthyCounterChurn),
     ("native Present ESP has no external frame-render fallback", NativePresentEspHasNoExternalFallback),
     ("native Present ESP hooks queue, owns wrapped backbuffers, and reports lifecycle state", NativePresentEspOwnsRendererLifecycle),
     ("runtime keeps one resident bridge across GUI updates", RuntimeKeepsResidentBridgeAcrossGuiUpdates),
@@ -978,6 +979,120 @@ static async Task NativePresentEspCommandUsesRoleFixedScopeAndColorsAsync()
            !root.TryGetProperty("ally_r", out _) &&
            !root.TryGetProperty("enemy_r", out _),
         "native Present ESP command should express fixed Hider/Hunter scope and colors");
+}
+
+static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
+{
+    var first = new NativePresentStatusLogSample
+    {
+        Status = "ready",
+        Reason = "native D3D12 Present compositor active",
+        Format = "R10G10B10A2_UNORM",
+        CaptureStatus = "active",
+        CaptureAgeMs = 16,
+        HudRebinds = 0,
+        RosterSource = "player_array",
+        RosterCount = 10,
+        ValidPawns = 9,
+        CapsuleComponents = 9,
+        CapsuleTransforms = 9,
+        CapsuleSizes = 9,
+        CapsuleProjected = 9,
+        SkeletonContracts = 2,
+        PoseProfileMatches = 9,
+        PoseComponentSpace = 9,
+        PoseBones = 252,
+        PoseEdges = 243,
+        Poses = 9,
+        Players = 9,
+        Lines = 324,
+        Texts = 9,
+        Vertices = 14694,
+        GlyphQuads = 2132,
+        ProjectionCalibrations = 2,
+        SnapshotSequence = 71,
+        SubmittedFrames = 71,
+        CompletedFences = 68,
+        RenderedFrames = 71
+    };
+    var later = first with
+    {
+        CaptureAgeMs = 0,
+        RosterCount = 9,
+        ValidPawns = 8,
+        CapsuleComponents = 8,
+        CapsuleTransforms = 8,
+        CapsuleSizes = 8,
+        CapsuleProjected = 8,
+        PoseProfileMatches = 8,
+        PoseComponentSpace = 8,
+        PoseBones = 224,
+        PoseEdges = 216,
+        Poses = 8,
+        Players = 8,
+        Lines = 288,
+        Texts = 8,
+        Vertices = 13434,
+        GlyphQuads = 1956,
+        ProjectionCalibrations = 6,
+        SnapshotSequence = 311,
+        SubmittedFrames = 311,
+        CompletedFences = 308,
+        RenderedFrames = 311
+    };
+
+    Assert(
+        NativePresentStatusLogPolicy.Signature(first, verbose: false) ==
+        NativePresentStatusLogPolicy.Signature(later, verbose: false),
+        "normal ESP logging must ignore healthy roster and progress counter churn");
+    Assert(
+        NativePresentStatusLogPolicy.Signature(first, verbose: true) !=
+        NativePresentStatusLogPolicy.Signature(later, verbose: true),
+        "explicit verbose ESP logging must retain raw diagnostic counter changes");
+
+    var stalled = later with { CaptureStatus = "stalled", CaptureAgeMs = 1500 };
+    Assert(
+        NativePresentStatusLogPolicy.Signature(later, verbose: false) !=
+        NativePresentStatusLogPolicy.Signature(stalled, verbose: false) &&
+        NativePresentStatusLogPolicy.ShouldWarn(stalled),
+        "capture stalls must remain visible as a warning state transition");
+
+    var offscreen = later with
+    {
+        Reason = "native D3D12 Present compositor active (no geometry in current snapshot)",
+        Players = 0,
+        Lines = 0,
+        Texts = 0,
+        Vertices = 0,
+        GlyphQuads = 0
+    };
+    Assert(
+        NativePresentStatusLogPolicy.Signature(later, verbose: true) !=
+        NativePresentStatusLogPolicy.Signature(offscreen, verbose: true) &&
+        NativePresentStatusLogPolicy.Signature(later, verbose: false) ==
+        NativePresentStatusLogPolicy.Signature(offscreen, verbose: false),
+        "normal ESP logging must ignore visibility-only geometry churn while verbose mode retains it");
+
+    var brokenTransform = later with { CapsuleTransforms = 0, CapsuleSizes = 0 };
+    Assert(
+        NativePresentStatusLogPolicy.Signature(later, verbose: false) !=
+        NativePresentStatusLogPolicy.Signature(brokenTransform, verbose: false),
+        "normal ESP logging must retain upstream capture-stage failures");
+
+    var previousFlag = Environment.GetEnvironmentVariable("MECCHA_ESP_VERBOSE_STATUS");
+    try
+    {
+        Environment.SetEnvironmentVariable("MECCHA_ESP_VERBOSE_STATUS", null);
+        Assert(!BuildFeatures.NativeEspVerboseStatusEnabled,
+            "verbose ESP logging must default off");
+        Environment.SetEnvironmentVariable("MECCHA_ESP_VERBOSE_STATUS", "1");
+        Assert(BuildFeatures.NativeEspVerboseStatusEnabled,
+            "verbose ESP logging must require its explicit environment flag");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("MECCHA_ESP_VERBOSE_STATUS", previousFlag);
+    }
 }
 
 static void NativePresentEspHasNoExternalFallback()

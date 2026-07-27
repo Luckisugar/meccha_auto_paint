@@ -82,6 +82,7 @@ public sealed class MainForm : Form
     private long nativeEspPreviewGeneration;
     private DateTimeOffset nextNativeEspStatusPoll = DateTimeOffset.MinValue;
     private string nativeEspStatusSignature = "";
+    private readonly bool nativeEspVerboseStatus = BuildFeatures.NativeEspVerboseStatusEnabled;
     private readonly Dictionary<string, StagedImageDesignTransfer> stagedImageDesigns = new(StringComparer.Ordinal);
     // Presets are loaded through a native dialog and held only long enough for
     // the WebView to request their assets in bounded chunks. They are drafts:
@@ -613,19 +614,46 @@ public sealed class MainForm : Form
                 var projectionCalibrations = metadata.TryGetProperty("projection_calibrations", out var projectionCalibrationsValue) ? projectionCalibrationsValue.GetUInt64() : 0;
                 var submitted = metadata.TryGetProperty("submitted_frames", out var submittedValue) ? submittedValue.GetUInt64() : 0;
                 var completed = metadata.TryGetProperty("completed_fences", out var completedValue) ? completedValue.GetUInt64() : 0;
-                var signature = string.Join('|',
-                    status, reason, format, captureStatus, rebinds, rosterSource,
-                    roster, pawns, capsuleComponents, capsuleTransforms, capsuleSizes,
-                    capsuleProjected, skeletonContracts, poseProfiles, poseComponent,
-                    poseLocal, poseBones, poseEdges, poses, players, lines, texts,
-                    vertices, glyphQuads,
-                    Math.Round(projectionScaleX, 4), Math.Round(projectionScaleY, 4),
-                    projectionCalibrations > 0,
-                    submitted > 0, completed > 0);
+                var sample = new NativePresentStatusLogSample
+                {
+                    Status = status,
+                    Reason = reason,
+                    Format = format,
+                    CaptureStatus = captureStatus,
+                    CaptureAgeMs = captureAge,
+                    HudRebinds = rebinds,
+                    RosterSource = rosterSource,
+                    RosterCount = roster,
+                    ValidPawns = pawns,
+                    CapsuleComponents = capsuleComponents,
+                    CapsuleTransforms = capsuleTransforms,
+                    CapsuleSizes = capsuleSizes,
+                    CapsuleProjected = capsuleProjected,
+                    SkeletonContracts = skeletonContracts,
+                    PoseProfileMatches = poseProfiles,
+                    PoseComponentSpace = poseComponent,
+                    PoseLocalSpace = poseLocal,
+                    PoseBones = poseBones,
+                    PoseEdges = poseEdges,
+                    Poses = poses,
+                    Players = players,
+                    Lines = lines,
+                    Texts = texts,
+                    Vertices = vertices,
+                    GlyphQuads = glyphQuads,
+                    ProjectionScaleX = projectionScaleX,
+                    ProjectionScaleY = projectionScaleY,
+                    ProjectionCalibrations = projectionCalibrations,
+                    SnapshotSequence = sequence,
+                    SubmittedFrames = submitted,
+                    CompletedFences = completed,
+                    RenderedFrames = frames
+                };
+                var signature = NativePresentStatusLogPolicy.Signature(sample, nativeEspVerboseStatus);
                 if (string.Equals(signature, nativeEspStatusSignature, StringComparison.Ordinal))
                     return;
                 nativeEspStatusSignature = signature;
-                session.Log.Info(
+                var logMessage =
                     $"ESP: native Present status={status}; format={format}; snapshot_sequence={sequence}; " +
                     $"capture={captureStatus} age_ms={captureAge}; hud_rebinds={rebinds}; " +
                     $"roster={rosterSource}:{roster}; pawns={pawns}; " +
@@ -634,7 +662,11 @@ public sealed class MainForm : Form
                     $"space:{poseComponent}/{poseLocal} bones:{poseBones} edges:{poseEdges} ready:{poses}; " +
                     $"geometry={players}/{lines}/{texts}; vertices={vertices}; glyph_quads={glyphQuads}; " +
                     $"projection_scale={projectionScaleX:F4}/{projectionScaleY:F4} calibrations={projectionCalibrations}; " +
-                    $"submitted_frames={submitted}; completed_fences={completed}; rendered_frames={frames}; reason={reason}.");
+                    $"submitted_frames={submitted}; completed_fences={completed}; rendered_frames={frames}; reason={reason}.";
+                if (NativePresentStatusLogPolicy.ShouldWarn(sample))
+                    session.Log.Warn(logMessage);
+                else
+                    session.Log.Info(logMessage);
             }
             catch (Exception ex) when (ex is JsonException or InvalidOperationException or IOException)
             {
