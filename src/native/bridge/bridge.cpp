@@ -4531,19 +4531,46 @@ namespace
             return local_players.Data && local_players.Num > 0 && local_players.Num <= 8;
         };
 
-        const auto world_class = ref.find_class("World");
-        if (!world_class)
+        const auto engine = ref.find_first_instance("GameEngine");
+        const auto viewport_offset =
+            ref.resolve_property_offset("Engine", "GameViewport");
+        const auto viewport_world_offset =
+            ref.resolve_property_offset("GameViewportClient", "World");
+        const auto viewport =
+            live_uobject(engine) && viewport_offset >= 0
+                ? safe_read<std::uintptr_t>(
+                      engine + static_cast<std::uintptr_t>(viewport_offset))
+                : 0;
+        const auto viewport_world =
+            live_uobject(viewport) && viewport_world_offset >= 0
+                ? safe_read<std::uintptr_t>(
+                      viewport +
+                      static_cast<std::uintptr_t>(viewport_world_offset))
+                : 0;
+        ctx.world = runtime_contract::select_active_world(
+            viewport_world,
+            world_has_local_context(viewport_world),
+            0,
+            false);
+
+        if (!live_uobject(ctx.world))
         {
-            throw_sdk_update_required("UWorld class unavailable from runtime object scan");
-        }
-        ref.for_each_object([&](std::uintptr_t object) {
-            if (ref.class_ptr(object) == world_class && world_has_local_context(object))
+            const auto world_class = ref.find_class("World");
+            if (!world_class)
             {
-                ctx.world = object;
-                return true;
+                throw_sdk_update_required(
+                    "UWorld class unavailable from runtime object scan");
             }
-            return false;
-        });
+            ref.for_each_object([&](std::uintptr_t object) {
+                if (ref.class_ptr(object) == world_class &&
+                    world_has_local_context(object))
+                {
+                    ctx.world = object;
+                    return true;
+                }
+                return false;
+            });
+        }
         if (!live_uobject(ctx.world))
         {
             throw_sdk_update_required("runtime object scan found no active UWorld with LocalPlayers");
@@ -12160,7 +12187,7 @@ namespace
         const std::string image_paint_rgba_base64 =
             json_string_field(request, "image_paint_rgba_base64", "");
         std::vector<std::uint8_t> image_paint_rgba{};
-        if (image_paint_enabled)
+        if (image_paint_enabled && !unpreview_only)
         {
             tuning_brush_size_texels = image_paint_brush_size_texels;
             std::string image_decode_failure{};
@@ -12386,12 +12413,23 @@ namespace
             }
             if (snapshot.component != ctx.component)
             {
-                return response_json(false,
-                                     "mesh_unpreview_component_mismatch",
-                                     0,
-                                     1,
-                                     "The local preview snapshot belongs to a different paint component.",
-                                     metadata + ",\"current_component\":\"" + hex_address(ctx.component) + "\"");
+                mesh_first_clear_preview_snapshot();
+                metadata += ",\"current_component\":\"" + hex_address(ctx.component) + "\"";
+                metadata += ",\"unpreview_snapshot_expired\":true";
+                write_bridge_progress(
+                    "mesh_unpreview_expired",
+                    "local preview expired after the paint component changed",
+                    1,
+                    1,
+                    0.0,
+                    "\"phase\":\"local_unpreview\",\"terminal\":true,\"result\":\"done\"");
+                return response_json(
+                    true,
+                    "mesh_unpreview_expired",
+                    1,
+                    0,
+                    "local preview expired after the paint component changed",
+                    metadata);
             }
             if (snapshot.metallic_bytes != snapshot.roughness_bytes ||
                 snapshot.metallic_bytes != snapshot.emissive_bytes)
@@ -14171,16 +14209,21 @@ namespace
             // Preview is intentionally a local texture import.  It must return
             // before the recorded-stroke async job is constructed: calling
             // PaintAtUVWithBrush here turns a preview into replicated paint.
-            const auto existing_snapshot = mesh_first_preview_snapshot_copy();
-            if (existing_snapshot.available && existing_snapshot.component != ctx.component)
+            auto existing_snapshot = mesh_first_preview_snapshot_copy();
+            const auto snapshot_disposition =
+                runtime_contract::preview_snapshot_disposition(
+                    existing_snapshot.available,
+                    existing_snapshot.component,
+                    ctx.component);
+            const bool expired_previous_snapshot =
+                snapshot_disposition ==
+                runtime_contract::PreviewSnapshotDisposition::Replace;
+            if (expired_previous_snapshot)
             {
-                return response_json(false,
-                                     "mesh_preview_component_mismatch",
-                                     0,
-                                     1,
-                                     "The active local preview belongs to a different paint component.",
-                                     metadata + ",\"preview_snapshot_component\":\"" +
-                                         hex_address(existing_snapshot.component) + "\"");
+                metadata += ",\"preview_expired_snapshot_component\":\"" +
+                            hex_address(existing_snapshot.component) + "\"";
+                mesh_first_clear_preview_snapshot();
+                existing_snapshot = {};
             }
 
             MeshFirstChannelBytes base_albedo{};
@@ -14261,6 +14304,8 @@ namespace
             }
             metadata += ",\"preview_snapshot_reused\":" +
                         std::string(json_bool(existing_snapshot.available));
+            metadata += ",\"preview_previous_snapshot_expired\":" +
+                        std::string(json_bool(expired_previous_snapshot));
             metadata += ",\"preview_export_ok\":" + std::string(json_bool(true));
             metadata += ",\"preview_import_ok\":" + std::string(json_bool(preview.import_ok));
             metadata += ",\"preview_strokes_considered\":" + std::to_string(preview.strokes_considered);

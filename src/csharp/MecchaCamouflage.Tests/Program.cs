@@ -24,6 +24,7 @@ var tests = new List<(string Name, Action Run)>
     ("native image paint exposes deterministic planner telemetry", NativeImagePaintExposesDeterministicPlannerTelemetry),
     ("native image paint uses the live profile when the selected body differs", NativeImagePaintUsesLiveProfileWhenSelectedBodyDiffers),
     ("image unpreview omits paint-plan diagnostics", ImageUnpreviewOmitsPaintPlanDiagnostics),
+    ("image unpreview bypasses image design guards", ImageUnpreviewBypassesImageDesignGuards),
     ("custom freecam surface is absent", CustomFreecamSurfaceIsAbsent),
     ("misc configures the native Present ESP renderer", MiscUsesNativePresentEspRenderer),
     ("native Present ESP command uses role-fixed scope and colors", NativePresentEspCommandUsesRoleFixedScopeAndColors),
@@ -47,6 +48,7 @@ var tests = new List<(string Name, Action Run)>
     ("native async paint retains captured component identity", NativeAsyncPaintRetainsCapturedComponentIdentity),
     ("native production local sync uses per-stroke paint", NativeProductionLocalSyncUsesPerStrokePaint),
     ("native preview applies PBR and emissive channels", NativePreviewAppliesPbrAndEmissiveChannels),
+    ("native preview expires snapshots after a component change", NativePreviewExpiresSnapshotsAfterComponentChange),
     ("native preview returns before recorded-stroke dispatch", NativePreviewReturnsBeforeRecordedStrokeDispatch),
     ("native auto material detects emissive and reports local pacing", NativeAutoMaterialDetectsEmissiveAndReportsLocalPacing),
     ("payload uses native paint route and includes fill material", PayloadUsesNativePaintRouteAndFillMaterial),
@@ -896,6 +898,19 @@ static void ImageUnpreviewOmitsPaintPlanDiagnostics()
         "Image UnPreview must restore its snapshot without reporting unrelated Image Paint planning diagnostics");
 }
 
+static void ImageUnpreviewBypassesImageDesignGuards()
+{
+    var root = FindRepositoryRoot();
+    var session = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "HostSession.cs"));
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+
+    Assert(session.Contains("kind == PaintKind.Image && !unpreviewOnly && imageDraftDirty", StringComparison.Ordinal) &&
+           session.Contains("kind == PaintKind.Image && !unpreviewOnly && selectedImage is null", StringComparison.Ordinal) &&
+           session.Contains("Image: unpreviewOnly ? null : selectedImage", StringComparison.Ordinal) &&
+           bridge.Contains("if (image_paint_enabled && !unpreview_only)", StringComparison.Ordinal),
+        "Image UnPreview must remain available after the saved image is edited, disabled, or removed");
+}
+
 static void CustomFreecamSurfaceIsAbsent()
 {
     var root = FindRepositoryRoot();
@@ -1502,6 +1517,20 @@ static void NativePreviewAppliesPbrAndEmissiveChannels()
            bridge.Contains("unpreview_snapshot_emissive_bytes", StringComparison.Ordinal) &&
            bridge.Contains("mesh_unpreview_packed_pbr_mismatch", StringComparison.Ordinal),
         "preview and unpreview must preserve packed Metallic/Roughness/Emissive data without successive imports overwriting it");
+}
+
+static void NativePreviewExpiresSnapshotsAfterComponentChange()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var session = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "HostSession.cs"));
+
+    Assert(!bridge.Contains("\"mesh_preview_component_mismatch\"", StringComparison.Ordinal) &&
+           !bridge.Contains("\"mesh_unpreview_component_mismatch\"", StringComparison.Ordinal) &&
+           bridge.Contains("\"mesh_unpreview_expired\"", StringComparison.Ordinal) &&
+           bridge.Contains("mesh_first_clear_preview_snapshot();", StringComparison.Ordinal) &&
+           session.Contains("lower is \"mesh_unpreview_expired\"", StringComparison.Ordinal),
+        "component changes must expire an old Preview session without writing its bytes into the new component");
 }
 
 static void NativePreviewReturnsBeforeRecordedStrokeDispatch()

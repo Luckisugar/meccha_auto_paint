@@ -201,14 +201,25 @@ int main()
     {
         return 39;
     }
-    if (runtime_contract::esp_select_snapshot_world(
+    if (runtime_contract::select_active_world(
             0x2000, true, 0x1000, true) != 0x2000 ||
-        runtime_contract::esp_select_snapshot_world(
+        runtime_contract::select_active_world(
             0, false, 0x1000, true) != 0x1000 ||
-        runtime_contract::esp_select_snapshot_world(
+        runtime_contract::select_active_world(
             0, false, 0, false) != 0)
     {
         return 40;
+    }
+    using PreviewSnapshotDisposition =
+        runtime_contract::PreviewSnapshotDisposition;
+    if (runtime_contract::preview_snapshot_disposition(
+            false, 0, 0x2000) != PreviewSnapshotDisposition::Create ||
+        runtime_contract::preview_snapshot_disposition(
+            true, 0x2000, 0x2000) != PreviewSnapshotDisposition::Reuse ||
+        runtime_contract::preview_snapshot_disposition(
+            true, 0x1000, 0x2000) != PreviewSnapshotDisposition::Replace)
+    {
+        return 42;
     }
     using EspRole = runtime_contract::EspRole;
     using EspScope = runtime_contract::EspScope;

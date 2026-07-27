@@ -754,13 +754,13 @@ public sealed class HostSession
             selectedImage = kind == PaintKind.Image ? imagePaint : null;
             imageDraftDirty = kind == PaintKind.Image && imageDesignDraftDirty;
         }
-        if (kind == PaintKind.Image && imageDraftDirty)
+        if (kind == PaintKind.Image && !unpreviewOnly && imageDraftDirty)
         {
             const string message = "Image Paint: save or cancel the image design before starting.";
             Log.Warn(message);
             return new HostCommandResult(false, message, CommandResultLevel.Warn);
         }
-        if (kind == PaintKind.Image && selectedImage is null)
+        if (kind == PaintKind.Image && !unpreviewOnly && selectedImage is null)
         {
             var message = Settings.Image.Enabled &&
                           Settings.Image.AlphaMode == "background" &&
@@ -828,7 +828,7 @@ public sealed class HostSession
                     UnPreviewOnly: unpreviewOnly,
                     ResearchArtifacts: BuildFeatures.ResearchArtifactsEnabled,
                     DiagnosticStrokeLimit: diagnosticStrokeLimit,
-                    Image: selectedImage));
+                    Image: unpreviewOnly ? null : selectedImage));
             if (!TryBeginPaintDispatch(runGeneration))
             {
                 const string canceledBeforeDispatch = "Paint: canceled.";
@@ -1463,8 +1463,8 @@ public sealed class HostSession
             return "Preview: restore failed.";
         if (lower is "mesh_unpreview_snapshot_unavailable" || lower.Contains("no local preview snapshot is available"))
             return "Preview: no active preview to restore.";
-        if (lower is "mesh_unpreview_component_mismatch")
-            return "The saved preview belongs to a different mesh.";
+        if (lower is "mesh_unpreview_expired" || lower.Contains("local preview expired after the paint component changed"))
+            return "Preview: expired after the body or lobby changed.";
         if (lower.Contains("strokes were submitted, but local rendering failed"))
             return "Paint: strokes were sent, but local rendering failed. Do not retry automatically.";
         if (lower is "mesh_local_visual_sync_failed")

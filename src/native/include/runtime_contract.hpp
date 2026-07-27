@@ -1001,14 +1001,46 @@ namespace runtime_contract
                now_ms - last_request_ms >= EspHudRebindMinIntervalMs;
     }
 
+    constexpr auto select_active_world(std::uintptr_t viewport_world,
+                                       bool viewport_world_valid,
+                                       std::uintptr_t fallback_world,
+                                       bool fallback_world_valid) -> std::uintptr_t
+    {
+        return viewport_world_valid
+                   ? viewport_world
+                   : fallback_world_valid ? fallback_world : 0;
+    }
+
     constexpr auto esp_select_snapshot_world(std::uintptr_t viewport_world,
                                              bool viewport_world_valid,
                                              std::uintptr_t cached_world,
                                              bool cached_world_valid) -> std::uintptr_t
     {
-        return viewport_world_valid
-                   ? viewport_world
-                   : cached_world_valid ? cached_world : 0;
+        return select_active_world(viewport_world,
+                                   viewport_world_valid,
+                                   cached_world,
+                                   cached_world_valid);
+    }
+
+    enum class PreviewSnapshotDisposition : int
+    {
+        Create = 0,
+        Reuse = 1,
+        Replace = 2,
+    };
+
+    constexpr auto preview_snapshot_disposition(bool snapshot_available,
+                                                std::uintptr_t snapshot_component,
+                                                std::uintptr_t current_component)
+        -> PreviewSnapshotDisposition
+    {
+        if (!snapshot_available)
+        {
+            return PreviewSnapshotDisposition::Create;
+        }
+        return snapshot_component == current_component
+                   ? PreviewSnapshotDisposition::Reuse
+                   : PreviewSnapshotDisposition::Replace;
     }
 
     enum class EspRole : int
