@@ -1001,6 +1001,16 @@ namespace runtime_contract
                now_ms - last_request_ms >= EspHudRebindMinIntervalMs;
     }
 
+    constexpr auto esp_select_snapshot_world(std::uintptr_t viewport_world,
+                                             bool viewport_world_valid,
+                                             std::uintptr_t cached_world,
+                                             bool cached_world_valid) -> std::uintptr_t
+    {
+        return viewport_world_valid
+                   ? viewport_world
+                   : cached_world_valid ? cached_world : 0;
+    }
+
     constexpr bool esp_native_renderer_configuration_is_reusable(
         bool requested_enabled,
         bool same_configuration,

@@ -201,6 +201,15 @@ int main()
     {
         return 39;
     }
+    if (runtime_contract::esp_select_snapshot_world(
+            0x2000, true, 0x1000, true) != 0x2000 ||
+        runtime_contract::esp_select_snapshot_world(
+            0, false, 0x1000, true) != 0x1000 ||
+        runtime_contract::esp_select_snapshot_world(
+            0, false, 0, false) != 0)
+    {
+        return 40;
+    }
 
     const runtime_contract::ImageAtlasMappingInput round_front{
         false, runtime_contract::ImageAtlasRegion::Front, false,

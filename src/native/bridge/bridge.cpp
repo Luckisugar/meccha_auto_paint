@@ -19426,8 +19426,11 @@ namespace
     {
         Reflection reflection{};
         bool initialized{false};
+        std::uintptr_t cached_game_engine{0};
         std::uintptr_t cached_world{0};
         std::uintptr_t cached_controller{0};
+        int game_viewport_offset{-2};
+        int viewport_world_offset{-2};
     };
 
     auto esp_snapshot_role_name(EspSnapshotRole role) -> const char*
@@ -19723,6 +19726,40 @@ namespace
                    : 0;
     }
 
+    auto esp_snapshot_viewport_world(EspSnapshotResolver& resolver) -> std::uintptr_t
+    {
+        auto& ref = resolver.reflection;
+        if (resolver.game_viewport_offset == -2)
+        {
+            resolver.game_viewport_offset =
+                ref.resolve_property_offset("Engine", "GameViewport");
+            resolver.viewport_world_offset =
+                ref.resolve_property_offset("GameViewportClient", "World");
+        }
+        if (resolver.game_viewport_offset < 0 ||
+            resolver.viewport_world_offset < 0)
+        {
+            return 0;
+        }
+        if (!live_uobject(resolver.cached_game_engine))
+        {
+            resolver.cached_game_engine = ref.find_first_instance("GameEngine");
+        }
+        const auto viewport = live_uobject(resolver.cached_game_engine)
+                                  ? safe_read<std::uintptr_t>(
+                                        resolver.cached_game_engine +
+                                        static_cast<std::uintptr_t>(
+                                            resolver.game_viewport_offset))
+                                  : 0;
+        const auto world = live_uobject(viewport)
+                               ? safe_read<std::uintptr_t>(
+                                     viewport +
+                                     static_cast<std::uintptr_t>(
+                                         resolver.viewport_world_offset))
+                               : 0;
+        return live_uobject(world) ? world : 0;
+    }
+
     auto esp_snapshot_resolve_context(EspSnapshotResolver& resolver,
                                       EspSnapshotContext& out,
                                       std::string& failure) -> bool
@@ -19743,10 +19780,28 @@ namespace
             return true;
         };
 
-        const auto cached_controller = esp_snapshot_controller_from_world(resolver.cached_world);
-        if (commit(resolver.cached_world, cached_controller))
+        // GameViewportClient::World is the authoritative world across map
+        // travel. The old UWorld can remain a live UObject (and retain the
+        // GameInstance/LocalPlayer chain) after DrawHUD has moved to the new
+        // map, so UObject liveness alone cannot validate cached_world.
+        const auto viewport_world = esp_snapshot_viewport_world(resolver);
+        const bool viewport_world_valid = live_uobject(viewport_world);
+        const bool cached_world_valid = live_uobject(resolver.cached_world);
+        const auto preferred_world = runtime_contract::esp_select_snapshot_world(
+            viewport_world,
+            viewport_world_valid,
+            resolver.cached_world,
+            cached_world_valid);
+        const auto preferred_controller =
+            esp_snapshot_controller_from_world(preferred_world);
+        if (commit(preferred_world, preferred_controller))
         {
             return true;
+        }
+        if (viewport_world_valid)
+        {
+            failure = "viewport_local_player_controller_unavailable";
+            return false;
         }
 
         const auto world_class = ref.find_class("World");
