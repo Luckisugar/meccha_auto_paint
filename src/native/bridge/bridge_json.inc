@@ -195,6 +195,140 @@
         return metadata.find(std::string("\"") + key + "\":\"" + value + "\"") != std::string::npos;
     }
 
+    struct JsonNonFiniteSanitization
+    {
+        std::string text{};
+        int replacements{0};
+        std::string first_key{};
+    };
+
+    auto sanitize_json_non_finite_numbers(const std::string& input)
+        -> JsonNonFiniteSanitization
+    {
+        JsonNonFiniteSanitization out{};
+        out.text.reserve(input.size());
+        bool in_string = false;
+        bool escaped = false;
+        const auto is_value_boundary = [](char value) {
+            return value == '\0' || value == ',' || value == '}' ||
+                   value == ']' ||
+                   std::isspace(static_cast<unsigned char>(value));
+        };
+        const auto first_key_before = [&input](std::size_t value_begin) {
+            const auto colon =
+                value_begin == 0
+                    ? std::string::npos
+                    : input.rfind(':', value_begin - 1);
+            if (colon == std::string::npos)
+            {
+                return std::string{};
+            }
+            const auto quote_end =
+                colon == 0
+                    ? std::string::npos
+                    : input.rfind('"', colon - 1);
+            if (quote_end == std::string::npos || quote_end == 0)
+            {
+                return std::string{};
+            }
+            const auto quote_begin =
+                input.rfind('"', quote_end - 1);
+            if (quote_begin == std::string::npos)
+            {
+                return std::string{};
+            }
+            return input.substr(
+                quote_begin + 1,
+                quote_end - quote_begin - 1);
+        };
+
+        for (std::size_t index = 0; index < input.size();)
+        {
+            const char current = input[index];
+            if (escaped)
+            {
+                out.text.push_back(current);
+                escaped = false;
+                ++index;
+                continue;
+            }
+            if (in_string && current == '\\')
+            {
+                out.text.push_back(current);
+                escaped = true;
+                ++index;
+                continue;
+            }
+            if (current == '"')
+            {
+                out.text.push_back(current);
+                in_string = !in_string;
+                ++index;
+                continue;
+            }
+            if (in_string)
+            {
+                out.text.push_back(current);
+                ++index;
+                continue;
+            }
+
+            const bool token_start =
+                std::isalpha(static_cast<unsigned char>(current)) ||
+                ((current == '-' || current == '+') &&
+                 index + 1 < input.size() &&
+                 std::isalpha(
+                     static_cast<unsigned char>(input[index + 1])));
+            if (!token_start)
+            {
+                out.text.push_back(current);
+                ++index;
+                continue;
+            }
+
+            std::size_t token_end = index + 1;
+            while (token_end < input.size() &&
+                   !is_value_boundary(input[token_end]))
+            {
+                ++token_end;
+            }
+            auto token = input.substr(index, token_end - index);
+            std::transform(
+                token.begin(),
+                token.end(),
+                token.begin(),
+                [](unsigned char value) {
+                    return static_cast<char>(std::tolower(value));
+                });
+            const bool non_finite =
+                token == "inf" || token == "+inf" ||
+                token == "-inf" || token == "infinity" ||
+                token == "+infinity" || token == "-infinity" ||
+                token == "nan" || token == "+nan" ||
+                token == "-nan" ||
+                (token.size() > 4 &&
+                 (token.rfind("nan(", 0) == 0 ||
+                  token.rfind("+nan(", 0) == 0 ||
+                  token.rfind("-nan(", 0) == 0) &&
+                 token.back() == ')');
+            if (!non_finite)
+            {
+                out.text.append(input, index, token_end - index);
+                index = token_end;
+                continue;
+            }
+
+            out.text += "-1.000000";
+            ++out.replacements;
+            if (out.first_key.empty())
+            {
+                out.first_key = first_key_before(index);
+            }
+            index = token_end;
+        }
+        return out;
+    }
+
     auto append_metadata_field(std::string& out, const std::string& metadata, const char* key) -> void
     {
         const std::string pattern = std::string("\"") + key + "\":";
@@ -268,6 +402,13 @@
                  "mesh_first_pipeline",
                  "preview_only",
                  "unpreview_only",
+                 "unpreview_snapshot_available",
+                 "unpreview_snapshot_component",
+                 "unpreview_snapshot_texture_size",
+                 "unpreview_snapshot_hash",
+                 "unpreview_import_ok",
+                 "unpreview_restore_verified",
+                 "unpreview_import_failure",
                  "front_region_mode",
                  "side_region_mode",
                  "back_region_mode",
@@ -358,6 +499,361 @@
                  "brush_radius_uv",
                  "fill_stroke_radius_texels",
                  "fill_stroke_radius_source",
+                 "auto_material",
+                 "material_properties_requested_mode",
+                 "material_properties_mode",
+                 "material_properties_source",
+                 "auto_material_fill_policy",
+                 "appearance_paint_emissive_inspected",
+                 "appearance_paint_emissive_supported",
+                 "appearance_paint_emissive_reason",
+                 "appearance_paint_emissive_parameter",
+                 "appearance_paint_material_properties_parameter",
+                 "appearance_paint_material_properties_render_target",
+                 "appearance_paint_dynamic_material",
+                 "appearance_paint_emissive_render_target",
+                 "appearance_paint_get_render_target_available",
+                 "appearance_paint_get_render_target_process_ok",
+                 "appearance_paint_get_render_target_failure",
+                 "appearance_paint_selected_emissive_render_target",
+                 "appearance_source_status",
+                 "appearance_source_reason",
+                 "appearance_match_status",
+                 "appearance_match_reason",
+                 "appearance_fallback_color_mode",
+                 "appearance_emission_isolation_probe",
+                 "appearance_emission_isolation_target_visible",
+                 "appearance_emission_isolation_probe_complete",
+                 "appearance_emission_isolation_probe_ok",
+                 "appearance_production_connected",
+                 "appearance_direct_stroke_count",
+                 "appearance_capture_final_hdr_ok",
+                 "appearance_capture_intrinsic_emission_ok",
+                 "appearance_capture_intrinsic_emission_failure",
+                 "appearance_capture_final_ldr_ok",
+                 "appearance_capture_tone_curve_ok",
+                 "appearance_capture_normal_ok",
+                 "appearance_capture_depth_ok",
+                 "appearance_manual_color_mode",
+                 "appearance_manual_ldr_capture_ok",
+                 "appearance_manual_ldr_capture_failure",
+                 "appearance_manual_camera_stable",
+                 "appearance_manual_paired_samples",
+                 "appearance_manual_base_color_samples",
+                 "appearance_manual_final_ldr_samples",
+                 "appearance_manual_source_paint_color_space",
+                 "appearance_manual_color_feedback_requested",
+                 "appearance_manual_color_feedback_applied",
+                 "appearance_manual_feedback_kept_clusters",
+                 "appearance_manual_feedback_excluded_emission_samples",
+                 "appearance_manual_fixed_metallic",
+                 "appearance_manual_fixed_roughness",
+                 "appearance_manual_fixed_emissive",
+                 "appearance_source_component_resolution",
+                 "appearance_source_component_count",
+                 "appearance_source_material_count",
+                 "appearance_source_query_available",
+                 "appearance_source_query_function_available",
+                 "appearance_source_query_params_size",
+                 "appearance_source_query_schema",
+                 "appearance_source_query_result_schema",
+                 "appearance_source_query_with_filter_available",
+                 "appearance_source_query_with_filter_schema",
+                 "appearance_source_query_filter_schema",
+                 "appearance_source_query_with_filter_result_schema",
+                 "appearance_source_query_core_threshold",
+                 "appearance_source_query_probe_count",
+                 "appearance_source_query_hits",
+                 "appearance_source_query_target_component_hits",
+                 "appearance_source_query_target_actor_hits",
+                 "appearance_source_query_other_hits",
+                 "appearance_source_query_core_hits",
+                 "appearance_source_query_halo_hits",
+                 "appearance_source_query_unique_components",
+                 "appearance_source_query_component_summary",
+                 "appearance_source_query_material_hits",
+                 "appearance_source_query_unique_materials",
+                 "appearance_source_query_material_summary",
+                 "appearance_source_parameter_prior_count",
+                 "appearance_source_parameter_prior",
+                 "appearance_source_parameter_prior_used",
+                 "appearance_screen_hit_uv_enabled",
+                 "appearance_screen_hit_uv_attempted",
+                 "appearance_screen_hit_uv_function_available",
+                 "appearance_screen_hit_result_schema_ok",
+                 "appearance_screen_hit_result_return_offset",
+                 "appearance_screen_hit_result_return_size",
+                 "appearance_screen_hit_result_success_offset",
+                 "appearance_screen_hit_result_uv_offset",
+                 "appearance_screen_hit_result_world_offset",
+                 "appearance_screen_hit_result_normal_offset",
+                 "appearance_screen_hit_uv_candidates",
+                 "appearance_screen_hit_uv_projected",
+                 "appearance_screen_hit_uv_inside_view",
+                 "appearance_screen_hit_uv_calls_ok",
+                 "appearance_screen_hit_uv_hits",
+                 "appearance_screen_hit_uv_accepted",
+                 "appearance_screen_hit_uv_rejected_world_mismatch",
+                 "appearance_runtime_triangle_uv_used",
+                 "appearance_screen_hit_uv_changed_from_runtime_uv",
+                 "appearance_screen_hit_uv_delta_mean",
+                 "appearance_screen_hit_uv_delta_max",
+                 "appearance_screen_hit_world_delta_samples",
+                 "appearance_screen_hit_world_delta_mean_cm",
+                 "appearance_screen_hit_world_delta_max_cm",
+                 "appearance_screen_hit_world_delta_over_1cm",
+                 "appearance_screen_hit_world_delta_over_5cm",
+                 "appearance_screen_hit_world_delta_over_10cm",
+                 "appearance_screen_hit_cached_world_delta_samples",
+                 "appearance_screen_hit_cached_world_delta_mean_cm",
+                 "appearance_screen_hit_cached_world_delta_max_cm",
+                 "appearance_rebuilt_cached_world_delta_samples",
+                 "appearance_rebuilt_cached_world_delta_mean_cm",
+                 "appearance_rebuilt_cached_world_delta_max_cm",
+                 "appearance_screen_hit_uv_elapsed_ms",
+                 "appearance_screen_hit_uv_failure",
+                 "appearance_capture_destination_samples",
+                 "base_capture_projection_samples",
+                 "base_capture_source_candidates",
+                 "appearance_capture_destination_samples_front",
+                 "appearance_capture_destination_samples_side",
+                 "appearance_capture_destination_samples_back",
+                 "appearance_brush_visual_actor",
+                 "appearance_brush_visual_component_count",
+                 "appearance_brush_visual_component_summary",
+                 "appearance_brush_visual_hidden_requested",
+                 "appearance_brush_visual_hidden_count",
+                 "appearance_brush_visual_hide_failures",
+                 "appearance_capture_occluded_projection_kept",
+                 "appearance_capture_final_hdr_failure",
+                 "appearance_isolation_backend",
+                 "appearance_show_flags_requested",
+                 "appearance_show_flags_schema_ok",
+                 "appearance_show_flags_process_ok",
+                 "appearance_show_flags_readback_ok",
+                 "appearance_show_flags_requested_count",
+                 "appearance_show_flags_applied_count",
+                 "appearance_show_flags_mismatch_count",
+                 "appearance_show_flags_failure",
+                 "appearance_show_flags_requested_names",
+                 "appearance_show_flags_readback_names",
+                 "appearance_isolated_sample_count",
+                 "appearance_isolation_target_visible",
+                 "appearance_isolation_energy_mean",
+                 "appearance_isolation_energy_max",
+                 "appearance_isolation_energy_p95",
+                 "appearance_isolation_noise_model_ok",
+                 "appearance_isolation_noise_median",
+                 "appearance_isolation_noise_mad",
+                 "appearance_isolation_noise_floor",
+                 "appearance_isolation_effective_backend",
+                 "appearance_isolation_residual_paired_samples",
+                 "appearance_isolation_residual_isolated_samples",
+                 "appearance_isolation_residual_mean",
+                 "appearance_isolation_residual_max",
+                 "appearance_isolation_residual_p95",
+                 "appearance_isolation_residual_noise_model_ok",
+                 "appearance_isolation_residual_noise_median",
+                 "appearance_isolation_residual_noise_mad",
+                 "appearance_isolation_residual_noise_floor",
+                 "appearance_e0_isolation_ok",
+                 "appearance_e0_camera_stable",
+                 "appearance_e0_isolation_paired_samples",
+                 "appearance_e0_noise_median",
+                 "appearance_e0_noise_mad",
+                 "appearance_e0_noise_floor",
+                 "appearance_source_emission_noise_median",
+                 "appearance_source_emission_noise_mad",
+                 "appearance_source_emission_noise_floor",
+                 "appearance_effective_emission_noise_floor",
+                 "appearance_emission_surface_filter_applied",
+                 "appearance_emission_surface_filter_regions",
+                 "appearance_emission_core_samples",
+                 "appearance_emission_core_surface_count",
+                 "appearance_emission_halo_rejected_samples",
+                 "appearance_emission_core_threshold",
+                 "appearance_emission_roi_samples",
+                 "appearance_non_emission_samples",
+                 "appearance_emission_roi_count",
+                 "appearance_supported_samples_front",
+                 "appearance_supported_samples_side",
+                 "appearance_supported_samples_back",
+                 "appearance_emission_roi_samples_front",
+                 "appearance_emission_roi_samples_side",
+                 "appearance_emission_roi_samples_back",
+                 "appearance_non_emission_samples_front",
+                 "appearance_non_emission_samples_side",
+                 "appearance_non_emission_samples_back",
+                 "appearance_paint_uv_valid_samples_front",
+                 "appearance_paint_uv_valid_samples_side",
+                 "appearance_paint_uv_valid_samples_back",
+                 "appearance_paint_uv_invalid_samples_front",
+                 "appearance_paint_uv_invalid_samples_side",
+                 "appearance_paint_uv_invalid_samples_back",
+                 "appearance_emission_roi_nonzero_b_samples",
+                 "appearance_non_emission_nonzero_b_samples",
+                 "appearance_emission_recall",
+                 "appearance_emission_false_positive_rate",
+                 "appearance_emission_roi_loss_initial",
+                 "appearance_emission_roi_loss_best",
+                 "appearance_non_emission_loss_initial",
+                 "appearance_non_emission_loss_best",
+                 "appearance_non_emission_loss_delta",
+                 "appearance_preview_packed_b_verified",
+                 "appearance_preview_packed_b_failures",
+                 "appearance_preview_expected_emissive_nonzero_pixels",
+                 "appearance_preview_actual_emissive_nonzero_pixels",
+                 "preview_packed_pbr_import_verified",
+                 "preview_packed_pbr_bytes_mismatch",
+                 "preview_emissive_bytes_mismatch",
+                 "preview_expected_emissive_nonzero_pixels",
+                 "preview_actual_emissive_nonzero_pixels",
+                 "preview_expected_packed_pbr_hash",
+                 "preview_actual_packed_pbr_hash",
+                 "preview_snapshot_reused",
+                 "preview_pixels_changed",
+                 "appearance_isolation_artifact_written",
+                 "appearance_isolation_artifact_paired_samples",
+                 "appearance_isolation_artifact_above_threshold",
+                 "appearance_isolation_artifact_path",
+                 "appearance_isolation_artifact_schema",
+                 "appearance_diagnostic_samples_requested",
+                 "appearance_sample_artifact_written",
+                 "appearance_sample_artifact_failure",
+                 "appearance_sample_artifact_samples",
+                 "appearance_sample_artifact_path",
+                 "appearance_sample_artifact_schema",
+                 "appearance_capture_elapsed_ms",
+                 "appearance_capture_call_count",
+                 "appearance_capture_sparse_call_count",
+                 "appearance_capture_materialized_pixels",
+                 "appearance_capture_pool_created",
+                 "appearance_capture_pool_reused",
+                 "appearance_capture_pool_resources",
+                 "appearance_capture_total_elapsed_ms",
+                 "appearance_capture_setup_elapsed_ms",
+                 "appearance_capture_settle_elapsed_ms",
+                 "appearance_capture_projection_elapsed_ms",
+                 "appearance_capture_projection_diagnostic_samples",
+                 "appearance_capture_readback_elapsed_ms",
+                 "appearance_source_query_elapsed_ms",
+                 "appearance_sample_artifact_elapsed_ms",
+                 "appearance_preprocessing_timed_out",
+                 "appearance_clusters",
+                 "appearance_supported_samples",
+                 "appearance_fallback_samples",
+                 "appearance_projection_occluded_samples",
+                 "appearance_invalid_samples",
+                 "appearance_source_camera_stable",
+                 "appearance_camera_stable",
+                 "appearance_hdr_clipped_pixels",
+                 "appearance_preview_count",
+                 "appearance_iterations",
+                 "appearance_refinement_skipped",
+                 "appearance_refinement_reason",
+                 "appearance_best_observed_emission_roi_loss",
+                 "appearance_loss_initial",
+                 "appearance_fallback_median_delta_e",
+                 "appearance_loss_best",
+                 "appearance_best_median_delta_e",
+                 "appearance_emissive_probe_loss",
+                 "appearance_emissive_probe_median_delta_e",
+                 "appearance_emissive_probe_improvement",
+                 "appearance_seed_loss",
+                 "appearance_seed_median_delta_e",
+                 "appearance_seed_emissive_mean",
+                 "appearance_seed_emissive_max",
+                 "appearance_calibrated_loss",
+                 "appearance_calibrated_median_delta_e",
+                 "appearance_calibrated_emissive_mean",
+                 "appearance_calibrated_emissive_max",
+                 "appearance_calibrated_responsive_samples",
+                 "appearance_calibrated_eligible_samples",
+                 "appearance_calibrated_active_clusters",
+                 "appearance_response_supported_emission_clusters",
+                 "appearance_response_rejected_emission_clusters",
+                 "appearance_response_supported_emission_samples",
+                 "appearance_response_rejected_emission_samples",
+                 "appearance_calibrated_source_albedo_loss",
+                 "appearance_calibrated_source_albedo_median_delta_e",
+                 "appearance_calibrated_cluster_mix_loss",
+                 "appearance_calibrated_cluster_mix_median_delta_e",
+                 "appearance_calibrated_cluster_mix_source_clusters",
+                 "appearance_albedo_endpoint_loss",
+                 "appearance_albedo_endpoint_median_delta_e",
+                 "appearance_albedo_endpoint_median_chromaticity_delta",
+                 "appearance_albedo_endpoint_max_chromaticity_delta",
+                 "appearance_non_emission_albedo_loss",
+                 "appearance_non_emission_albedo_median_delta_e",
+                 "appearance_non_emission_albedo_roi_loss",
+                 "appearance_non_emission_albedo_median_chromaticity_delta",
+                 "appearance_non_emission_albedo_max_chromaticity_delta",
+                 "appearance_feedback_albedo_samples",
+                 "appearance_feedback_albedo_channels",
+                 "appearance_feedback_albedo_mean_adjustment",
+                 "appearance_calibrated_albedo_responsive_samples",
+                 "appearance_calibrated_albedo_active_clusters",
+                 "appearance_calibrated_albedo_blend_mean",
+                 "appearance_calibrated_albedo_blend_min",
+                 "appearance_calibrated_albedo_blend_max",
+                 "appearance_cluster_local_loss",
+                 "appearance_cluster_local_median_delta_e",
+                 "appearance_cluster_local_emissive_mean",
+                 "appearance_cluster_local_emissive_max",
+                 "appearance_cluster_local_candidate_samples",
+                 "appearance_cluster_local_active_clusters",
+                 "appearance_cluster_local_seed_clusters",
+                 "appearance_cluster_local_endpoint_clusters",
+                 "appearance_best_emissive_mean",
+                 "appearance_best_emissive_max",
+                 "appearance_cluster_diagnostics",
+                 "appearance_emissive_probe_preview_hash",
+                 "appearance_emissive_probe_preview_pixels_changed",
+                 "appearance_restore_verified",
+                 "appearance_preview_target_capture_ok",
+                 "appearance_preview_target_settle_ms",
+                 "appearance_preview_target_capture_failure",
+                 "appearance_preview_paired_samples",
+                 "appearance_preview_evaluation_reason",
+                 "appearance_cpu_worker_count",
+                 "appearance_cpu_parallel",
+                 "appearance_kmeans_elapsed_ms",
+                 "appearance_evaluation_elapsed_ms",
+                 "appearance_present_capture_ok",
+                 "appearance_present_capture_samples",
+                 "appearance_present_capture_failure",
+                 "appearance_research_target_sample_artifacts",
+                 "appearance_research_present_sample_artifacts",
+                 "appearance_preview_snapshot_discarded",
+                 "appearance_elapsed_ms",
+                 "preview_request_elapsed_ms",
+                 "preview_snapshot_export_elapsed_ms",
+                 "preprocessing_ms",
+                 "setup_ms",
+                 "pose_ms",
+                 "capture_ms",
+                 "sample_ms",
+                 "appearance_preview_failure",
+                 "appearance_match_stroke_samples",
+                 "appearance_fallback_stroke_samples",
+                 "appearance_emissive_stroke_samples",
+                 "appearance_match_stroke_samples_front",
+                 "appearance_match_stroke_samples_side",
+                 "appearance_match_stroke_samples_back",
+                 "appearance_fallback_stroke_samples_front",
+                 "appearance_fallback_stroke_samples_side",
+                 "appearance_fallback_stroke_samples_back",
+                 "appearance_emissive_stroke_samples_front",
+                 "appearance_emissive_stroke_samples_side",
+                 "appearance_emissive_stroke_samples_back",
+                 "appearance_stroke_emissive_mean",
+                 "appearance_stroke_emissive_max",
+                 "appearance_source_emissive_candidate_samples",
+                 "appearance_source_emissive_painted_samples",
+                 "appearance_source_emissive_missed_samples",
+                 "appearance_source_emissive_recall",
+                 "first_stroke_target_channel",
+                 "first_stroke_emissive",
                  "total_strokes",
                  "paint_strokes_submitted",
                  "paint_strokes_rendered",
@@ -452,6 +948,12 @@
                  "replay_strokes_fill_deduplicated",
                  "replay_strokes_paint_candidates",
                  "replay_strokes_paint_deduplicated",
+                 "replay_strokes_front_paint",
+                 "replay_strokes_side_paint",
+                 "replay_strokes_back_paint",
+                 "replay_strokes_front_fill",
+                 "replay_strokes_side_fill",
+                 "replay_strokes_back_fill",
                  "color_compression_tolerance",
                  "color_compression_requested",
                  "color_compression_enabled",
@@ -463,7 +965,15 @@
                  "adaptive_plan_parallel",
                  "adaptive_plan_avx2_available",
                  "adaptive_plan_avx2_used",
+                 "replay_candidate_elapsed_ms",
+                 "replay_materialize_elapsed_ms",
+                 "source_assignment_elapsed_ms",
+                 "source_assignment_worker_count",
+                 "source_assignment_parallel",
                  "replay_spatial_order",
+                 "replay_spatial_projection_backend",
+                 "replay_spatial_cached_projection_candidates",
+                 "replay_spatial_live_projection_calls",
                  "replay_spatial_current_view_vertical_min",
                  "replay_spatial_current_view_vertical_max",
                  "replay_spatial_current_view_projection_fallback_used",
@@ -487,6 +997,7 @@
                  "rendering_remaining_strokes",
                  "paint_strokes_remaining_total",
                  "research_artifacts_requested",
+                 "appearance_capture_artifacts_requested",
              })
         {
             append_metadata_field(out, metadata, key);
@@ -502,12 +1013,31 @@
                  "phase",
                  "terminal",
                  "result",
+                 "appearance_match",
+                 "capture_pass",
+                 "appearance_match_status",
+                 "appearance_match_reason",
+                 "appearance_paint_emissive_supported",
+                 "appearance_paint_emissive_reason",
+                 "appearance_preview_count",
+                 "appearance_iterations",
+                 "appearance_refinement_skipped",
+                 "appearance_refinement_reason",
+                 "appearance_loss_initial",
+                 "appearance_loss_best",
+                 "appearance_camera_stable",
+                 "appearance_restore_verified",
+                 "appearance_elapsed_ms",
                  "paint_elapsed_ms",
+                 "preview_request_elapsed_ms",
+                 "preview_snapshot_export_elapsed_ms",
                  "preprocessing_ms",
+                 "setup_ms",
                  "pose_ms",
                  "capture_ms",
                  "sample_ms",
                  "adaptive_plan_ms",
+                 "replay_materialize_elapsed_ms",
                  "paint_eta_ms",
                  "replay_pass_order",
                  "replay_fill_end",
@@ -609,8 +1139,18 @@
         out += "\",\"timing_ms\":{},\"metadata\":{\"bridge\":\"meccha-direct-bridge-v1\"";
         if (!metadata.empty())
         {
+            const auto sanitized = sanitize_json_non_finite_numbers(
+                compact_mesh_response_metadata(metadata));
             out += ",";
-            out += compact_mesh_response_metadata(metadata);
+            out += sanitized.text;
+            if (sanitized.replacements > 0)
+            {
+                out += ",\"bridge_json_non_finite_replacements\":";
+                out += std::to_string(sanitized.replacements);
+                out += ",\"bridge_json_non_finite_first_key\":\"";
+                out += json_escape(sanitized.first_key);
+                out += "\"";
+            }
         }
         out += "}}\n";
         return out;
