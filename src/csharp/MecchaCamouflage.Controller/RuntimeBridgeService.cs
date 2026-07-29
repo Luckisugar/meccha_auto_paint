@@ -112,6 +112,7 @@ public sealed class RuntimeBridgeService
     private string lastBlockedTargetSwitchKey = "";
     private string lastUnresponsiveBridgeKey = "";
     private string lastBridgeReadyLogKey = "";
+    private string lastResidentBridgeBinaryLogKey = "";
     private bool bridgeReadyTimeoutLogged;
     private bool bridgeConnected;
 
@@ -560,6 +561,7 @@ public sealed class RuntimeBridgeService
         var resident = TryAttachResidentCore(target);
         if (resident is not null)
         {
+            LogResidentBridgeBinaryState(resident);
             lock (bridgeStateGate)
             {
                 activeInstance = resident;
@@ -1053,6 +1055,42 @@ public sealed class RuntimeBridgeService
     {
         var inNativeDirectory = Path.Combine(root, "native", fileName);
         return File.Exists(inNativeDirectory) ? inNativeDirectory : Path.Combine(root, fileName);
+    }
+
+    /// <summary>
+    /// A resident bridge is deliberately never replaced in a live game process: it owns graphics
+    /// hooks and the authenticated listener. Compare its published start-block hash with the
+    /// current package so a user never tests a new UI against an older resident native module.
+    /// This only reads packaged files and resident-core metadata.
+    /// </summary>
+    private void LogResidentBridgeBinaryState(BridgeInstance resident)
+    {
+        try
+        {
+            var nativeRoot = PackagedAssets.ResolveRequiredAssetRoot(paths, "native", log);
+            var bridgePath = ResolvePackagedNativeAsset(nativeRoot, "runtime-bridge.dll");
+            if (!File.Exists(bridgePath))
+                return;
+            var packagedHash = PackagedAssets.Sha256File(bridgePath).ToLowerInvariant();
+            var residentHash = resident.ExpectedBridgeHash.ToLowerInvariant();
+            var key = resident.Target.ProcessId + ":" + residentHash + ":" + packagedHash;
+            if (string.Equals(lastResidentBridgeBinaryLogKey, key, StringComparison.Ordinal))
+                return;
+            lastResidentBridgeBinaryLogKey = key;
+            if (!string.Equals(residentHash, packagedHash, StringComparison.OrdinalIgnoreCase))
+            {
+                log.Warn(
+                    $"Bridge: resident native binary differs from this package (resident={residentHash[..16]}, package={packagedHash[..16]}); " +
+                    "restart the game before testing native changes.");
+                return;
+            }
+            log.Info($"Bridge: resident native binary matches this package (sha256={packagedHash[..16]}).");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            // Connection remains safe if a diagnostics-only comparison cannot read a package.
+            log.Warn("Bridge: could not compare resident native binary with package: " + ex.Message);
+        }
     }
 
     private static void CopyMeshProfiles(string profilesRoot, string instanceDirectory)

@@ -44,6 +44,7 @@ public sealed class PaintSettings
     public RegionMode SideRegionMode { get; set; } = RegionMode.Paint;
     public RegionMode BackRegionMode { get; set; } = RegionMode.Paint;
     public bool AutoMaterial { get; set; } = false;
+    public bool IncludeShadows { get; set; } = false;
     public double Metallic { get; set; } = 0.0;
     public double Roughness { get; set; } = 1.0;
     public double Emissive { get; set; } = 0.0;

@@ -15,6 +15,7 @@ var tests = new List<(string Name, Action Run)>
     ("app defaults use 99 percent opacity", AppDefaultsUse99PercentOpacity),
     ("ESP persists role colors and migrates legacy team-relative settings", EspRoleColorsPersistAndMigrateLegacySettings),
     ("payload sends a single brush and compression tolerance", PayloadSendsSingleBrushPipeline),
+    ("payload carries the independent include shadows policy", PayloadCarriesIndependentIncludeShadowsPolicy),
     ("image payload carries a full canonical canvas", ImagePayloadCarriesFullCanonicalCanvas),
     ("image transparency fills regions before painting opaque pixels", ImageTransparencyFillsRegionsBeforePaintingOpaquePixels),
     ("image region skip suppresses only Fill", ImageRegionSkipSuppressesOnlyFill),
@@ -32,6 +33,7 @@ var tests = new List<(string Name, Action Run)>
     ("native Present ESP has no external frame-render fallback", NativePresentEspHasNoExternalFallback),
     ("native Present ESP hooks queue, owns wrapped backbuffers, and reports lifecycle state", NativePresentEspOwnsRendererLifecycle),
     ("runtime keeps one resident bridge across GUI updates", RuntimeKeepsResidentBridgeAcrossGuiUpdates),
+    ("research hot reload quiesces and serializes bridge generations", ResearchHotReloadQuiescesAndSerializesBridgeGenerations),
     ("connected game process remains pinned", ConnectedGameProcessRemainsPinned),
     ("live game identity blocks target replacement", LiveGameIdentityBlocksTargetReplacement),
     ("unresponsive matching bridge is not reinjected", UnresponsiveMatchingBridgeIsNotReinjected),
@@ -58,7 +60,9 @@ var tests = new List<(string Name, Action Run)>
     ("native preview applies PBR and emissive channels", NativePreviewAppliesPbrAndEmissiveChannels),
     ("native preview expires snapshots after a component change", NativePreviewExpiresSnapshotsAfterComponentChange),
     ("native preview returns before recorded-stroke dispatch", NativePreviewReturnsBeforeRecordedStrokeDispatch),
-    ("native auto material detects emissive and reports local pacing", NativeAutoMaterialDetectsEmissiveAndReportsLocalPacing),
+    ("native Appearance Match uses preview feedback and preserves manual routes", NativeAppearanceMatchUsesPreviewFeedbackAndPreservesManualRoutes),
+    ("intrinsic emission probe is diagnostic-only and observable", IntrinsicEmissionProbeIsDiagnosticOnlyAndObservable),
+    ("appearance capture hides only the live brush visual", AppearanceCaptureHidesOnlyLiveBrushVisual),
     ("payload uses native paint route and includes fill material", PayloadUsesNativePaintRouteAndFillMaterial),
     ("legacy mirror-like Fill PBR defaults migrate to manual material", LegacyFillPbrDefaultsMigrateToManualMaterial),
     ("locales have complete keys", LocalesHaveCompleteKeys),
@@ -80,6 +84,8 @@ var tests = new List<(string Name, Action Run)>
     ("diagnostics log write is best effort when file is locked", DiagnosticsLogWriteIsBestEffortWhenFileLocked),
     ("runtime log write is best effort when file is locked", RuntimeLogWriteIsBestEffortWhenFileLocked),
     ("auto material defaults off", AutoMaterialDefaultsOff),
+    ("include shadows defaults off", IncludeShadowsDefaultsOff),
+    ("include shadows persists", IncludeShadowsPersists),
     ("ESP snaplines default on", EspSnaplinesDefaultOn),
     ("regions default to side and back paint", RegionsDefaultToSideAndBackPaint),
     ("image design defaults are safe and persist", ImageDesignDefaultsAreSafeAndPersist),
@@ -97,7 +103,9 @@ var tests = new List<(string Name, Action Run)>
     ("bridge messages are user friendly", BridgeMessagesAreUserFriendly),
     ("settings detect supported system language", SettingsDetectSupportedSystemLanguage),
     ("ui snapshot exposes a single brush", UiSnapshotExposesSingleBrush),
+    ("ui snapshot exposes include shadows independently", UiSnapshotExposesIncludeShadowsIndependently),
     ("web ui exposes one brush slider and compression tolerance", WebUiExposesSingleBrushSliderAndCompressionTolerance),
+    ("web ui exposes the include shadows toggle", WebUiExposesIncludeShadowsToggle),
     ("web ui persists image designs through the tabbed editor", WebUiImagePaintEditorUsesSavedTransaction),
     ("web ui keeps a running paint editable as a next-run draft", WebUiKeepsRunningPaintEditableAsNextRunDraft),
     ("web ui preserves image actions during paint snapshots", WebUiPreservesImageActionsDuringPaintSnapshots),
@@ -129,6 +137,7 @@ var tests = new List<(string Name, Action Run)>
     ("host session reset restores setting default", HostSessionResetRestoresDefault),
     ("host session resets the brush section with current vocabulary", HostSessionResetsBrushSectionWithCurrentVocabulary),
     ("host session updates a single brush", HostSessionUpdatesSingleBrush),
+    ("host session updates include shadows", HostSessionUpdatesIncludeShadows),
     ("host session rolls back invalid hotkey update", HostSessionRollsBackInvalidHotkeyUpdate),
     ("host session applies multiple setting updates atomically", HostSessionAppliesMultipleSettingUpdatesAtomically),
     ("host session rolls back duplicate hotkey batch", HostSessionRollsBackDuplicateHotkeyBatch),
@@ -672,6 +681,26 @@ static void PayloadSendsSingleBrushPipeline()
         "payload should send the compression tolerance");
     Assert(!tuning.TryGetProperty("brush_1_size_texels", out _) && !tuning.TryGetProperty("brush_2_size_texels", out _),
         "payload should not send retired two-brush keys");
+}
+
+static void PayloadCarriesIndependentIncludeShadowsPolicy()
+{
+    var settings = new AppSettings();
+    settings.Paint.AutoMaterial = false;
+    settings.Paint.IncludeShadows = true;
+
+    var payload = BridgePayloadBuilder.BuildPaintPayload(
+        settings,
+        42,
+        "Game.exe",
+        new PaintRequestOptions());
+    using var doc = JsonDocument.Parse(payload);
+    var tuning = doc.RootElement.GetProperty("tuning");
+
+    Assert(!tuning.GetProperty("auto_material").GetBoolean(),
+        "include shadows must not enable Auto Material");
+    Assert(tuning.GetProperty("include_shadows").GetBoolean(),
+        "payload should send include shadows independently");
 }
 
 static void ImagePayloadCarriesFullCanonicalCanvas()
@@ -1241,8 +1270,33 @@ static void RuntimeKeepsResidentBridgeAcrossGuiUpdates()
     Assert(runtime.Contains("TryAttachResidentCore", StringComparison.Ordinal) &&
            !runtime.Contains("ReplaceObsoleteResidentCoreAsync", StringComparison.Ordinal) &&
            !runtime.Contains("TryGetPackagedBridgeHash", StringComparison.Ordinal) &&
+           runtime.Contains("LogResidentBridgeBinaryState", StringComparison.Ordinal) &&
+           runtime.Contains("restart the game before testing native changes", StringComparison.Ordinal) &&
            !runtime.Contains("WaitForResidentCoreExitAsync", StringComparison.Ordinal),
-        "a GUI update must reconnect to its authenticated resident bridge instead of stacking another native DLL in a live game");
+        "a GUI update must reconnect to its authenticated resident bridge instead of stacking another native DLL in a live game, while reporting an old resident binary explicitly");
+}
+
+static void ResearchHotReloadQuiescesAndSerializesBridgeGenerations()
+{
+    var root = FindRepositoryRoot();
+    var script = ReadRepositoryText(Path.Combine(
+        root,
+        "scripts",
+        "research",
+        "hot-reload-bridge.ps1"));
+
+    Assert(script.Contains(@"Local\MecchaCamouflage.Inject.$TargetPid", StringComparison.Ordinal) &&
+           script.Contains("active_paint_quiescent", StringComparison.Ordinal) &&
+           script.Contains("hook_callbacks_quiescent", StringComparison.Ordinal) &&
+           script.Contains("Wait-ResidentCoreAbsent", StringComparison.Ordinal) &&
+           script.Contains("runtime-bridge-hot-$hash.dll", StringComparison.Ordinal) &&
+           script.Contains("MaxGenerations", StringComparison.Ordinal) &&
+           script.Contains("ProfileDirectory", StringComparison.Ordinal) &&
+           script.Contains(@"mesh-profiles", StringComparison.Ordinal) &&
+           script.Contains("Get-FileHash -Algorithm SHA256", StringComparison.Ordinal) &&
+           script.Contains("Invoke-Injector", StringComparison.Ordinal) &&
+           script.Contains("redacted", StringComparison.Ordinal),
+        "research hot reload must hold the production injection mutex, verify native quiescence, inject a content-addressed DLL, cap inert generations, and never expose bridge credentials");
 }
 
 static void ConnectedGameProcessRemainsPinned()
@@ -1696,9 +1750,13 @@ static void NativeSpatialReplayFollowsCurrentPoseAndCamera()
         FindRepositoryRoot(),
         "src", "native", "bridge", "bridge.cpp"));
 
-    Assert(bridge.Contains("sdk_project_world_to_screen(ref, ctx, sample.world_position", StringComparison.Ordinal) &&
+    Assert(bridge.Contains("appearance_normalized_screen_position_valid(", StringComparison.Ordinal) &&
+           bridge.Contains("sample.appearance_screen_nx *", StringComparison.Ordinal) &&
+           bridge.Contains("\"appearance_capture_coordinates\"", StringComparison.Ordinal) &&
+           bridge.Contains("else if (!appearance_replay_uses_capture_projection)", StringComparison.Ordinal) &&
+           bridge.Contains("sdk_project_world_to_screen(", StringComparison.Ordinal) &&
            bridge.Contains("current_pose_camera_scanline_before_adaptive_radius_order", StringComparison.Ordinal),
-        "replay order should be derived from each current-pose world sample in the current camera");
+        "Auto Material replay should reuse its stable capture-camera projection while other modes retain current-pose live projection");
     Assert(!bridge.Contains("profile_reference_z_desc_rows_camera_right_asc", StringComparison.Ordinal) &&
            !bridge.Contains("sample.reference_position.Z", StringComparison.Ordinal),
         "replay order must not use the mesh profile reference pose");
@@ -1768,7 +1826,9 @@ static void NativePreviewAppliesPbrAndEmissiveChannels()
            bridge.Contains("packed_pbr_export_mismatch", StringComparison.Ordinal) &&
            bridge.Contains("sdk::EPaintChannel::AlbedoMetallicRoughnessEmissive", StringComparison.Ordinal) &&
            bridge.Contains("unpreview_snapshot_emissive_bytes", StringComparison.Ordinal) &&
-           bridge.Contains("mesh_unpreview_packed_pbr_mismatch", StringComparison.Ordinal),
+           bridge.Contains("mesh_unpreview_packed_pbr_mismatch", StringComparison.Ordinal) &&
+           bridge.Contains("mesh_first_restore_appearance_preview_session(", StringComparison.Ordinal) &&
+           bridge.Contains("unpreview_restore_verified", StringComparison.Ordinal),
         "preview and unpreview must preserve packed Metallic/Roughness/Emissive data without successive imports overwriting it");
 }
 
@@ -1801,27 +1861,254 @@ static void NativePreviewReturnsBeforeRecordedStrokeDispatch()
         "preview must complete via local texture import before a recorded-stroke async job is created");
 }
 
-static void NativeAutoMaterialDetectsEmissiveAndReportsLocalPacing()
+static void NativeAppearanceMatchUsesPreviewFeedbackAndPreservesManualRoutes()
 {
+    var root = FindRepositoryRoot();
     var bridge = File.ReadAllText(Path.Combine(
-        FindRepositoryRoot(),
+        root,
         "src", "native", "bridge", "bridge.cpp"));
+    var bridgeJson = File.ReadAllText(Path.Combine(
+        root,
+        "src", "native", "bridge", "bridge_json.inc"));
+    var hostSession = File.ReadAllText(Path.Combine(
+        root,
+        "src", "csharp", "MecchaCamouflage.Controller", "HostSession.cs"));
+    var contract = File.ReadAllText(Path.Combine(
+        root,
+        "src", "native", "include", "runtime_contract.hpp"));
 
-    Assert(bridge.Contains("mesh_first_get_dominant_emissive_properties", StringComparison.Ordinal) &&
-           bridge.Contains("sdk::EPaintChannel::Emissive", StringComparison.Ordinal) &&
-           bridge.Contains("material_properties_emissive_source", StringComparison.Ordinal),
-        "Auto Detect must derive Emissive from the game channel and report its source or fallback");
-    Assert(bridge.Contains("sizeof(MeshFirstPaintMaterialPattern) == 0x30", StringComparison.Ordinal) &&
-           bridge.Contains("offsetof(MeshFirstPaintMaterialPattern, emissive_color) == 0x18", StringComparison.Ordinal) &&
-           bridge.Contains("offsetof(MeshFirstPaintMaterialPattern, sample_count) == 0x2C", StringComparison.Ordinal) &&
-           bridge.Contains("material_properties_candidates", StringComparison.Ordinal) &&
-           bridge.Contains("packed_pbr_emissive_blue_mode", StringComparison.Ordinal) &&
-           bridge.Contains("PreferredSurfaceCoverageFloor = 0.01", StringComparison.Ordinal) &&
+    Assert(bridge.Contains("sdk::ESceneCaptureSource::BaseColor", StringComparison.Ordinal) &&
+           bridge.Contains("sdk::ESceneCaptureSource::FinalColorHDR", StringComparison.Ordinal) &&
+           bridge.Contains("sdk::ESceneCaptureSource::FinalToneCurveHDR", StringComparison.Ordinal) &&
+           bridge.Contains("sdk::ESceneCaptureSource::Normal", StringComparison.Ordinal) &&
+           bridge.Contains("sdk::ESceneCaptureSource::SceneDepth", StringComparison.Ordinal) &&
+           bridge.Contains("sdk::ETextureRenderTargetFormat::RTF_RGBA16f", StringComparison.Ordinal) &&
+           bridge.Contains("ReadRenderTargetRaw", StringComparison.Ordinal),
+        "Appearance Match must derive its evidence from calibrated scene passes rather than target material properties");
+    Assert(bridge.Contains("appearance_match_v1", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_sanitize_hdr", StringComparison.Ordinal) &&
+           contract.Contains("AppearanceHdrMaximum", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_material_key", StringComparison.Ordinal) &&
+           bridge.Contains("mesh_first_apply_appearance_parameters", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_spsa_pair", StringComparison.Ordinal) &&
+           bridge.Contains("AppearanceSpsaIterations", StringComparison.Ordinal) &&
+           bridge.Contains("mesh_first_restore_appearance_preview_session", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_preview_restore_hash_mismatch", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_restore_verified", StringComparison.Ordinal) &&
+           !bridge.Contains("material_properties = mesh_first_get_dominant_material_properties", StringComparison.Ordinal),
+        "Appearance Match must fit only legal paint values with bounded local preview feedback and refuse direct strokes after an unverifiable restore");
+    Assert(bridge.Contains("appearance_make_fallback", StringComparison.Ordinal) &&
+           bridge.Contains("AppearanceFallbackRoughness", StringComparison.Ordinal) &&
+           bridge.Contains("final_color_ldr", StringComparison.Ordinal) &&
+           bridge.Contains("final_color_hdr_unavailable", StringComparison.Ordinal) &&
            bridge.Contains("auto_material_fill_policy", StringComparison.Ordinal) &&
            bridge.Contains("manual_fill_tuning", StringComparison.Ordinal) &&
-           bridge.Contains("material_properties_fill_manual_samples", StringComparison.Ordinal) &&
            bridge.Contains("first_stroke_emissive", StringComparison.Ordinal),
-        "Auto Detect must cover Paint, preserve an explicit Fill material, use the UE5.6 Emissive-aware pattern layout, and expose numeric candidates for runtime verification");
+        "unsupported HDR maps must use an explicit non-emissive display-color fallback while Fill remains manual");
+    Assert(!bridge.Contains("manual_final_color_ldr", StringComparison.Ordinal) &&
+           !bridge.Contains("mesh_first_apply_manual_capture_colors", StringComparison.Ordinal) &&
+           !bridge.Contains("appearance_manual_source_paint_albedo", StringComparison.Ordinal) &&
+           bridge.Contains("shared_bounded_albedo_response_fixed_material_v1", StringComparison.Ordinal) &&
+           bridge.Contains("mesh_first_apply_fixed_material_parameters", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_make_calibrated_albedo_parameters", StringComparison.Ordinal) &&
+           !contract.Contains("appearance_manual_capture_color", StringComparison.Ordinal) &&
+           contract.Contains("appearance_fixed_material_parameters", StringComparison.Ordinal) &&
+           contract.Contains("appearance_calibrate_albedo_blend", StringComparison.Ordinal) &&
+           !bridge.Contains("sdk_srgb_to_linear_unit", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_linear_to_srgb", StringComparison.Ordinal) &&
+           !contract.Contains("appearance_calibrate_manual_albedo_response", StringComparison.Ordinal) &&
+           !bridge.Contains("preserve_base_luminance", StringComparison.Ordinal) &&
+           !contract.Contains("brightness_delta > 0.18", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_manual_color_mode\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_manual_final_ldr_samples\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_manual_color_feedback_applied\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_manual_feedback_excluded_emission_samples\"", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_manual_source_paint_color_space", StringComparison.Ordinal),
+        "manual source Paint must use Auto Material's bounded Albedo response pipeline while keeping only Metallic/Roughness/Emissive fixed");
+    Assert(!bridge.Contains("sdk::EPaintChannel::AlbedoMetallicRoughness));", StringComparison.Ordinal) &&
+           !bridge.Contains("sdk::EPaintChannel::AlbedoMetallicRoughness,", StringComparison.Ordinal) &&
+           !bridge.Contains("sdk::EPaintChannel::AlbedoMetallicRoughness);", StringComparison.Ordinal) &&
+           bridge.Contains("sdk::EPaintChannel::AlbedoMetallicRoughnessEmissive", StringComparison.Ordinal),
+        "Appearance Match preview and final PaintAtUVWithBrush strokes must select the AMRE channel; merely filling EmissiveColor while selecting AMR drops the emissive payload");
+    var evaluationStart = bridge.IndexOf("auto mesh_first_evaluate_appearance_capture", StringComparison.Ordinal);
+    var evaluationEnd = bridge.IndexOf("auto mesh_first_write_bmp_rgb", evaluationStart, StringComparison.Ordinal);
+    Assert(evaluationStart >= 0 && evaluationEnd > evaluationStart,
+        "Appearance Match capture evaluation must remain a distinct native stage");
+    var evaluation = bridge[evaluationStart..evaluationEnd];
+    Assert(evaluation.Contains("!sample.appearance_supported", StringComparison.Ordinal) &&
+           evaluation.Contains("!target", StringComparison.Ordinal) &&
+           !evaluation.Contains("sample.appearance_fallback", StringComparison.Ordinal),
+        "the fallback baseline must be evaluated against every source-supported sample; excluding fallback samples leaves SPSA with zero loss pairs");
+    Assert(bridge.Contains("appearance_make_emissive_probe_parameters", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_make_calibrated_emissive_parameters", StringComparison.Ordinal) &&
+           bridge.Contains("target_intrinsic_emission_e0", StringComparison.Ordinal) &&
+           bridge.Contains("mesh_first_emission_noise_from_captures", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_emission_sample_detected", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_combine_emission_noise_models", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_filter_emission_surface_halo", StringComparison.Ordinal) &&
+           bridge.Contains("sample.appearance_emission_roi", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_emission_roi_accepted", StringComparison.Ordinal) &&
+           bridge.Contains("intrinsic_emission_roi_accepted_v1", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_non_emission_candidate_accepted", StringComparison.Ordinal) &&
+           bridge.Contains("intrinsic_non_emission_chromaticity_accepted_v1", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_overall_deadline", StringComparison.Ordinal) &&
+           bridge.Contains("pair.plus[offset]", StringComparison.Ordinal) &&
+           bridge.Contains("pair.minus[offset]", StringComparison.Ordinal) &&
+           bridge.Contains("preview.packed_pbr_import_verified", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_preview_packed_b_mismatch", StringComparison.Ordinal) &&
+           !bridge.Contains("cluster_local_response_v4", StringComparison.Ordinal) &&
+           !bridge.Contains("emissive_response_calibrated_v3", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_emissive_probe_loss", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_emissive_probe_improvement", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_emissive_probe_preview_pixels_changed", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_seed_emissive_mean", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_best_emissive_mean", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_fallback_median_delta_e", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_emissive_probe_loss\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_emissive_probe_preview_hash\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_seed_emissive_mean\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_calibrated_eligible_samples\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_response_rejected_emission_samples\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_cluster_local_candidate_samples\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_emissive_stroke_samples\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_source_emissive_recall\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_e0_noise_floor\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_source_emission_noise_floor\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_effective_emission_noise_floor\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_emission_surface_filter_applied\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_emission_core_samples\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_emission_halo_rejected_samples\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_emission_roi_samples\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_emission_roi_samples_front\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_paint_uv_invalid_samples_back\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_sample_artifact_schema\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_emissive_stroke_samples_back\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"replay_strokes_front_paint\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_emission_recall\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_emission_false_positive_rate\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_non_emission_albedo_loss\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_non_emission_albedo_median_delta_e\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_non_emission_albedo_median_chromaticity_delta\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_albedo_endpoint_max_chromaticity_delta\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_non_emission_albedo_max_chromaticity_delta\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_feedback_albedo_samples\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_feedback_albedo_mean_adjustment\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_research_target_sample_artifacts\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_preview_packed_b_verified\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"preview_packed_pbr_import_verified\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"preview_emissive_bytes_mismatch\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_source_component_resolution\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_source_query_schema\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_source_query_result_schema\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_source_query_component_summary\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_source_query_material_summary\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_source_parameter_prior_used\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_screen_hit_result_schema_ok\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_screen_hit_result_world_offset\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_screen_hit_uv_accepted\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_screen_hit_uv_rejected_world_mismatch\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_runtime_triangle_uv_used\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_capture_destination_samples_back\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_capture_occluded_projection_kept\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_screen_hit_world_delta_over_5cm\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_screen_hit_cached_world_delta_mean_cm\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_rebuilt_cached_world_delta_mean_cm\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_cluster_diagnostics\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_best_median_delta_e\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_preview_target_settle_ms\"", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_calibrated_active_clusters", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_response_supported_emission_clusters", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_cluster_local_seed_clusters", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_stroke_emissive_max", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_source_emissive_missed_samples", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_e0_noise_floor", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_source_emission_noise_floor", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_emission_surface_filter_applied", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_emission_halo_rejected_samples", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_emission_roi_samples_side", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_paint_uv_valid_samples_back", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_emissive_stroke_samples_back", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_screen_hit_result_schema_ok", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_screen_hit_result_world_offset", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_screen_hit_uv_accepted", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_screen_hit_uv_rejected_world_mismatch", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_runtime_triangle_uv_used", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_capture_destination_samples_back", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_capture_occluded_projection_kept", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_screen_hit_cached_world_delta_mean_cm", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_rebuilt_cached_world_delta_mean_cm", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_emission_recall", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_preview_packed_b_verified", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_source_component_resolution", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_source_query_schema", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_source_query_result_schema", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_source_query_component_summary", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_source_query_material_summary", StringComparison.Ordinal) &&
+           bridge.Contains("best_candidate.use_feedback_albedo", StringComparison.Ordinal) &&
+           bridge.Contains("best_candidate.use_base_fallback", StringComparison.Ordinal) &&
+           bridge.Contains("calibrated_feedback_authoritative", StringComparison.Ordinal) &&
+           bridge.Contains("const bool base_available", StringComparison.Ordinal),
+        "Appearance Match must require both source and target E0 isolation floors, expose region coverage, freeze the projected E mask during AMR fitting, and verify packed B before accepting the fit");
+    Assert(bridge.Contains("mesh_first_inspect_paint_emissive_capability", StringComparison.Ordinal) &&
+           bridge.Contains("mesh_first_get_render_target_for_channel", StringComparison.Ordinal) &&
+           bridge.Contains("packed_material_properties_emissive_supported", StringComparison.Ordinal) &&
+           bridge.Contains("emissive_render_target_unbound", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_fit_enabled", StringComparison.Ordinal) &&
+           bridge.Contains("out.emissive_supported = true", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_paint_emissive_supported\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_paint_emissive_reason\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_paint_selected_emissive_render_target\"", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_paint_emissive_supported", StringComparison.Ordinal),
+        "a packed MaterialProperties target must enable Appearance Match through its documented R/G/B material channel, while a genuinely unbound target remains explicit fallback");
+    Assert(bridgeJson.Contains("\"appearance_match_status\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_fallback_color_mode\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_restore_verified\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_loss_best\"", StringComparison.Ordinal) &&
+           hostSession.Contains("AppearanceMatchSummary", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_supported_samples", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_fallback_samples", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_fallback_color_mode", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_projection_occluded_samples", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_clusters", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_capture_final_hdr_ok", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_preview_evaluation_reason\"", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_preview_evaluation_reason", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_cpu_worker_count\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_evaluation_elapsed_ms\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_capture_pool_reused\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_capture_sparse_call_count\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_capture_materialized_pixels\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_capture_projection_diagnostic_samples\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_capture_readback_elapsed_ms\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"replay_spatial_projection_backend\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"replay_spatial_live_projection_calls\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_refinement_skipped\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_refinement_reason\"", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_cpu_parallel", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_capture_total_elapsed_ms", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_source_query_elapsed_ms", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_sample_artifact_elapsed_ms", StringComparison.Ordinal) &&
+           hostSession.Contains("source_assignment_elapsed_ms", StringComparison.Ordinal) &&
+           hostSession.Contains("source_assignment_worker_count", StringComparison.Ordinal) &&
+           hostSession.Contains("source_assignment_parallel", StringComparison.Ordinal) &&
+           hostSession.Contains("replay_materialize_elapsed_ms", StringComparison.Ordinal) &&
+           hostSession.Contains("preview_snapshot_export_elapsed_ms", StringComparison.Ordinal) &&
+           hostSession.Contains("preview_request_elapsed_ms", StringComparison.Ordinal) &&
+           hostSession.Contains("setup_ms", StringComparison.Ordinal) &&
+           bridge.Contains("std::atomic<std::size_t> next_sample", StringComparison.Ordinal) &&
+           bridge.Contains("projection_diagnostic_max_samples", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_capture_artifacts ? 32U : 0U", StringComparison.Ordinal) &&
+           bridge.Contains("base_capture_request.retain_capture_pixels", StringComparison.Ordinal) &&
+           bridge.Contains("native_front.keep_occluded_projected_samples = true", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"base_capture_projection_samples\"", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_best_observed_emission_roi_loss", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_non_emission_albedo_loss", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_non_emission_albedo_roi_loss", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_feedback_albedo_samples", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_manual_color_feedback_applied", StringComparison.Ordinal) &&
+           hostSession.Contains("\"Manual Material\"", StringComparison.Ordinal) &&
+           hostSession.Contains("\"Auto Material\"", StringComparison.Ordinal),
+        "Appearance Match diagnostics must survive the bridge metadata whitelist and expose sample support, capture health, and preview-evaluation failures in the controller log");
     Assert(bridge.Contains("tuning_auto_material && any_paint_region", StringComparison.Ordinal) &&
            bridge.Contains("image_paint_fill_color_r", StringComparison.Ordinal) &&
            bridge.Contains("image_paint_enabled ? image_paint_fill_color_r : fill_color_r", StringComparison.Ordinal) &&
@@ -1850,6 +2137,70 @@ static void NativeAutoMaterialDetectsEmissiveAndReportsLocalPacing()
            bridge.Contains("local_render_target_write_budget", StringComparison.Ordinal) &&
            bridge.Contains("local_logical_sample_batch_limit", StringComparison.Ordinal),
         "normal local paint must report its CPU and write-budget pacing for live performance checks");
+}
+
+static void IntrinsicEmissionProbeIsDiagnosticOnlyAndObservable()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(
+        root, "src", "native", "bridge", "bridge.cpp"));
+    var bridgeJson = ReadRepositoryText(Path.Combine(
+        root, "src", "native", "bridge", "bridge_json.inc"));
+    var diagnostics = ReadRepositoryText(Path.Combine(
+        root,
+        "src",
+        "csharp",
+        "MecchaCamouflage.LiveDiagnostics",
+        "Program.cs"));
+
+    Assert(bridge.Contains("SdkSceneCaptureProfile::IntrinsicEmission", StringComparison.Ordinal) &&
+           bridge.Contains("SetShowFlagSettings", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_intrinsic_emission_show_flags", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_show_flags_readback_ok", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_emission_isolation_probe_complete", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_preview_count\\\":0", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_direct_stroke_count\\\":0", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_production_connected\\\":false", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_isolation_energy_mean\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_show_flags_requested_names\"", StringComparison.Ordinal) &&
+           diagnostics.Contains("appearance-emission-isolation-probe", StringComparison.Ordinal) &&
+           diagnostics.Contains("appearance-emission-target-differential", StringComparison.Ordinal) &&
+           diagnostics.Contains("appearance-color-differential", StringComparison.Ordinal) &&
+           diagnostics.Contains("manual-preview-hold", StringComparison.Ordinal) &&
+           diagnostics.Contains("appearanceCaptureArtifacts: true", StringComparison.Ordinal) &&
+           diagnostics.Contains("appearance_emission_isolation_target_visible", StringComparison.Ordinal),
+        "the intrinsic emission backend must expose applied ShowFlags and E0/E1 research evidence without applying Preview or direct production strokes");
+}
+
+static void AppearanceCaptureHidesOnlyLiveBrushVisual()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(
+        root, "src", "native", "bridge", "bridge.cpp"));
+    var bridgeJson = ReadRepositoryText(Path.Combine(
+        root, "src", "native", "bridge", "bridge_json.inc"));
+    var hostSession = ReadRepositoryText(Path.Combine(
+        root,
+        "src",
+        "csharp",
+        "MecchaCamouflage.Controller",
+        "HostSession.cs"));
+
+    Assert(bridge.Contains("sdk_collect_brush_plane_visual_components", StringComparison.Ordinal) &&
+           bridge.Contains("sdk_brush_plane_actor_for_live_component", StringComparison.Ordinal) &&
+           bridge.Contains("\"persistentlevel\"", StringComparison.Ordinal) &&
+           bridge.Contains("\"bp_brushplane\"", StringComparison.Ordinal) &&
+           bridge.Contains("request.extra_hidden_components", StringComparison.Ordinal) &&
+           bridge.Contains("\"HideComponent\"", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_brush_visual_hidden_count", StringComparison.Ordinal) &&
+           !bridge.Contains("SetActorHiddenInGame", StringComparison.Ordinal) &&
+           !bridge.Contains("appearance_intrinsic_emission_show_flags_with_decals_disabled", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_brush_visual_hidden_count\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_brush_visual_hide_failures\"", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_brush_visual_component_count", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_brush_visual_hidden_count", StringComparison.Ordinal) &&
+           hostSession.Contains("appearance_brush_visual_hide_failures", StringComparison.Ordinal),
+        "Appearance Match must hide only the live BP_BrushPlane visual from each capture without mutating the world or suppressing map decals");
 }
 
 static void PayloadUsesNativePaintRouteAndFillMaterial()
@@ -1929,12 +2280,54 @@ static void LocalesHaveCompleteKeys()
 {
     var catalog = LocalizationCatalog.Load();
     var all = catalog.All;
+    var expectedAutoMaterial = new Dictionary<string, string>
+    {
+        ["en"] = "Auto Material",
+        ["id"] = "Material otomatis",
+        ["de"] = "Automatisches Material",
+        ["es"] = "Material automático",
+        ["fr"] = "Matériau automatique",
+        ["it"] = "Materiale automatico",
+        ["nl"] = "Automatisch materiaal",
+        ["pl"] = "Automatyczny materiał",
+        ["pt-BR"] = "Material automático",
+        ["vi"] = "Vật liệu tự động",
+        ["tr"] = "Otomatik materyal",
+        ["ru"] = "Автоматический материал",
+        ["ja"] = "自動マテリアル",
+        ["ko"] = "자동 머티리얼",
+        ["zh-Hans"] = "自动材质",
+        ["zh-Hant"] = "自動材質"
+    };
+    var expectedSceneLighting = new Dictionary<string, string>
+    {
+        ["en"] = "Scene Lighting",
+        ["id"] = "Cahaya adegan",
+        ["de"] = "Szenenlicht",
+        ["es"] = "Luz de escena",
+        ["fr"] = "Éclairage scène",
+        ["it"] = "Luce di scena",
+        ["nl"] = "Scènelicht",
+        ["pl"] = "Światło sceny",
+        ["pt-BR"] = "Luz da cena",
+        ["vi"] = "Ánh sáng cảnh",
+        ["tr"] = "Sahne ışığı",
+        ["ru"] = "Свет сцены",
+        ["ja"] = "シーン照明",
+        ["ko"] = "씬 조명",
+        ["zh-Hans"] = "场景光照",
+        ["zh-Hant"] = "場景光照"
+    };
     var englishKeys = all["en"].Keys.Order().ToArray();
     foreach (var locale in LocalizationCatalog.SupportedLocales)
     {
         Assert(all.ContainsKey(locale.Code), $"missing locale {locale.Code}");
         var keys = all[locale.Code].Keys.Order().ToArray();
         Assert(englishKeys.SequenceEqual(keys), $"key mismatch for {locale.Code}");
+        Assert(all[locale.Code]["auto.material"] == expectedAutoMaterial[locale.Code],
+            $"auto.material must use the Auto Material product name in {locale.Code}");
+        Assert(all[locale.Code]["include.shadows"] == expectedSceneLighting[locale.Code],
+            $"include.shadows must use a concise Scene Lighting label in {locale.Code}");
     }
 }
 
@@ -2100,6 +2493,24 @@ static void AutoMaterialDefaultsOff()
     Assert(!new AppSettings().Paint.AutoMaterial, "auto material should default off");
 }
 
+static void IncludeShadowsDefaultsOff()
+{
+    Assert(!new AppSettings().Paint.IncludeShadows, "include shadows should default off");
+}
+
+static void IncludeShadowsPersists()
+{
+    using var temp = new TempHome();
+    var paths = new AppPaths("include-shadows-persistence-test");
+    var settings = new AppSettings();
+    settings.Paint.IncludeShadows = true;
+
+    new SettingsStore(paths).Save(settings);
+    var loaded = new SettingsStore(paths).Load();
+
+    Assert(loaded.Paint.IncludeShadows, "include shadows should survive a settings round-trip");
+}
+
 static void EspSnaplinesDefaultOn()
 {
     var esp = new AppSettings().Esp;
@@ -2239,6 +2650,35 @@ static void UiSnapshotExposesSingleBrush()
         "snapshot should not expose retired two-brush fields");
 }
 
+static void UiSnapshotExposesIncludeShadowsIndependently()
+{
+    var snapshot = new PaintSnapshot(
+        5.0,
+        false,
+        0.0,
+        1.0,
+        0.0,
+        "skip",
+        "paint",
+        "paint",
+        "#FFFFFF",
+        0.0,
+        1.0,
+        0.0,
+        false,
+        IncludeShadows: true);
+    var json = JsonSerializer.Serialize(snapshot, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    });
+    using var doc = JsonDocument.Parse(json);
+
+    Assert(!doc.RootElement.GetProperty("autoMaterial").GetBoolean(),
+        "include shadows must not change Auto Material in the UI snapshot");
+    Assert(doc.RootElement.GetProperty("includeShadows").GetBoolean(),
+        "the UI snapshot should expose include shadows");
+}
+
 static void WebUiExposesSingleBrushSliderAndCompressionTolerance()
 {
     var repository = FindRepositoryRoot();
@@ -2286,6 +2726,46 @@ static void WebUiKeepsThemeColorOnReadonlyControls()
         "passive themed controls must reject keyboard and label-driven edits outside Edit mode, including dependent locks");
     Assert(app.Contains("document.activeElement === control", StringComparison.Ordinal),
         "locking a previously focused themed control must blur it before keyboard input can change its visible value");
+}
+
+static void WebUiExposesIncludeShadowsToggle()
+{
+    var repository = FindRepositoryRoot();
+    var index = File.ReadAllText(Path.Combine(
+        repository,
+        "src",
+        "csharp",
+        "MecchaCamouflage.WebHost",
+        "web",
+        "index.html"));
+    var app = File.ReadAllText(Path.Combine(
+        repository,
+        "src",
+        "csharp",
+        "MecchaCamouflage.WebHost",
+        "web",
+        "app.js"));
+
+    Assert(index.Contains("id=\"include-shadows\"", StringComparison.Ordinal) &&
+           index.Contains("data-i18n=\"include.shadows\"", StringComparison.Ordinal),
+        "the Material group should expose a localized Scene Lighting checkbox");
+    var autoMaterialIndex = index.IndexOf("id=\"auto-material\"", StringComparison.Ordinal);
+    var includeShadowsIndex = index.IndexOf("id=\"include-shadows\"", StringComparison.Ordinal);
+    var autoMaterialFieldIndex = index.LastIndexOf(
+        "<label class=\"field\">",
+        autoMaterialIndex,
+        StringComparison.Ordinal);
+    var includeShadowsFieldIndex = index.LastIndexOf(
+        "<label class=\"field\">",
+        includeShadowsIndex,
+        StringComparison.Ordinal);
+    Assert(autoMaterialFieldIndex >= 0 &&
+           includeShadowsFieldIndex > autoMaterialFieldIndex,
+        "Auto Material and Scene Lighting should occupy the left and right columns of the same settings row");
+    Assert(app.Contains("setChecked(\"include-shadows\", paint.includeShadows)", StringComparison.Ordinal) &&
+           app.Contains("bindCheckbox(\"include-shadows\", \"paint.includeShadows\")", StringComparison.Ordinal) &&
+           app.Contains("\"paint.includeShadows\"", StringComparison.Ordinal),
+        "the Scene Lighting checkbox should participate in snapshot rendering, editing, and diffing");
 }
 
 static void WebUiImagePaintEditorUsesSavedTransaction()
@@ -3177,6 +3657,23 @@ static void HostSessionUpdatesSingleBrush()
 
     var snapshot = session.GetSnapshotAsync().GetAwaiter().GetResult();
     Assert(Math.Abs(snapshot.Settings.Paint.BrushSizeTexels - 6.5) < 0.000001, "snapshot should expose the single brush");
+}
+
+static void HostSessionUpdatesIncludeShadows()
+{
+    using var temp = new TempHome();
+    var session = new HostSession("host-include-shadows-sync-test");
+
+    var update = session.UpdateSetting(
+        "paint.includeShadows",
+        JsonSerializer.SerializeToElement(true));
+
+    Assert(update.Success, update.Message);
+    Assert(session.Settings.Paint.IncludeShadows,
+        "host settings should update include shadows");
+    var snapshot = session.GetSnapshotAsync().GetAwaiter().GetResult();
+    Assert(snapshot.Settings.Paint.IncludeShadows,
+        "the updated include shadows value should reach the UI snapshot");
 }
 
 static void HostSessionRollsBackInvalidHotkeyUpdate()

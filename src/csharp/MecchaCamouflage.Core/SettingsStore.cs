@@ -105,6 +105,7 @@ public sealed class SettingsStore
         paint.SideRegionMode = ReadRegionMode(root, "side_region_mode", paint.SideRegionMode);
         paint.BackRegionMode = ReadRegionMode(root, "back_region_mode", paint.BackRegionMode);
         paint.AutoMaterial = ReadBool(root, "auto_material", paint.AutoMaterial);
+        paint.IncludeShadows = ReadBool(root, "include_shadows", paint.IncludeShadows);
         paint.Metallic = ReadDouble(root, "metallic", paint.Metallic);
         paint.Roughness = ReadDouble(root, "roughness", paint.Roughness);
         paint.Emissive = ReadDouble(root, "emissive", paint.Emissive);
@@ -231,6 +232,7 @@ public sealed class SettingsStore
         side_region_mode = RegionModeText(settings.Paint.SideRegionMode),
         back_region_mode = RegionModeText(settings.Paint.BackRegionMode),
         auto_material = settings.Paint.AutoMaterial,
+        include_shadows = settings.Paint.IncludeShadows,
         metallic = settings.Paint.Metallic,
         roughness = settings.Paint.Roughness,
         emissive = settings.Paint.Emissive,

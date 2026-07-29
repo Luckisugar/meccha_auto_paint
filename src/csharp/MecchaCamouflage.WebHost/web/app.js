@@ -442,6 +442,7 @@ function renderSettings(snapshot) {
   setNumberPair("brush-size", "brush-size-number", paint.brushSizeTexels);
   setNumberPair("color-compression-tolerance", "color-compression-tolerance-number", paint.colorCompressionTolerance);
   setChecked("auto-material", paint.autoMaterial);
+  setChecked("include-shadows", paint.includeShadows);
   setNumberPair("metallic", "metallic-number", paint.metallic);
   setNumberPair("roughness", "roughness-number", paint.roughness);
   setNumberPair("emissive", "emissive-number", paint.emissive);
@@ -911,6 +912,7 @@ function diffSnapshots(before, after) {
     "paint.brushSizeTexels",
     "paint.colorCompressionTolerance",
     "paint.autoMaterial",
+    "paint.includeShadows",
     "paint.metallic",
     "paint.roughness",
     "paint.emissive",
@@ -2613,6 +2615,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindRangePair("brush-size", "brush-size-number", "paint.brushSizeTexels");
   bindRangePair("color-compression-tolerance", "color-compression-tolerance-number", "paint.colorCompressionTolerance");
   bindCheckbox("auto-material", "paint.autoMaterial");
+  bindCheckbox("include-shadows", "paint.includeShadows");
   bindRangePair("metallic", "metallic-number", "paint.metallic");
   bindRangePair("roughness", "roughness-number", "paint.roughness");
   bindRangePair("emissive", "emissive-number", "paint.emissive");
