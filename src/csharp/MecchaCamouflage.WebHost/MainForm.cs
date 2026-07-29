@@ -627,16 +627,23 @@ public sealed class MainForm : Form
                 var rosterSource = metadata.TryGetProperty("roster_source", out var rosterSourceValue) ? rosterSourceValue.GetString() ?? "unknown" : "unknown";
                 var roster = metadata.TryGetProperty("roster_count", out var rosterValue) ? rosterValue.GetUInt32() : 0;
                 var pawns = metadata.TryGetProperty("valid_pawns", out var pawnsValue) ? pawnsValue.GetUInt32() : 0;
+                var filteredLocal = metadata.TryGetProperty("filtered_local", out var filteredLocalValue) ? filteredLocalValue.GetUInt32() : 0;
+                var filteredSpectators = metadata.TryGetProperty("filtered_spectators", out var filteredSpectatorsValue) ? filteredSpectatorsValue.GetUInt32() : 0;
+                var filteredScope = metadata.TryGetProperty("filtered_scope", out var filteredScopeValue) ? filteredScopeValue.GetUInt32() : 0;
+                var missingCapsuleContracts = metadata.TryGetProperty("missing_capsule_contracts", out var missingCapsuleContractsValue) ? missingCapsuleContractsValue.GetUInt32() : 0;
+                var missingMeshContracts = metadata.TryGetProperty("missing_mesh_contracts", out var missingMeshContractsValue) ? missingMeshContractsValue.GetUInt32() : 0;
+                var missingPoseContracts = metadata.TryGetProperty("missing_pose_contracts", out var missingPoseContractsValue) ? missingPoseContractsValue.GetUInt32() : 0;
+                var targetsWithoutSpatialGeometry = metadata.TryGetProperty("targets_without_spatial_geometry", out var targetsWithoutSpatialGeometryValue) ? targetsWithoutSpatialGeometryValue.GetUInt32() : 0;
+                var targetFaults = metadata.TryGetProperty("target_faults", out var targetFaultsValue) ? targetFaultsValue.GetUInt32() : 0;
                 var capsuleComponents = metadata.TryGetProperty("capsule_components", out var capsuleComponentsValue) ? capsuleComponentsValue.GetUInt32() : 0;
                 var capsuleTransforms = metadata.TryGetProperty("capsule_transforms", out var capsuleTransformsValue) ? capsuleTransformsValue.GetUInt32() : 0;
                 var capsuleSizes = metadata.TryGetProperty("capsule_sizes", out var capsuleSizesValue) ? capsuleSizesValue.GetUInt32() : 0;
                 var capsuleProjected = metadata.TryGetProperty("capsule_projected", out var capsuleProjectedValue) ? capsuleProjectedValue.GetUInt32() : 0;
-                var actorBounds = metadata.TryGetProperty("actor_bounds", out var actorBoundsValue) ? actorBoundsValue.GetUInt32() : 0;
-                var actorBoundsProjected = metadata.TryGetProperty("actor_bounds_projected", out var actorBoundsProjectedValue) ? actorBoundsProjectedValue.GetUInt32() : 0;
+                var meshComponents = metadata.TryGetProperty("mesh_components", out var meshComponentsValue) ? meshComponentsValue.GetUInt32() : 0;
+                var meshTransforms = metadata.TryGetProperty("mesh_transforms", out var meshTransformsValue) ? meshTransformsValue.GetUInt32() : 0;
                 var skeletonContracts = metadata.TryGetProperty("skeleton_contracts", out var skeletonContractsValue) ? skeletonContractsValue.GetUInt64() : 0;
                 var poseProfiles = metadata.TryGetProperty("pose_profile_matches", out var poseProfilesValue) ? poseProfilesValue.GetUInt32() : 0;
                 var poseComponent = metadata.TryGetProperty("pose_component_space", out var poseComponentValue) ? poseComponentValue.GetUInt32() : 0;
-                var poseLocal = metadata.TryGetProperty("pose_local_space", out var poseLocalValue) ? poseLocalValue.GetUInt32() : 0;
                 var poseBones = metadata.TryGetProperty("pose_bones", out var poseBonesValue) ? poseBonesValue.GetUInt32() : 0;
                 var poseEdges = metadata.TryGetProperty("pose_edges", out var poseEdgesValue) ? poseEdgesValue.GetUInt32() : 0;
                 var poses = metadata.TryGetProperty("poses", out var posesValue) ? posesValue.GetUInt32() : 0;
@@ -664,16 +671,23 @@ public sealed class MainForm : Form
                     RosterSource = rosterSource,
                     RosterCount = roster,
                     ValidPawns = pawns,
+                    FilteredLocal = filteredLocal,
+                    FilteredSpectators = filteredSpectators,
+                    FilteredScope = filteredScope,
+                    MissingCapsuleContracts = missingCapsuleContracts,
+                    MissingMeshContracts = missingMeshContracts,
+                    MissingPoseContracts = missingPoseContracts,
+                    TargetsWithoutSpatialGeometry = targetsWithoutSpatialGeometry,
+                    TargetFaults = targetFaults,
                     CapsuleComponents = capsuleComponents,
                     CapsuleTransforms = capsuleTransforms,
                     CapsuleSizes = capsuleSizes,
                     CapsuleProjected = capsuleProjected,
-                    ActorBounds = actorBounds,
-                    ActorBoundsProjected = actorBoundsProjected,
+                    MeshComponents = meshComponents,
+                    MeshTransforms = meshTransforms,
                     SkeletonContracts = skeletonContracts,
                     PoseProfileMatches = poseProfiles,
                     PoseComponentSpace = poseComponent,
-                    PoseLocalSpace = poseLocal,
                     PoseBones = poseBones,
                     PoseEdges = poseEdges,
                     Poses = poses,
@@ -695,17 +709,7 @@ public sealed class MainForm : Form
                     return;
                 nativeEspStatusSignature = signature;
                 var logMessage =
-                    $"ESP: native Present status={status}; scope={configuredScope}; format={format}; snapshot_sequence={sequence}; " +
-                    $"capture={captureStatus} age_ms={captureAge}; hud_rebinds={rebinds}; " +
-                    $"roles={hiderRoster}/{hunterRoster}; " +
-                    $"roster={rosterSource}:{roster}; pawns={pawns}; " +
-                    $"capsule={capsuleComponents}/{capsuleTransforms}/{capsuleSizes}/{capsuleProjected}; " +
-                    $"actor_bounds={actorBounds}/{actorBoundsProjected}; " +
-                    $"pose=contracts:{skeletonContracts} profiles:{poseProfiles} " +
-                    $"space:{poseComponent}/{poseLocal} bones:{poseBones} edges:{poseEdges} ready:{poses}; " +
-                    $"geometry={players}/{lines}/{texts}; vertices={vertices}; glyph_quads={glyphQuads}; " +
-                    $"projection_scale={projectionScaleX:F4}/{projectionScaleY:F4} calibrations={projectionCalibrations}; " +
-                    $"submitted_frames={submitted}; completed_fences={completed}; rendered_frames={frames}; reason={reason}.";
+                    NativePresentStatusLogPolicy.Format(sample, nativeEspVerboseStatus);
                 if (NativePresentStatusLogPolicy.ShouldWarn(sample))
                     session.Log.Warn(logMessage);
                 else

@@ -14,16 +14,23 @@ public sealed record NativePresentStatusLogSample
     public string RosterSource { get; init; } = "unknown";
     public uint RosterCount { get; init; }
     public uint ValidPawns { get; init; }
+    public uint FilteredLocal { get; init; }
+    public uint FilteredSpectators { get; init; }
+    public uint FilteredScope { get; init; }
+    public uint MissingCapsuleContracts { get; init; }
+    public uint MissingMeshContracts { get; init; }
+    public uint MissingPoseContracts { get; init; }
+    public uint TargetsWithoutSpatialGeometry { get; init; }
+    public uint TargetFaults { get; init; }
     public uint CapsuleComponents { get; init; }
     public uint CapsuleTransforms { get; init; }
     public uint CapsuleSizes { get; init; }
     public uint CapsuleProjected { get; init; }
-    public uint ActorBounds { get; init; }
-    public uint ActorBoundsProjected { get; init; }
+    public uint MeshComponents { get; init; }
+    public uint MeshTransforms { get; init; }
     public ulong SkeletonContracts { get; init; }
     public uint PoseProfileMatches { get; init; }
     public uint PoseComponentSpace { get; init; }
-    public uint PoseLocalSpace { get; init; }
     public uint PoseBones { get; init; }
     public uint PoseEdges { get; init; }
     public uint Poses { get; init; }
@@ -43,8 +50,29 @@ public sealed record NativePresentStatusLogSample
 
 public static class NativePresentStatusLogPolicy
 {
+    public static string Format(NativePresentStatusLogSample sample, bool verbose)
+    {
+        if (verbose || ShouldWarn(sample))
+            return FormatVerbose(sample);
+
+        var expectedPlayers = ExpectedTargets(sample);
+        return
+            $"ESP: status={sample.Status} | scope={sample.ConfiguredScope} | " +
+            $"capture={sample.CaptureStatus} | " +
+            $"roster={sample.RosterSource}:{sample.RosterCount} | " +
+            $"drawable={sample.Players}/{expectedPlayers} | " +
+            $"filtered=local:{sample.FilteredLocal} " +
+            $"spectator:{sample.FilteredSpectators} scope:{sample.FilteredScope} | " +
+            $"miss=capsule:{sample.MissingCapsuleContracts} " +
+            $"mesh:{sample.MissingMeshContracts} " +
+            $"pose:{sample.MissingPoseContracts} " +
+            $"spatial:{sample.TargetsWithoutSpatialGeometry} " +
+            $"fault:{sample.TargetFaults}";
+    }
+
     public static string Signature(NativePresentStatusLogSample sample, bool verbose)
     {
+        var expectedTargets = ExpectedTargets(sample);
         var stable = string.Join('|',
             sample.Status,
             ReasonState(sample),
@@ -56,13 +84,19 @@ public static class NativePresentStatusLogPolicy
             sample.RosterSource,
             Presence(sample.RosterCount),
             Coverage(sample.ValidPawns, sample.RosterCount),
-            Coverage(sample.CapsuleComponents, sample.ValidPawns),
+            Presence(sample.MissingCapsuleContracts),
+            Presence(sample.MissingMeshContracts),
+            Presence(sample.MissingPoseContracts),
+            Presence(sample.TargetsWithoutSpatialGeometry),
+            Presence(sample.TargetFaults),
+            Coverage(sample.CapsuleComponents, expectedTargets),
             Coverage(sample.CapsuleTransforms, sample.CapsuleComponents),
             Coverage(sample.CapsuleSizes, sample.CapsuleTransforms),
-            Presence(sample.ActorBoundsProjected),
+            Coverage(sample.MeshComponents, expectedTargets),
+            Coverage(sample.MeshTransforms, sample.MeshComponents),
             Presence(sample.SkeletonContracts),
-            Coverage(sample.PoseProfileMatches, sample.ValidPawns),
-            Coverage((ulong)sample.PoseComponentSpace + sample.PoseLocalSpace, sample.PoseProfileMatches),
+            Coverage(sample.PoseProfileMatches, expectedTargets),
+            Coverage(sample.PoseComponentSpace, sample.PoseProfileMatches),
             Presence(sample.PoseBones),
             Coverage(sample.Poses, sample.PoseProfileMatches),
             ProjectionState(sample),
@@ -83,12 +117,16 @@ public static class NativePresentStatusLogPolicy
             sample.CapsuleTransforms,
             sample.CapsuleSizes,
             sample.CapsuleProjected,
-            sample.ActorBounds,
-            sample.ActorBoundsProjected,
+            sample.MissingCapsuleContracts,
+            sample.MissingMeshContracts,
+            sample.MissingPoseContracts,
+            sample.TargetsWithoutSpatialGeometry,
+            sample.TargetFaults,
+            sample.MeshComponents,
+            sample.MeshTransforms,
             sample.SkeletonContracts,
             sample.PoseProfileMatches,
             sample.PoseComponentSpace,
-            sample.PoseLocalSpace,
             sample.PoseBones,
             sample.PoseEdges,
             sample.Poses,
@@ -108,9 +146,53 @@ public static class NativePresentStatusLogPolicy
 
     public static bool ShouldWarn(NativePresentStatusLogSample sample) =>
         string.Equals(sample.Status, "unavailable", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(sample.CaptureStatus, "stalled", StringComparison.OrdinalIgnoreCase);
+        string.Equals(sample.CaptureStatus, "stalled", StringComparison.OrdinalIgnoreCase) ||
+        sample.MissingCapsuleContracts > 0 ||
+        sample.MissingMeshContracts > 0 ||
+        sample.MissingPoseContracts > 0 ||
+        sample.TargetsWithoutSpatialGeometry > 0 ||
+        sample.TargetFaults > 0;
+
+    private static string FormatVerbose(NativePresentStatusLogSample sample) =>
+        $"ESP: native Present status={sample.Status}; scope={sample.ConfiguredScope}; " +
+        $"format={sample.Format}; snapshot_sequence={sample.SnapshotSequence}; " +
+        $"capture={sample.CaptureStatus} age_ms={sample.CaptureAgeMs}; " +
+        $"hud_rebinds={sample.HudRebinds}; " +
+        $"roles={sample.HiderRosterCount}/{sample.HunterRosterCount}; " +
+        $"roster={sample.RosterSource}:{sample.RosterCount}; " +
+        $"pawns={sample.ValidPawns}; " +
+        $"filtered={sample.FilteredLocal}/{sample.FilteredSpectators}/{sample.FilteredScope}; " +
+        $"missing=capsule:{sample.MissingCapsuleContracts} " +
+        $"mesh:{sample.MissingMeshContracts} " +
+        $"pose:{sample.MissingPoseContracts} " +
+        $"spatial:{sample.TargetsWithoutSpatialGeometry} " +
+        $"fault:{sample.TargetFaults}; " +
+        $"capsule={sample.CapsuleComponents}/{sample.CapsuleTransforms}/" +
+        $"{sample.CapsuleSizes}/{sample.CapsuleProjected}; " +
+        $"mesh={sample.MeshComponents}/{sample.MeshTransforms}; " +
+        $"pose=contracts:{sample.SkeletonContracts} profiles:{sample.PoseProfileMatches} " +
+        $"component_space:{sample.PoseComponentSpace} " +
+        $"bones:{sample.PoseBones} edges:{sample.PoseEdges} ready:{sample.Poses}; " +
+        $"geometry={sample.Players}/{sample.Lines}/{sample.Texts}; " +
+        $"vertices={sample.Vertices}; glyph_quads={sample.GlyphQuads}; " +
+        $"projection_scale={sample.ProjectionScaleX:F4}/{sample.ProjectionScaleY:F4} " +
+        $"calibrations={sample.ProjectionCalibrations}; " +
+        $"submitted_frames={sample.SubmittedFrames}; " +
+        $"completed_fences={sample.CompletedFences}; " +
+        $"rendered_frames={sample.RenderedFrames}; reason={sample.Reason}.";
 
     private static string Presence(ulong value) => value == 0 ? "none" : "present";
+
+    private static ulong ExpectedTargets(NativePresentStatusLogSample sample)
+    {
+        var filtered =
+            (ulong)sample.FilteredLocal +
+            sample.FilteredSpectators +
+            sample.FilteredScope;
+        return sample.ValidPawns > filtered
+            ? (ulong)sample.ValidPawns - filtered
+            : 0;
+    }
 
     private static string ReasonState(NativePresentStatusLogSample sample) =>
         string.Equals(sample.Status, "ready", StringComparison.OrdinalIgnoreCase) &&

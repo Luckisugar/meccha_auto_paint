@@ -41,10 +41,6 @@ public readonly record struct NativePresentCapsule(
     double Radius,
     double HalfHeight);
 
-public readonly record struct NativePresentWorldBounds(
-    NativePresentVector3 Origin,
-    NativePresentVector3 Extent);
-
 public readonly record struct NativePresentPoint(double X, double Y);
 
 public readonly record struct NativePresentRectangle(double Left, double Top, double Right, double Bottom)
@@ -153,63 +149,6 @@ public static class NativePresentProjection
             return false;
 
         bounds = new NativePresentRectangle(left, top, rightEdge, bottom);
-        return true;
-    }
-
-    /// <summary>
-    /// Projects an actor's world-space axis-aligned bounds. This preserves a
-    /// stable box for pawn variants that expose neither a capsule nor a known
-    /// skeletal-mesh profile.
-    /// </summary>
-    public static bool TryProjectWorldBounds(
-        NativePresentCamera camera,
-        NativePresentWorldBounds worldBounds,
-        int viewportWidth,
-        int viewportHeight,
-        out NativePresentRectangle bounds)
-    {
-        bounds = default;
-        if (!IsFinite(worldBounds.Origin) || !IsFinite(worldBounds.Extent) ||
-            worldBounds.Extent.X <= 0 || worldBounds.Extent.Y <= 0 || worldBounds.Extent.Z <= 0)
-            return false;
-
-        Span<NativePresentVector3> corners = stackalloc NativePresentVector3[8];
-        var index = 0;
-        for (var x = -1; x <= 1; x += 2)
-        {
-            for (var y = -1; y <= 1; y += 2)
-            {
-                for (var z = -1; z <= 1; z += 2)
-                {
-                    corners[index++] = worldBounds.Origin + new NativePresentVector3(
-                        worldBounds.Extent.X * x,
-                        worldBounds.Extent.Y * y,
-                        worldBounds.Extent.Z * z);
-                }
-            }
-        }
-
-        var any = false;
-        var left = double.PositiveInfinity;
-        var top = double.PositiveInfinity;
-        var right = double.NegativeInfinity;
-        var bottom = double.NegativeInfinity;
-        foreach (var corner in corners)
-        {
-            if (!TryProject(camera, corner, viewportWidth, viewportHeight, out var point))
-                continue;
-            any = true;
-            left = Math.Min(left, point.X);
-            top = Math.Min(top, point.Y);
-            right = Math.Max(right, point.X);
-            bottom = Math.Max(bottom, point.Y);
-        }
-        if (!any || !double.IsFinite(left) || !double.IsFinite(top) ||
-            !double.IsFinite(right) || !double.IsFinite(bottom) ||
-            right - left < 1 || bottom - top < 1)
-            return false;
-
-        bounds = new NativePresentRectangle(left, top, right, bottom);
         return true;
     }
 

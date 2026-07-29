@@ -196,14 +196,24 @@ int main()
     {
         return 36;
     }
-    if (runtime_contract::esp_select_pose_space(0.05, 0.75) !=
-            runtime_contract::EspPoseTransformSpace::Component ||
-        runtime_contract::esp_select_pose_space(0.80, 0.04) !=
-            runtime_contract::EspPoseTransformSpace::Local ||
-        runtime_contract::esp_select_pose_space(-1.0, -1.0) !=
-            runtime_contract::EspPoseTransformSpace::Unavailable)
+    if (sdk::FieldOffsets::
+            SkeletalMeshComponent_CachedComponentSpaceTransforms !=
+        0x05F0)
     {
-        return 37;
+        return 44;
+    }
+    constexpr std::array<std::uintptr_t, 4> one_queue{
+        0, 0x1000, 0x1000, 0};
+    constexpr std::array<std::uintptr_t, 4> ambiguous_queues{
+        0x1000, 0x2000, 0x1000, 0};
+    constexpr std::array<std::uintptr_t, 4> no_queues{};
+    if (runtime_contract::esp_unique_queue_identity(one_queue) !=
+            0x1000 ||
+        runtime_contract::esp_unique_queue_identity(
+            ambiguous_queues) != 0 ||
+        runtime_contract::esp_unique_queue_identity(no_queues) != 0)
+    {
+        return 45;
     }
     const auto glyph_a = runtime_contract::esp_ascii_glyph_rows(L'A');
     const auto glyph_lower_a = runtime_contract::esp_ascii_glyph_rows(L'a');
@@ -248,7 +258,121 @@ int main()
     }
     using EspRole = runtime_contract::EspRole;
     using EspScope = runtime_contract::EspScope;
-    if (!runtime_contract::esp_role_scope_matches(EspScope::All, EspRole::Unknown) ||
+    using EspTargetPawnSource =
+        runtime_contract::EspTargetPawnSource;
+    if (runtime_contract::esp_select_target_pawn_source(
+            EspRole::Hider,
+            EspRole::Spectator,
+            EspRole::Hider,
+            true) != EspTargetPawnSource::RoleRoster ||
+        runtime_contract::esp_select_target_pawn_source(
+            EspRole::Hunter,
+            EspRole::Unknown,
+            EspRole::Hunter,
+            true) != EspTargetPawnSource::RoleRoster ||
+        runtime_contract::esp_select_target_pawn_source(
+            EspRole::Hider,
+            EspRole::Hider,
+            EspRole::Hider,
+            true) != EspTargetPawnSource::PlayerArray ||
+        runtime_contract::esp_select_target_pawn_source(
+            EspRole::Hider,
+            EspRole::Spectator,
+            EspRole::Hunter,
+            true) != EspTargetPawnSource::PlayerArray ||
+        runtime_contract::esp_select_target_pawn_source(
+            EspRole::Hider,
+            EspRole::Spectator,
+            EspRole::Hider,
+            false) != EspTargetPawnSource::PlayerArray)
+    {
+        return 39;
+    }
+    if (!runtime_contract::esp_should_refresh_avatar_directory(
+            true, true, 1000, 995, 250) ||
+        !runtime_contract::esp_should_refresh_avatar_directory(
+            true, false, 1000, 0, 250) ||
+        !runtime_contract::esp_should_refresh_avatar_directory(
+            true, false, 1250, 1000, 250) ||
+        runtime_contract::esp_should_refresh_avatar_directory(
+            true, false, 1249, 1000, 250) ||
+        runtime_contract::esp_should_refresh_avatar_directory(
+            false, true, 1000, 0, 250) ||
+        !runtime_contract::esp_should_refresh_avatar_directory(
+            true, false, 5, 1000, 250))
+    {
+        return 39;
+    }
+    if (!runtime_contract::esp_cached_avatar_binding_is_usable(
+            true,
+            true,
+            true,
+            true,
+            EspRole::Hider,
+            EspRole::Hider) ||
+        runtime_contract::esp_cached_avatar_binding_is_usable(
+            false,
+            true,
+            true,
+            true,
+            EspRole::Hider,
+            EspRole::Hider) ||
+        runtime_contract::esp_cached_avatar_binding_is_usable(
+            true,
+            false,
+            true,
+            true,
+            EspRole::Hider,
+            EspRole::Hider) ||
+        runtime_contract::esp_cached_avatar_binding_is_usable(
+            true,
+            true,
+            false,
+            true,
+            EspRole::Hider,
+            EspRole::Hider) ||
+        runtime_contract::esp_cached_avatar_binding_is_usable(
+            true,
+            true,
+            true,
+            true,
+            EspRole::Hider,
+            EspRole::Hunter))
+    {
+        return 39;
+    }
+    if (runtime_contract::esp_resolve_target_role(
+            EspRole::Hider, EspRole::Hider) !=
+            EspRole::Hider ||
+        runtime_contract::esp_resolve_target_role(
+            EspRole::Hider, EspRole::Unknown) !=
+            EspRole::Hider ||
+        runtime_contract::esp_resolve_target_role(
+            EspRole::Hider, EspRole::Spectator) !=
+            EspRole::Spectator ||
+        runtime_contract::esp_resolve_target_role(
+            EspRole::Unknown, EspRole::Unknown) !=
+            EspRole::Unknown)
+    {
+        return 40;
+    }
+    if (runtime_contract::esp_current_pawn_role(
+            EspRole::Hider, EspRole::Hunter) !=
+            EspRole::Hunter ||
+        runtime_contract::esp_current_pawn_role(
+            EspRole::Hunter, EspRole::Hider) !=
+            EspRole::Hider ||
+        runtime_contract::esp_current_pawn_role(
+            EspRole::Hunter, EspRole::Spectator) !=
+            EspRole::Spectator ||
+        runtime_contract::esp_current_pawn_role(
+            EspRole::Hider, EspRole::Unknown) !=
+            EspRole::Hider ||
+        runtime_contract::esp_role_scope_matches(
+            EspScope::All, EspRole::Spectator) ||
+        runtime_contract::esp_role_scope_matches(
+            EspScope::Hider, EspRole::Spectator) ||
+        !runtime_contract::esp_role_scope_matches(EspScope::All, EspRole::Unknown) ||
         !runtime_contract::esp_role_scope_matches(EspScope::Hider, EspRole::Hider) ||
         runtime_contract::esp_role_scope_matches(EspScope::Hider, EspRole::Hunter) ||
         !runtime_contract::esp_role_scope_matches(EspScope::Hunter, EspRole::Hunter) ||
@@ -258,6 +382,33 @@ int main()
         runtime_contract::esp_role_color(EspRole::Unknown, 0x010203u, 0x040506u) != 0xFFFFFFu)
     {
         return 41;
+    }
+    const auto spectator_capabilities =
+        runtime_contract::esp_pawn_geometry_capabilities(
+            true, true, true);
+    const auto complete_capabilities =
+        runtime_contract::esp_pawn_geometry_capabilities(
+            false, true, true);
+    const auto mesh_only_capabilities =
+        runtime_contract::esp_pawn_geometry_capabilities(
+            false, false, true);
+    const auto capsule_only_capabilities =
+        runtime_contract::esp_pawn_geometry_capabilities(
+            false, true, false);
+    if (!spectator_capabilities.spectator ||
+        spectator_capabilities.root_capsule ||
+        spectator_capabilities.skeletal_mesh ||
+        complete_capabilities.spectator ||
+        !complete_capabilities.root_capsule ||
+        !complete_capabilities.skeletal_mesh ||
+        mesh_only_capabilities.spectator ||
+        mesh_only_capabilities.root_capsule ||
+        !mesh_only_capabilities.skeletal_mesh ||
+        capsule_only_capabilities.spectator ||
+        !capsule_only_capabilities.root_capsule ||
+        capsule_only_capabilities.skeletal_mesh)
+    {
+        return 43;
     }
 
     const runtime_contract::ImageAtlasMappingInput round_front{

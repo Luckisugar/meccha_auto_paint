@@ -45,11 +45,10 @@ var tests = new List<(string Name, Action Run)>
     ("native Present pipeline uses explicit shader linkage semantics", NativePresentPipelineUsesExplicitShaderLinkageSemantics),
     ("native Present ESP restores its own hook without chaining unknown hooks", NativePresentEspRestoresOwnHookWithoutChaining),
     ("native Present capsule projection honors UE camera axes and constrained aspect", NativePresentCapsuleProjectionHonorsCameraAxes),
-    ("native Present box prefers validated pose bounds with a capsule fallback", NativePresentBoxUsesPoseBoundsWithCapsuleFallback),
-    ("native Present projects profile-independent actor bounds", NativePresentProjectsProfileIndependentActorBounds),
+    ("native Present box uses validated pose or root capsule bounds", NativePresentBoxUsesPoseBoundsWithCapsuleFallback),
     ("native Present snaplines reach the viewport edge for distant targets", NativePresentSnaplinesReachViewportEdge),
-    ("native Present keeps unknown pawn variants visible", NativePresentKeepsUnknownPawnVariantsVisible),
-    ("native Present excludes spectator pawns from actor-bounds fallback", NativePresentExcludesSpectatorPawns),
+    ("native Present requires an exact pawn SDK contract", NativePresentRequiresExactPawnSdkContract),
+    ("native Present excludes spectator pawns before geometry", NativePresentExcludesSpectatorPawns),
     ("native Present can select a skeleton profile from bone topology", NativePresentSelectsSkeletonProfileFromBoneTopology),
     ("native Present snapshot double buffer never publishes a partial frame", NativePresentSnapshotDoubleBufferIsAtomic),
     ("spectator paint resolution requires local controller identity", SpectatorPaintResolutionRequiresLocalControllerIdentity),
@@ -1136,11 +1135,14 @@ static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
         HunterRosterCount = 5,
         RosterSource = "player_array",
         RosterCount = 10,
-        ValidPawns = 9,
+        ValidPawns = 10,
+        FilteredLocal = 1,
         CapsuleComponents = 9,
         CapsuleTransforms = 9,
         CapsuleSizes = 9,
         CapsuleProjected = 9,
+        MeshComponents = 9,
+        MeshTransforms = 9,
         SkeletonContracts = 2,
         PoseProfileMatches = 9,
         PoseComponentSpace = 9,
@@ -1162,11 +1164,13 @@ static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
     {
         CaptureAgeMs = 0,
         RosterCount = 9,
-        ValidPawns = 8,
+        ValidPawns = 9,
         CapsuleComponents = 8,
         CapsuleTransforms = 8,
         CapsuleSizes = 8,
         CapsuleProjected = 8,
+        MeshComponents = 8,
+        MeshTransforms = 8,
         PoseProfileMatches = 8,
         PoseComponentSpace = 8,
         PoseBones = 224,
@@ -1193,6 +1197,15 @@ static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
         NativePresentStatusLogPolicy.Signature(later, verbose: true),
         "explicit verbose ESP logging must retain raw diagnostic counter changes");
 
+    Assert(
+        NativePresentStatusLogPolicy.Format(later, verbose: false) ==
+        "ESP: status=ready | scope=all | capture=active | roster=player_array:9 | drawable=8/8 | filtered=local:1 spectator:0 scope:0 | miss=capsule:0 mesh:0 pose:0 spatial:0 fault:0",
+        "normal ESP status output must remain compact while preserving pipeline coverage");
+    Assert(
+        NativePresentStatusLogPolicy.Format(later, verbose: true).Contains(
+            "snapshot_sequence=311", StringComparison.Ordinal),
+        "explicit verbose ESP status output must retain raw diagnostics");
+
     var scopeChanged = later with { ConfiguredScope = "hunter" };
     Assert(
         NativePresentStatusLogPolicy.Signature(later, verbose: false) !=
@@ -1203,7 +1216,9 @@ static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
     Assert(
         NativePresentStatusLogPolicy.Signature(later, verbose: false) !=
         NativePresentStatusLogPolicy.Signature(stalled, verbose: false) &&
-        NativePresentStatusLogPolicy.ShouldWarn(stalled),
+        NativePresentStatusLogPolicy.ShouldWarn(stalled) &&
+        NativePresentStatusLogPolicy.Format(stalled, verbose: false).Contains(
+            "snapshot_sequence=311", StringComparison.Ordinal),
         "capture stalls must remain visible as a warning state transition");
 
     var paintBusy = later with { CaptureStatus = "busy", CaptureAgeMs = 1500 };
@@ -1235,11 +1250,19 @@ static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
         NativePresentStatusLogPolicy.Signature(brokenTransform, verbose: false),
         "normal ESP logging must retain upstream capture-stage failures");
 
-    var actorBoundsFallback = later with { ActorBoundsProjected = 2 };
+    var missingMeshContract = later with { MissingMeshContracts = 2 };
     Assert(
         NativePresentStatusLogPolicy.Signature(later, verbose: false) !=
-        NativePresentStatusLogPolicy.Signature(actorBoundsFallback, verbose: false),
-        "normal ESP logging must report when profile-independent actor bounds recover missing pawns");
+        NativePresentStatusLogPolicy.Signature(missingMeshContract, verbose: false) &&
+        NativePresentStatusLogPolicy.ShouldWarn(missingMeshContract),
+        "normal ESP logging must surface a missing Mesh capability without discarding independent Box geometry");
+
+    var isolatedTargetFault = later with { TargetFaults = 1 };
+    Assert(
+        NativePresentStatusLogPolicy.Signature(later, verbose: false) !=
+        NativePresentStatusLogPolicy.Signature(isolatedTargetFault, verbose: false) &&
+        NativePresentStatusLogPolicy.ShouldWarn(isolatedTargetFault),
+        "normal ESP logging must surface a target-local fault without requiring the renderer to become unavailable");
 
     var previousFlag = Environment.GetEnvironmentVariable("MECCHA_ESP_VERBOSE_STATUS");
     try
@@ -1285,7 +1308,13 @@ static void NativePresentEspOwnsRendererLifecycle()
            bridge.Contains("BridgeResidentCoreV1", StringComparison.Ordinal) &&
            bridge.Contains("bridge host detached; resident core remains available", StringComparison.Ordinal) &&
            bridge.Contains("esp_native_queue_for_late_present", StringComparison.Ordinal) &&
-           bridge.Contains("same-thread Present submission", StringComparison.Ordinal) &&
+           bridge.Contains("esp_unique_queue_identity", StringComparison.Ordinal) &&
+           bridge.Contains(
+               "waiting for an exact or uniquely observed swapchain command queue",
+               StringComparison.Ordinal) &&
+           !bridge.Contains(
+               "swapchain queue has no factory record or same-thread Present submission",
+               StringComparison.Ordinal) &&
            bridge.Contains("DXGI_FORMAT_R10G10B10A2_UNORM", StringComparison.Ordinal) &&
            bridge.Contains("D3D12_RESOURCE_STATE_PRESENT", StringComparison.Ordinal) &&
            bridge.Contains("D3D12_RESOURCE_STATE_RENDER_TARGET", StringComparison.Ordinal) &&
@@ -1304,9 +1333,12 @@ static void NativePresentEspOwnsRendererLifecycle()
            bridge.Contains("valid_pawns", StringComparison.Ordinal) &&
            bridge.Contains("capsule_projected", StringComparison.Ordinal) &&
            bridge.Contains("esp_native_skeleton_contract_for_mesh", StringComparison.Ordinal) &&
-           bridge.Contains("esp_native_compose_local_pose", StringComparison.Ordinal) &&
+           bridge.Contains(
+               "SkeletalMeshComponent_CachedComponentSpaceTransforms",
+               StringComparison.Ordinal) &&
            bridge.Contains("esp_native_pose_topology_error", StringComparison.Ordinal) &&
-           bridge.Contains("pose_local_space", StringComparison.Ordinal) &&
+           bridge.Contains("pose_component_space", StringComparison.Ordinal) &&
+           !bridge.Contains("esp_native_compose_local_pose", StringComparison.Ordinal) &&
            bridge.Contains("runtime_contract::esp_ascii_glyph_rows", StringComparison.Ordinal) &&
            bridge.Contains("glyph_quads", StringComparison.Ordinal) &&
            bridge.Contains("snapshot.text_count", StringComparison.Ordinal) &&
@@ -1324,7 +1356,7 @@ static void NativePresentEspOwnsRendererLifecycle()
            runtime.Contains("ArmNativePresentEspProbeAsync", StringComparison.Ordinal) &&
            runtime.Contains("TryAttachResidentCore", StringComparison.Ordinal) &&
            runtime.Contains("GetNativePresentEspStatusAsync", StringComparison.Ordinal),
-        "native Present ESP must capture the exact swapchain queue, use profile-driven local/component pose selection and direct glyph geometry, retain one resident renderer across host reconnects, publish completed snapshots, and expose lifecycle status");
+        "native Present ESP must capture the exact swapchain queue, use the validated component-space pose contract and direct glyph geometry, retain one resident renderer across host reconnects, publish completed snapshots, and expose lifecycle status");
 }
 
 static void RuntimeKeepsResidentBridgeAcrossGuiUpdates()
@@ -1621,51 +1653,41 @@ static void NativePresentBoxUsesPoseBoundsWithCapsuleFallback()
            bridge.Contains("esp_native_component_pose", StringComparison.Ordinal) &&
            bridge.Contains("esp_native_project_pose_bounds", StringComparison.Ordinal) &&
            bridge.Contains("esp_expand_screen_bounds", StringComparison.Ordinal),
-        $"the renderer must prefer validated animated pose bounds while retaining a stable collision-capsule fallback (actual={box})");
+        $"the renderer must prefer validated animated pose bounds while retaining the authoritative root-capsule bounds (actual={box})");
 }
 
-static void NativePresentProjectsProfileIndependentActorBounds()
-{
-    var view = new NativePresentCamera(
-        new NativePresentVector3(0, 0, 0),
-        new NativePresentRotator(0, 0, 0),
-        90,
-        16.0 / 9.0,
-        NativePresentFovAxis.MaintainY);
-    var actorBounds = new NativePresentWorldBounds(
-        new NativePresentVector3(1000, 0, 0),
-        new NativePresentVector3(50, 75, 100));
-
-    Assert(NativePresentProjection.TryProjectWorldBounds(
-               view,
-               actorBounds,
-               3440,
-               1440,
-           out var box) &&
-           box.Left <= 1624 && box.Right >= 1816 &&
-           box.Top <= 645 && box.Bottom >= 795 &&
-           box.Width > 100 && box.Height > 100,
-        $"a pawn without a known capsule or mesh profile must retain screen bounds from its actor bounds (actual={box})");
-}
-
-static void NativePresentKeepsUnknownPawnVariantsVisible()
+static void NativePresentRequiresExactPawnSdkContract()
 {
     var root = FindRepositoryRoot();
     var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
 
-    Assert(bridge.Contains("esp_native_actor_bounds", StringComparison.Ordinal) &&
-           bridge.Contains("esp_native_project_world_bounds", StringComparison.Ordinal) &&
-           bridge.Contains("esp_native_profile_mesh_for_pawn", StringComparison.Ordinal) &&
+    Assert(bridge.Contains("esp_native_pawn_sdk_contract", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_resolve_pawn_components", StringComparison.Ordinal) &&
+           bridge.Contains("esp_select_target_pawn_source(", StringComparison.Ordinal) &&
+           bridge.Contains("esp_should_refresh_avatar_directory(", StringComparison.Ordinal) &&
+           bridge.Contains("esp_cached_avatar_binding_is_usable(", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_cached_avatar_matches", StringComparison.Ordinal) &&
+           bridge.Contains("UWorld_PersistentLevel", StringComparison.Ordinal) &&
+           bridge.Contains("ULevel_Actors", StringComparison.Ordinal) &&
+           bridge.Contains("avatar_actor_scans", StringComparison.Ordinal) &&
+           bridge.Contains("avatar_actor_candidates", StringComparison.Ordinal) &&
+           bridge.Contains("avatar_pawn_recoveries", StringComparison.Ordinal) &&
+           bridge.Contains("esp_native_capture_target_guarded", StringComparison.Ordinal) &&
+           bridge.Contains("missing_capsule_contracts", StringComparison.Ordinal) &&
+           bridge.Contains("missing_mesh_contracts", StringComparison.Ordinal) &&
+           bridge.Contains("target_faults", StringComparison.Ordinal) &&
+           bridge.Contains("\"RootComponent\"", StringComparison.Ordinal) &&
+           bridge.Contains("find_object_property(ref, pawn, \"Mesh\")", StringComparison.Ordinal) &&
            bridge.Contains(
-               "auto mesh = esp_native_profile_mesh_for_pawn(",
+               "native snapshot is waiting for PlayerArray",
                StringComparison.Ordinal) &&
-           bridge.Contains(
-               "if (!box_valid && !capsule_size_valid && !pose_valid)",
-               StringComparison.Ordinal) &&
-           !bridge.Contains(
-               "{\"CapsuleComponent\", \"Capsule\", \"CollisionCylinder\", \"RootComponent\"}",
-               StringComparison.Ordinal),
-        "a pawn without a capsule or known mesh profile must use actor world bounds instead of disappearing");
+           !bridge.Contains("EspPawnGeometryContract", StringComparison.Ordinal) &&
+           !bridge.Contains("unsupported_contracts", StringComparison.Ordinal) &&
+           !bridge.Contains("esp_native_actor_bounds", StringComparison.Ordinal) &&
+           !bridge.Contains("esp_native_project_world_bounds", StringComparison.Ordinal) &&
+           !bridge.Contains("target.pawn = found->second.pawn", StringComparison.Ordinal) &&
+           !bridge.Contains("role_roster_fallback", StringComparison.Ordinal),
+        "ESP must join PlayerArray identity to a verified role-roster avatar, resolve RootComponent and Mesh independently, and isolate a broken target without promoting an unrelated pawn or guessed bounds");
 }
 
 static void NativePresentSnaplinesReachViewportEdge()
@@ -1742,24 +1764,33 @@ static void NativePresentExcludesSpectatorPawns()
 
     Assert(
         bridge.Contains(
-            "esp_snapshot_pawn_is_spectator(",
+            "target_role == runtime_contract::EspRole::Spectator",
             StringComparison.Ordinal) &&
         bridge.Contains(
-            "contains_text(class_name, \"spectatepawn\")",
+            "contains_text(class_name, \"spectate\")",
             StringComparison.Ordinal) &&
         bridge.Contains(
-            "contains_text(class_name, \"spectatorpawn\")",
+            "contains_text(class_name, \"spectator\")",
             StringComparison.Ordinal) &&
-        bridge.IndexOf(
-            "spectator_pawn)",
-            StringComparison.Ordinal) <
-        bridge.IndexOf(
-            "esp_native_actor_bounds(",
-            bridge.IndexOf(
-                "void esp_native_present_capture_snapshot_impl",
-                StringComparison.Ordinal),
+        bridge.Contains(
+            "contains_text(class_name, \"hunter\")",
+            StringComparison.Ordinal) &&
+        bridge.Contains(
+            "contains_text(class_name, \"survivor\")",
+            StringComparison.Ordinal) &&
+        bridge.Contains(
+            "esp_resolve_target_role(",
+            StringComparison.Ordinal) &&
+        bridge.Contains(
+            "++snapshot.filtered_spectators;",
+            StringComparison.Ordinal) &&
+        !bridge.Contains(
+            "\"bIsSpectator\"",
+            StringComparison.Ordinal) &&
+        !bridge.Contains(
+            "esp_snapshot_pawn_is_spectator",
             StringComparison.Ordinal),
-        "spectator Pawn classes must be filtered before actor-bounds fallback can create empty boxes");
+        "the current Pawn class must replace stale role-roster state across Hider, Hunter, and Spectator transitions");
 }
 
 static void NativePresentSelectsSkeletonProfileFromBoneTopology()
@@ -1768,28 +1799,30 @@ static void NativePresentSelectsSkeletonProfileFromBoneTopology()
     var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
 
     Assert(bridge.Contains(
-               "const bool profile_from_asset = contract != nullptr;",
+               "contract = esp_native_skeleton_contract_for_mesh(ref, mesh);",
                StringComparison.Ordinal) &&
            bridge.Contains(
-               "candidate_contracts.push_back(&candidate_contract);",
+               "SkeletalMeshComponent_CachedComponentSpaceTransforms",
                StringComparison.Ordinal) &&
            bridge.Contains(
-               "esp_native_skeleton_contracts()",
+               "sdk::FieldOffsets::SkeletalMeshComponent_CachedComponentSpaceTransforms",
                StringComparison.Ordinal) &&
            bridge.Contains(
-               "best_contract = candidate_contract;",
+               "esp_native_pose_topology_error(",
                StringComparison.Ordinal) &&
            bridge.Contains(
-               "scene_components[scene_count++] = component;",
+               "esp_native_resolve_pawn_components(",
                StringComparison.Ordinal) &&
            bridge.Contains(
+               "esp_native_component_pose(",
+               StringComparison.Ordinal) &&
+           !bridge.Contains("verified_offsets", StringComparison.Ordinal) &&
+           !bridge.Contains("candidate_contracts", StringComparison.Ordinal) &&
+           !bridge.Contains("accessor.last_probe_ms", StringComparison.Ordinal) &&
+           !bridge.Contains(
                "resolve_pose_candidate(candidate)",
-               StringComparison.Ordinal) &&
-           bridge.Contains(
-               "now_ms - accessor.last_probe_ms < 250",
-               StringComparison.Ordinal) &&
-           bridge.Contains("\"BodyMesh\"", StringComparison.Ordinal),
-        "an asset-name miss must still be able to select a validated profile from bone count and topology");
+               StringComparison.Ordinal),
+        "an exact Mesh must use its current asset profile and validated CachedComponentSpaceTransforms contract without scanning alternative arrays or profiles");
 }
 
 static void NativePresentSnapshotDoubleBufferIsAtomic()

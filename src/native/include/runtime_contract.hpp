@@ -3470,11 +3470,109 @@ namespace runtime_contract
         Hunter = 2,
     };
 
+    enum class EspTargetPawnSource : int
+    {
+        PlayerArray = 0,
+        RoleRoster = 1,
+    };
+
+    constexpr auto esp_select_target_pawn_source(
+        EspRole roster_role,
+        EspRole player_array_pawn_role,
+        EspRole role_roster_pawn_role,
+        bool same_player_state) -> EspTargetPawnSource
+    {
+        const bool active_roster_role =
+            roster_role == EspRole::Hider ||
+            roster_role == EspRole::Hunter;
+        const bool current_is_not_avatar =
+            player_array_pawn_role == EspRole::Unknown ||
+            player_array_pawn_role == EspRole::Spectator;
+        return same_player_state &&
+                       active_roster_role &&
+                       current_is_not_avatar &&
+                       role_roster_pawn_role == roster_role
+                   ? EspTargetPawnSource::RoleRoster
+                   : EspTargetPawnSource::PlayerArray;
+    }
+
+    constexpr bool esp_should_refresh_avatar_directory(
+        bool unresolved_active_avatar,
+        bool world_changed,
+        std::uint64_t now_ms,
+        std::uint64_t last_refresh_ms,
+        std::uint64_t refresh_interval_ms)
+    {
+        if (!unresolved_active_avatar)
+        {
+            return false;
+        }
+        return world_changed ||
+               last_refresh_ms == 0 ||
+               now_ms < last_refresh_ms ||
+               now_ms - last_refresh_ms >= refresh_interval_ms;
+    }
+
+    constexpr bool esp_cached_avatar_binding_is_usable(
+        bool verified_when_cached,
+        bool same_world,
+        bool player_still_present,
+        bool candidate_live,
+        EspRole expected_role,
+        EspRole candidate_role)
+    {
+        return verified_when_cached &&
+               same_world &&
+               player_still_present &&
+               candidate_live &&
+               (expected_role == EspRole::Hider ||
+                expected_role == EspRole::Hunter) &&
+               candidate_role == expected_role;
+    }
+
+    constexpr auto esp_current_pawn_role(
+        EspRole roster_role,
+        EspRole current_pawn_role) -> EspRole
+    {
+        return current_pawn_role == EspRole::Unknown
+                   ? roster_role
+                   : current_pawn_role;
+    }
+
+    constexpr auto esp_resolve_target_role(
+        EspRole roster_role,
+        EspRole current_pawn_role) -> EspRole
+    {
+        return esp_current_pawn_role(
+            roster_role,
+            current_pawn_role);
+    }
+
     constexpr bool esp_role_scope_matches(EspScope scope, EspRole role)
     {
-        return scope == EspScope::All ||
+        return role != EspRole::Spectator &&
+               (scope == EspScope::All ||
                (scope == EspScope::Hider && role == EspRole::Hider) ||
-               (scope == EspScope::Hunter && role == EspRole::Hunter);
+               (scope == EspScope::Hunter && role == EspRole::Hunter));
+    }
+
+    struct EspPawnGeometryCapabilities
+    {
+        bool spectator{false};
+        bool root_capsule{false};
+        bool skeletal_mesh{false};
+    };
+
+    constexpr auto esp_pawn_geometry_capabilities(
+        bool spectator,
+        bool root_is_capsule,
+        bool skeletal_mesh)
+        -> EspPawnGeometryCapabilities
+    {
+        return {
+            spectator,
+            !spectator && root_is_capsule,
+            !spectator && skeletal_mesh};
     }
 
     constexpr auto esp_role_color(EspRole role,
@@ -3537,27 +3635,25 @@ namespace runtime_contract
                capacity <= 512;
     }
 
-    enum class EspPoseTransformSpace
+    template <std::size_t Size>
+    constexpr auto esp_unique_queue_identity(
+        const std::array<std::uintptr_t, Size>& identities)
+        -> std::uintptr_t
     {
-        Unavailable = 0,
-        Component = 1,
-        Local = 2,
-    };
-
-    constexpr auto esp_select_pose_space(double component_error,
-                                         double local_error) -> EspPoseTransformSpace
-    {
-        const bool component_valid = component_error >= 0.0;
-        const bool local_valid = local_error >= 0.0;
-        if (!component_valid && !local_valid)
+        std::uintptr_t selected{};
+        for (const auto identity : identities)
         {
-            return EspPoseTransformSpace::Unavailable;
+            if (identity == 0 || identity == selected)
+            {
+                continue;
+            }
+            if (selected != 0)
+            {
+                return 0;
+            }
+            selected = identity;
         }
-        if (component_valid && (!local_valid || component_error <= local_error))
-        {
-            return EspPoseTransformSpace::Component;
-        }
-        return EspPoseTransformSpace::Local;
+        return selected;
     }
 
     constexpr auto esp_ascii_glyph_rows(wchar_t character)
