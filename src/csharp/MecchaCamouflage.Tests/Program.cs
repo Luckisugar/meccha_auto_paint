@@ -84,7 +84,7 @@ var tests = new List<(string Name, Action Run)>
     ("diagnostics log write is best effort when file is locked", DiagnosticsLogWriteIsBestEffortWhenFileLocked),
     ("runtime log write is best effort when file is locked", RuntimeLogWriteIsBestEffortWhenFileLocked),
     ("auto material defaults off", AutoMaterialDefaultsOff),
-    ("include shadows defaults on", IncludeShadowsDefaultsOn),
+    ("include shadows defaults off", IncludeShadowsDefaultsOff),
     ("include shadows persists", IncludeShadowsPersists),
     ("ESP snaplines default on", EspSnaplinesDefaultOn),
     ("regions default to side and back paint", RegionsDefaultToSideAndBackPaint),
@@ -2493,9 +2493,9 @@ static void AutoMaterialDefaultsOff()
     Assert(!new AppSettings().Paint.AutoMaterial, "auto material should default off");
 }
 
-static void IncludeShadowsDefaultsOn()
+static void IncludeShadowsDefaultsOff()
 {
-    Assert(new AppSettings().Paint.IncludeShadows, "include shadows should default on");
+    Assert(!new AppSettings().Paint.IncludeShadows, "include shadows should default off");
 }
 
 static void IncludeShadowsPersists()
