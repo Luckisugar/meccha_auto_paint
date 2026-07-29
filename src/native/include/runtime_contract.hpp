@@ -40,6 +40,195 @@ namespace runtime_contract
     constexpr int NativeRecordedPaintQueueTargetStrokes = 2;
     constexpr int FastLocalCadenceMs = 1;
     constexpr std::uint64_t LocalDispatchCpuBudgetUs = 4'000;
+    constexpr int FallbackMaxOutgoingNetworkBatchesPerSecond = 20;
+    constexpr int FallbackMaxOutgoingStrokesPerBatch = 20;
+    constexpr int ConservativeReplicationCapacityNumerator = 4;
+    constexpr int ConservativeReplicationCapacityDenominator = 5;
+    constexpr int ConservativeReplicationBurstCalls = 3;
+    constexpr int AssumedRemotePaintFps = 60;
+    constexpr int RemoteQueueObservationWindows = 8;
+    constexpr int ConservativeVisualConfirmationFps = 30;
+
+    struct PaintReplicationPacingPlan
+    {
+        int max_outgoing_batches_per_second;
+        int max_outgoing_strokes_per_batch;
+        int conservative_network_strokes_per_second;
+        int conservative_receiver_strokes_per_second;
+        int effective_strokes_per_second;
+        int conservative_strokes_per_window;
+        int calls_per_tick;
+        int network_window_ms;
+        int cadence_ms;
+        int final_confirmation_ms;
+    };
+
+    constexpr int ceil_div_positive(std::int64_t numerator, int denominator)
+    {
+        return denominator > 0 && numerator > 0
+                   ? static_cast<int>((numerator + denominator - 1) / denominator)
+                   : 0;
+    }
+
+    constexpr PaintReplicationPacingPlan paint_replication_pacing_plan(
+        int reported_batches_per_second,
+        int reported_strokes_per_batch,
+        int reported_render_target_writes_per_frame,
+        int max_calls_per_tick,
+        int min_remote_frames_after_local_paint,
+        bool adaptive_remote_interval,
+        int max_adaptive_remote_frame_interval)
+    {
+        const int batches_per_second =
+            reported_batches_per_second > 0 && reported_batches_per_second <= 240
+                ? reported_batches_per_second
+                : FallbackMaxOutgoingNetworkBatchesPerSecond;
+        const int strokes_per_batch =
+            reported_strokes_per_batch > 0 && reported_strokes_per_batch <= 4096
+                ? reported_strokes_per_batch
+                : FallbackMaxOutgoingStrokesPerBatch;
+        const int reported_conservative_strokes =
+            strokes_per_batch * ConservativeReplicationCapacityNumerator /
+            ConservativeReplicationCapacityDenominator;
+        const int conservative_network_strokes_per_window =
+            reported_conservative_strokes > 1 ? reported_conservative_strokes : 1;
+        const int conservative_network_strokes_per_second =
+            conservative_network_strokes_per_window * batches_per_second > 1
+                ? conservative_network_strokes_per_window * batches_per_second
+                : 1;
+        const int minimum_remote_frames =
+            min_remote_frames_after_local_paint > 0
+                ? min_remote_frames_after_local_paint
+                : 1;
+        const int adaptive_remote_frames =
+            max_adaptive_remote_frame_interval > 0
+                ? max_adaptive_remote_frame_interval
+                : 0;
+        const int confirmation_frames =
+            adaptive_remote_interval
+                ? (minimum_remote_frames > adaptive_remote_frames
+                       ? minimum_remote_frames
+                       : adaptive_remote_frames)
+                : minimum_remote_frames;
+        const int render_target_writes_per_frame =
+            reported_render_target_writes_per_frame > 0 &&
+                    reported_render_target_writes_per_frame <= 4096
+                ? reported_render_target_writes_per_frame
+                : 0;
+        const int reported_receiver_strokes_per_second =
+            render_target_writes_per_frame > 0
+                ? static_cast<int>(
+                      static_cast<std::int64_t>(render_target_writes_per_frame) *
+                      AssumedRemotePaintFps /
+                      (confirmation_frames > 0 ? confirmation_frames : 1))
+                : conservative_network_strokes_per_second;
+        const int conservative_receiver_strokes_per_second =
+            render_target_writes_per_frame > 0
+                ? std::max(
+                      1,
+                      reported_receiver_strokes_per_second *
+                          ConservativeReplicationCapacityNumerator /
+                          ConservativeReplicationCapacityDenominator)
+                : conservative_network_strokes_per_second;
+        const int effective_strokes_per_second =
+            conservative_network_strokes_per_second <
+                    conservative_receiver_strokes_per_second
+                ? conservative_network_strokes_per_second
+                : conservative_receiver_strokes_per_second;
+        const int safe_max_calls = max_calls_per_tick > 1 ? max_calls_per_tick : 1;
+        const int burst_calls =
+            safe_max_calls < ConservativeReplicationBurstCalls
+                ? safe_max_calls
+                : ConservativeReplicationBurstCalls;
+        const int calls_per_tick =
+            burst_calls < conservative_network_strokes_per_window
+                ? burst_calls
+                : conservative_network_strokes_per_window;
+        const int reported_network_window_ms =
+            ceil_div_positive(1000, batches_per_second);
+        const int network_window_ms =
+            reported_network_window_ms > 1 ? reported_network_window_ms : 1;
+        const int receiver_strokes_per_window =
+            ceil_div_positive(effective_strokes_per_second, batches_per_second);
+        const int conservative_strokes_per_window =
+            std::min(
+                conservative_network_strokes_per_window,
+                std::max(calls_per_tick, receiver_strokes_per_window));
+        const int reported_cadence_ms =
+            ceil_div_positive(
+                static_cast<std::int64_t>(calls_per_tick) * 1000,
+                effective_strokes_per_second);
+        const int cadence_ms = reported_cadence_ms > 1 ? reported_cadence_ms : 1;
+        const int final_confirmation_ms =
+            network_window_ms * RemoteQueueObservationWindows +
+            ceil_div_positive(
+                static_cast<std::int64_t>(confirmation_frames) * 1000,
+                ConservativeVisualConfirmationFps);
+        return {
+            batches_per_second,
+            strokes_per_batch,
+            conservative_network_strokes_per_second,
+            conservative_receiver_strokes_per_second,
+            effective_strokes_per_second,
+            conservative_strokes_per_window,
+            calls_per_tick,
+            network_window_ms,
+            cadence_ms,
+            final_confirmation_ms,
+        };
+    }
+
+    constexpr bool paint_queue_observer_authoritative(bool available,
+                                                       bool observed_activity)
+    {
+        return available && observed_activity;
+    }
+
+    constexpr bool paint_final_queue_ready(bool observer_available,
+                                           bool observer_observed_activity,
+                                           int visual_pending_strokes,
+                                           bool outgoing_available,
+                                           int outgoing_pending_strokes)
+    {
+        if (outgoing_available && outgoing_pending_strokes > 0)
+        {
+            return false;
+        }
+        return !paint_queue_observer_authoritative(observer_available,
+                                                   observer_observed_activity) ||
+               visual_pending_strokes <= 0;
+    }
+
+    constexpr bool paint_visual_drain_complete(bool observer_available,
+                                               bool observer_observed_activity,
+                                               int visual_pending_strokes,
+                                               bool outgoing_available,
+                                               int outgoing_pending_strokes,
+                                               int final_elapsed_ms,
+                                               int final_confirmation_ms)
+    {
+        return paint_final_queue_ready(observer_available,
+                                       observer_observed_activity,
+                                       visual_pending_strokes,
+                                       outgoing_available,
+                                       outgoing_pending_strokes) &&
+               final_elapsed_ms >=
+               (final_confirmation_ms > 0 ? final_confirmation_ms : 0);
+    }
+
+    constexpr int paint_final_confirmation_remaining_ms(bool final_queue_ready,
+                                                        int ready_elapsed_ms,
+                                                        int final_confirmation_ms,
+                                                        int network_window_ms)
+    {
+        const int required_ms = final_confirmation_ms > 0 ? final_confirmation_ms : 0;
+        if (!final_queue_ready)
+        {
+            return required_ms + (network_window_ms > 0 ? network_window_ms : 1);
+        }
+        const int elapsed_ms = ready_elapsed_ms > 0 ? ready_elapsed_ms : 0;
+        return elapsed_ms < required_ms ? required_ms - elapsed_ms : 0;
+    }
 
     // UE 5.6 packs Metallic, Roughness, and Emissive into one material-properties
     // render target (R/G/B).  Channel 7 updates that target atomically.  Splitting
@@ -3169,6 +3358,37 @@ namespace runtime_contract
 
     constexpr std::uint64_t EspHudCaptureStallMs = 1'000;
     constexpr std::uint64_t EspHudRebindMinIntervalMs = 2'000;
+
+    enum class EspCaptureStatus
+    {
+        Disabled,
+        Waiting,
+        Active,
+        Busy,
+        Stalled,
+    };
+
+    constexpr EspCaptureStatus esp_capture_status(bool enabled,
+                                                  bool has_capture,
+                                                  std::uint64_t capture_age_ms,
+                                                  bool paint_busy)
+    {
+        if (!enabled)
+        {
+            return EspCaptureStatus::Disabled;
+        }
+        if (!has_capture)
+        {
+            return EspCaptureStatus::Waiting;
+        }
+        if (capture_age_ms < EspHudCaptureStallMs)
+        {
+            return EspCaptureStatus::Active;
+        }
+        return paint_busy
+                   ? EspCaptureStatus::Busy
+                   : EspCaptureStatus::Stalled;
+    }
 
     // A reflected UFunction is shared by every instance which dispatches that
     // callback. Lobby -> match travel replaces the HUD UObject, so its address

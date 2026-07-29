@@ -76,8 +76,7 @@ public sealed class MainForm : Form
     private bool webViewRecoveryInProgress;
     private bool bridgeShutdownInProgress;
     private bool bridgeShutdownCompleted;
-    private string nativeEspConfigurationSignature = "";
-    private Guid? nativeEspConfigurationInstanceId;
+    private readonly LatestAsyncRequestQueue<NativeEspConfigurationRequest> nativeEspConfigurationQueue;
     private EspSettings? nativeEspPreview;
     private long nativeEspPreviewGeneration;
     private DateTimeOffset nextNativeEspStatusPoll = DateTimeOffset.MinValue;
@@ -109,9 +108,36 @@ public sealed class MainForm : Form
         public required ImagePaintSettings Design { get; init; }
     }
 
+    private sealed record NativeEspConfigurationRequest(
+        string Key,
+        Guid? InstanceId,
+        EspSettings Settings);
+
+    private sealed class NativeEspConfigurationRequestComparer :
+        IEqualityComparer<NativeEspConfigurationRequest>
+    {
+        public static NativeEspConfigurationRequestComparer Instance { get; } = new();
+
+        public bool Equals(
+            NativeEspConfigurationRequest? left,
+            NativeEspConfigurationRequest? right) =>
+            ReferenceEquals(left, right) ||
+            left is not null &&
+            right is not null &&
+            string.Equals(left.Key, right.Key, StringComparison.Ordinal);
+
+        public int GetHashCode(NativeEspConfigurationRequest value) =>
+            StringComparer.Ordinal.GetHashCode(value.Key);
+    }
+
     public MainForm(HostSession session)
     {
         this.session = session;
+        nativeEspConfigurationQueue = new LatestAsyncRequestQueue<NativeEspConfigurationRequest>(
+            ApplyNativePresentEspConfigurationAsync,
+            ex => session.Log.Warn(
+                "ESP: native Present configuration queue failed: " + ex.Message),
+            NativeEspConfigurationRequestComparer.Instance);
         Text = UiText("app.title");
         Icon = LoadWindowIcon();
         MinimumSize = new Size(960, 640);
@@ -530,41 +556,45 @@ public sealed class MainForm : Form
         var copy = CopyEspSettings(settings);
         var signature = NativeEspSignature(copy);
         var instanceId = session.Runtime.ActiveBridgeInstanceId;
-        if (instanceId is not null && instanceId == nativeEspConfigurationInstanceId &&
-            string.Equals(signature, nativeEspConfigurationSignature, StringComparison.Ordinal))
-            return;
-        nativeEspConfigurationSignature = signature;
-        nativeEspConfigurationInstanceId = instanceId;
-        _ = Task.Run(async () =>
+        var key = $"{instanceId?.ToString("N") ?? "disconnected"}|{signature}";
+        nativeEspConfigurationQueue.Enqueue(
+            new NativeEspConfigurationRequest(key, instanceId, copy));
+    }
+
+    private async Task<bool> ApplyNativePresentEspConfigurationAsync(
+        NativeEspConfigurationRequest request)
+    {
+        if (request.InstanceId is null ||
+            request.InstanceId != session.Runtime.ActiveBridgeInstanceId)
         {
-            try
+            return false;
+        }
+        try
+        {
+            var reply = await session.ConfigureNativePresentEspAsync(request.Settings);
+            if (request.InstanceId != session.Runtime.ActiveBridgeInstanceId)
+                return false;
+            if (reply.Success)
             {
-                var reply = await session.ConfigureNativePresentEspAsync(copy);
-                if (reply.Success)
-                {
-                    session.Log.Info("ESP: native Present renderer " + reply.Message + ".");
-                    return;
-                }
-                if (reply.Message.Contains("resident Present detour", StringComparison.OrdinalIgnoreCase))
-                {
-                    // An unknown renderer hook may belong to Steam or capture
-                    // software as well as a prior bridge. Keep this signature
-                    // latched so periodic warmup cannot retry an unsafe vtable
-                    // replacement and flood the log.
-                    session.Log.Warn("ESP: native Present renderer unavailable | " + reply.Stage + " | " + reply.Message);
-                    return;
-                }
-                nativeEspConfigurationSignature = "";
-                nativeEspConfigurationInstanceId = null;
+                session.Log.Info("ESP: native Present renderer " + reply.Message + ".");
+                return true;
+            }
+            if (reply.Message.Contains("resident Present detour", StringComparison.OrdinalIgnoreCase))
+            {
+                // An unknown renderer hook may belong to Steam or capture
+                // software as well as a prior bridge. Avoid an automatic
+                // unsafe vtable replacement retry while this bridge remains.
                 session.Log.Warn("ESP: native Present renderer unavailable | " + reply.Stage + " | " + reply.Message);
+                return true;
             }
-            catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException)
-            {
-                nativeEspConfigurationSignature = "";
-                nativeEspConfigurationInstanceId = null;
-                session.Log.Warn("ESP: native Present renderer is waiting for the bridge: " + ex.Message);
-            }
-        });
+            session.Log.Warn("ESP: native Present renderer unavailable | " + reply.Stage + " | " + reply.Message);
+            return false;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException)
+        {
+            session.Log.Warn("ESP: native Present renderer is waiting for the bridge: " + ex.Message);
+            return false;
+        }
     }
 
     private void PollNativePresentEspStatus()
@@ -586,6 +616,7 @@ public sealed class MainForm : Form
                 var status = metadata.TryGetProperty("status", out var statusValue) ? statusValue.GetString() ?? "unknown" : "unknown";
                 var reason = document.RootElement.TryGetProperty("message", out var messageValue) ? messageValue.GetString() ?? "" : "";
                 var format = metadata.TryGetProperty("swapchain_format", out var formatValue) ? formatValue.GetString() ?? "" : "";
+                var configuredScope = metadata.TryGetProperty("configured_scope", out var configuredScopeValue) ? configuredScopeValue.GetString() ?? "unknown" : "unknown";
                 var sequence = metadata.TryGetProperty("snapshot_sequence", out var sequenceValue) ? sequenceValue.GetUInt64() : 0;
                 var frames = metadata.TryGetProperty("rendered_frames", out var framesValue) ? framesValue.GetUInt64() : 0;
                 var captureStatus = metadata.TryGetProperty("capture_status", out var captureStatusValue) ? captureStatusValue.GetString() ?? "unknown" : "unknown";
@@ -624,6 +655,7 @@ public sealed class MainForm : Form
                     Status = status,
                     Reason = reason,
                     Format = format,
+                    ConfiguredScope = configuredScope,
                     CaptureStatus = captureStatus,
                     CaptureAgeMs = captureAge,
                     HudRebinds = rebinds,
@@ -663,7 +695,7 @@ public sealed class MainForm : Form
                     return;
                 nativeEspStatusSignature = signature;
                 var logMessage =
-                    $"ESP: native Present status={status}; format={format}; snapshot_sequence={sequence}; " +
+                    $"ESP: native Present status={status}; scope={configuredScope}; format={format}; snapshot_sequence={sequence}; " +
                     $"capture={captureStatus} age_ms={captureAge}; hud_rebinds={rebinds}; " +
                     $"roles={hiderRoster}/{hunterRoster}; " +
                     $"roster={rosterSource}:{roster}; pawns={pawns}; " +
@@ -1535,7 +1567,6 @@ public sealed class MainForm : Form
         if (result.Success)
         {
             nativeEspPreview = null;
-            nativeEspConfigurationSignature = "";
             QueueNativePresentEspConfiguration(session.Settings.Esp);
         }
         _ = PushSnapshotAsync();
@@ -1595,7 +1626,6 @@ public sealed class MainForm : Form
             HiderColor = hiderColor,
             HunterColor = hunterColor
         };
-        nativeEspConfigurationSignature = "";
         QueueNativePresentEspConfiguration(nativeEspPreview);
         return new { success = true };
     }
@@ -1611,7 +1641,6 @@ public sealed class MainForm : Form
             return new { success = true };
         nativeEspPreviewGeneration = generation;
         nativeEspPreview = null;
-        nativeEspConfigurationSignature = "";
         QueueNativePresentEspConfiguration(session.Settings.Esp);
         return new { success = true };
     }

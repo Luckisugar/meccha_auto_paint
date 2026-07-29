@@ -5,6 +5,7 @@ public sealed record NativePresentStatusLogSample
     public string Status { get; init; } = "unknown";
     public string Reason { get; init; } = "";
     public string Format { get; init; } = "";
+    public string ConfiguredScope { get; init; } = "unknown";
     public string CaptureStatus { get; init; } = "unknown";
     public ulong CaptureAgeMs { get; init; }
     public ulong HudRebinds { get; init; }
@@ -48,6 +49,7 @@ public static class NativePresentStatusLogPolicy
             sample.Status,
             ReasonState(sample),
             sample.Format,
+            sample.ConfiguredScope,
             sample.CaptureStatus,
             sample.HudRebinds,
             Presence((ulong)sample.HiderRosterCount + sample.HunterRosterCount),

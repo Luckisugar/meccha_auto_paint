@@ -538,6 +538,7 @@ namespace
     std::atomic<std::uint32_t> g_esp_native_hider_color{0x00FF88u};
     std::atomic<std::uint32_t> g_esp_native_hunter_color{0xFF0000u};
     std::atomic<int> g_esp_native_scope{static_cast<int>(EspNativeScope::All)};
+    std::atomic<std::uint64_t> g_esp_native_config_generation{0};
     std::atomic<int> g_esp_native_state{static_cast<int>(EspNativePresentState::Disabled)};
     // Updated immediately before every potentially faulting native render
     // boundary.  The SEH guard publishes it as status without touching a
@@ -988,8 +989,19 @@ namespace
         return now_ms >= baseline ? now_ms - baseline : 0;
     }
 
+    auto esp_native_paint_busy() -> bool
+    {
+        return g_paint_request_in_progress.load(std::memory_order_acquire) ||
+               g_active_ue_calls.load(std::memory_order_acquire) != 0 ||
+               g_active_paint_dispatches.load(std::memory_order_acquire) != 0;
+    }
+
     void post_esp_hud_rebind_if_stalled()
     {
+        if (esp_native_paint_busy())
+        {
+            return;
+        }
         const auto now_ms = static_cast<std::uint64_t>(GetTickCount64());
         const auto baseline = now_ms - esp_native_capture_age_ms(now_ms);
         if (!runtime_contract::esp_hud_rebind_due(
@@ -15402,6 +15414,7 @@ namespace
         std::uintptr_t direct_queue_component_count_function{0};
         std::uintptr_t direct_queue_manager_count_function{0};
         std::uintptr_t direct_queue_pressure_function{0};
+        int direct_queue_outgoing_batches_offset{-1};
         std::vector<sdk::FPaintStroke> strokes{};
         std::string metadata{};
         int replay_front{0};
@@ -15435,19 +15448,38 @@ namespace
         int direct_immediate_repost_count{0};
         bool direct_queue_observer_available{false};
         bool direct_queue_observed_activity{false};
+        bool direct_outgoing_queue_available{false};
+        bool direct_outgoing_queue_observed_activity{false};
         int direct_queue_last_recorded_strokes{-1};
         int direct_queue_last_component_strokes{-1};
         int direct_queue_last_global_strokes{-1};
         int direct_queue_last_pressure_strokes{-1};
+        int direct_queue_last_outgoing_strokes{-1};
         int direct_queue_last_max_strokes_per_tick{-1};
         // Research-only high-water mark override. Zero preserves the production
         // default, and the game-reported per-tick capacity remains a hard cap.
         int direct_queue_requested_target_strokes{0};
         int direct_queue_target_strokes{runtime_contract::NativeRecordedPaintQueueTargetStrokes};
         int direct_queue_peak_component_strokes{0};
+        int direct_queue_peak_outgoing_strokes{0};
         int direct_queue_samples{0};
         int direct_queue_waits{0};
         int direct_queue_final_idle_polls{0};
+        int direct_queue_final_confirmation_waits{0};
+        int reported_max_render_target_writes_per_frame{-1};
+        runtime_contract::PaintReplicationPacingPlan replication_pacing{
+            runtime_contract::paint_replication_pacing_plan(
+                0,
+                0,
+                0,
+                runtime_contract::NativeRecordedPaintMaxCallsPerTick,
+                0,
+                false,
+                0)};
+        std::chrono::steady_clock::time_point final_submission_completed_at{};
+        std::chrono::steady_clock::time_point final_queue_ready_at{};
+        int final_queue_ready_resets{0};
+        bool final_visual_completion_confirmed{false};
         MeshFirstBatchPhase phase{MeshFirstBatchPhase::Planning};
         std::atomic<bool> tick_in_progress{false};
         std::atomic<int> tick_entries{0};
@@ -15505,8 +15537,52 @@ namespace
         bool pressure_available{false};
         int pressure_strokes{-1};
         int max_strokes_per_tick{-1};
+        bool outgoing_available{false};
+        int outgoing_strokes{-1};
         std::string failure{};
     };
+
+    auto direct_paint_queue_array_remaining(std::uintptr_t manager,
+                                            int array_offset,
+                                            int entry_size,
+                                            bool has_processed_index,
+                                            bool& available) -> int
+    {
+        available = false;
+        if (!live_uobject(manager) || array_offset < 0 || entry_size <= 0)
+        {
+            return -1;
+        }
+        const auto offset = static_cast<std::uintptr_t>(array_offset);
+        const auto data = safe_read<std::uintptr_t>(manager + offset);
+        const int num = safe_read<int>(manager + offset + 8, -1);
+        const int max = safe_read<int>(manager + offset + 12, -1);
+        if (num < 0 || num > 100000 || max < num || max > 100000 ||
+            (num > 0 && !data))
+        {
+            return -1;
+        }
+        std::int64_t remaining = 0;
+        for (int index = 0; index < num; ++index)
+        {
+            const auto entry =
+                data + static_cast<std::uintptr_t>(index) *
+                           static_cast<std::uintptr_t>(entry_size);
+            const int total = std::max(0, safe_read<int>(entry + 0x10, 0));
+            const int processed =
+                has_processed_index
+                    ? std::clamp(safe_read<int>(entry + 0x18, 0), 0, total)
+                    : 0;
+            remaining += std::max(0, total - processed);
+            if (remaining >= INT_MAX)
+            {
+                remaining = INT_MAX;
+                break;
+            }
+        }
+        available = true;
+        return static_cast<int>(remaining);
+    }
 
     auto direct_paint_capture_queue_snapshot(
         const std::shared_ptr<MeshFirstServerBatchAsyncJob>& job) -> DirectPaintQueueSnapshot
@@ -15600,6 +15676,12 @@ namespace
                 out.failure = "GetReplicationPressure_failed:" + failure;
             }
         }
+        out.outgoing_strokes = direct_paint_queue_array_remaining(
+            job->direct_queue_manager,
+            job->direct_queue_outgoing_batches_offset,
+            0x20,
+            false,
+            out.outgoing_available);
         return out;
     }
 
@@ -15654,8 +15736,20 @@ namespace
         job->direct_queue_last_component_strokes = snapshot.component_strokes;
         job->direct_queue_last_global_strokes = snapshot.manager_strokes;
         job->direct_queue_last_pressure_strokes = snapshot.pressure_strokes;
+        job->direct_queue_last_outgoing_strokes = snapshot.outgoing_strokes;
         job->direct_queue_last_max_strokes_per_tick = snapshot.max_strokes_per_tick;
         job->direct_queue_target_strokes = direct_paint_queue_target_strokes(job, snapshot);
+        job->direct_outgoing_queue_available =
+            job->direct_outgoing_queue_available || snapshot.outgoing_available;
+        if (snapshot.outgoing_available)
+        {
+            job->direct_queue_peak_outgoing_strokes =
+                std::max(job->direct_queue_peak_outgoing_strokes,
+                         std::max(0, snapshot.outgoing_strokes));
+            job->direct_outgoing_queue_observed_activity =
+                job->direct_outgoing_queue_observed_activity ||
+                snapshot.outgoing_strokes > 0;
+        }
         if (snapshot.component_available || snapshot.recorded_available)
         {
             job->direct_queue_peak_component_strokes =
@@ -15729,8 +15823,23 @@ namespace
     auto mesh_first_rendered_strokes(const std::shared_ptr<MeshFirstServerBatchAsyncJob>& job) -> int
     {
         const int submitted = mesh_first_completed_strokes(job);
-        if (!job || !job->direct_queue_observer_available)
+        if (!job)
         {
+            return submitted;
+        }
+        if (!runtime_contract::paint_queue_observer_authoritative(
+                job->direct_queue_observer_available,
+                job->direct_queue_observed_activity))
+        {
+            const int total = static_cast<int>(job->strokes.size());
+            if (!job->final_visual_completion_confirmed && total > 0 &&
+                submitted >= total)
+            {
+                // A callable counter that has only ever returned zero is not a
+                // completion signal. Keep the final sample pending until the
+                // paced outgoing lane and remote-render confirmation finish.
+                return total - 1;
+            }
             return submitted;
         }
         const int pending = std::max(job->direct_queue_last_recorded_strokes,
@@ -15790,6 +15899,14 @@ namespace
         {
             return {};
         }
+        const int final_queue_ready_elapsed_ms =
+            job->final_queue_ready_at.time_since_epoch().count() != 0
+                ? static_cast<int>(
+                      std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() -
+                          job->final_queue_ready_at)
+                          .count())
+                : 0;
         return ",\"local_render_target_write_budget\":" +
                    std::to_string(job->local_render_target_write_budget) +
                ",\"local_render_target_writes_scheduled\":" +
@@ -15817,18 +15934,63 @@ namespace
                    std::to_string(job->direct_queue_last_global_strokes) +
                ",\"native_queue_pressure_last_strokes\":" +
                    std::to_string(job->direct_queue_last_pressure_strokes) +
+               ",\"native_queue_outgoing_available\":" +
+                   std::string(json_bool(job->direct_outgoing_queue_available)) +
+               ",\"native_queue_outgoing_observed_activity\":" +
+                   std::string(json_bool(job->direct_outgoing_queue_observed_activity)) +
+               ",\"native_queue_outgoing_last_strokes\":" +
+                   std::to_string(job->direct_queue_last_outgoing_strokes) +
                ",\"native_queue_max_strokes_per_tick\":" +
                    std::to_string(job->direct_queue_last_max_strokes_per_tick) +
                ",\"native_queue_target_strokes\":" +
                    std::to_string(job->direct_queue_target_strokes) +
                ",\"native_queue_component_peak_strokes\":" +
                    std::to_string(job->direct_queue_peak_component_strokes) +
+               ",\"native_queue_outgoing_peak_strokes\":" +
+                   std::to_string(job->direct_queue_peak_outgoing_strokes) +
                ",\"native_queue_samples\":" +
                    std::to_string(job->direct_queue_samples) +
                ",\"native_queue_waits\":" +
                    std::to_string(job->direct_queue_waits) +
                ",\"native_queue_final_idle_polls\":" +
                    std::to_string(job->direct_queue_final_idle_polls) +
+               ",\"native_queue_final_confirmation_waits\":" +
+                   std::to_string(job->direct_queue_final_confirmation_waits) +
+               ",\"replication_max_outgoing_batches_per_second\":" +
+                   std::to_string(
+                       job->replication_pacing.max_outgoing_batches_per_second) +
+               ",\"replication_max_outgoing_strokes_per_batch\":" +
+                   std::to_string(
+                       job->replication_pacing.max_outgoing_strokes_per_batch) +
+               ",\"replication_conservative_network_strokes_per_second\":" +
+                   std::to_string(
+                       job->replication_pacing
+                           .conservative_network_strokes_per_second) +
+               ",\"replication_conservative_receiver_strokes_per_second\":" +
+                   std::to_string(
+                       job->replication_pacing
+                           .conservative_receiver_strokes_per_second) +
+               ",\"replication_effective_strokes_per_second\":" +
+                   std::to_string(
+                       job->replication_pacing.effective_strokes_per_second) +
+               ",\"replication_conservative_strokes_per_window\":" +
+                   std::to_string(
+                       job->replication_pacing.conservative_strokes_per_window) +
+               ",\"replication_network_window_ms\":" +
+                   std::to_string(job->replication_pacing.network_window_ms) +
+               ",\"replication_final_confirmation_ms\":" +
+                   std::to_string(job->replication_pacing.final_confirmation_ms) +
+               ",\"replication_reported_render_target_writes_per_frame\":" +
+                   std::to_string(job->reported_max_render_target_writes_per_frame) +
+               ",\"final_queue_ready\":" +
+                   std::string(json_bool(
+                       job->final_queue_ready_at.time_since_epoch().count() != 0)) +
+               ",\"final_queue_ready_elapsed_ms\":" +
+                   std::to_string(final_queue_ready_elapsed_ms) +
+               ",\"final_queue_ready_resets\":" +
+                   std::to_string(job->final_queue_ready_resets) +
+               ",\"final_visual_completion_confirmed\":" +
+                   std::string(json_bool(job->final_visual_completion_confirmed)) +
                ",\"local_dispatch_total_ms\":" +
                    std::to_string(job->local_dispatch_total_ms) +
                ",\"local_dispatch_max_ms\":" +
@@ -15839,15 +16001,23 @@ namespace
     {
         const std::size_t total = job ? job->strokes.size() : 0;
         const std::size_t fill_end = job ? job->replay_fill_end : 0;
-        const std::size_t offset = job ? std::min(job->local_offset, total) : 0;
-        const auto current = runtime_contract::replay_pass_window(offset,
+        const std::size_t local_offset =
+            job ? std::min(job->local_offset, total) : 0;
+        const std::size_t visual_offset =
+            job ? std::min(
+                      static_cast<std::size_t>(
+                          std::max(0, mesh_first_rendered_strokes(job))),
+                      total)
+                : 0;
+        const auto current = runtime_contract::replay_pass_window(visual_offset,
                                                                     total,
                                                                     fill_end);
         return std::string(",\"replay_pass_order\":\"fill,paint\"") +
                ",\"replay_progress_source\":\"native_queue_backpressure\"" +
                ",\"replay_fill_end\":" + std::to_string(std::min(fill_end, total)) +
                ",\"replay_paint_begin\":" + std::to_string(std::min(fill_end, total)) +
-               ",\"replay_local_offset\":" + std::to_string(offset) +
+               ",\"replay_local_offset\":" + std::to_string(local_offset) +
+               ",\"replay_visual_offset\":" + std::to_string(visual_offset) +
                ",\"replay_current_pass\":\"" +
                    std::string(mesh_first_replay_pass_name(current.pass)) + "\"" +
                ",\"replay_current_pass_start\":" + std::to_string(current.begin) +
@@ -15863,19 +16033,21 @@ namespace
         const int total = job ? static_cast<int>(job->strokes.size()) : 0;
         const int submitted = mesh_first_completed_strokes(job);
         const int completed = mesh_first_rendered_strokes(job);
-        const int batch_limit = runtime_contract::NativeRecordedPaintMaxCallsPerTick;
+        const int batch_limit =
+            job ? job->replication_pacing.calls_per_tick
+                : runtime_contract::NativeRecordedPaintMaxCallsPerTick;
         const int remaining = std::max(0, total - completed);
         const double elapsed_ms = mesh_first_local_elapsed_ms(job);
         const double observed_ms_per_stroke =
             completed > 0 && elapsed_ms > 0.0
                 ? elapsed_ms / static_cast<double>(completed)
                 : -1.0;
-        const double eta_ms = terminal
-                                  ? 0.0
-                                  : (observed_ms_per_stroke > 0.0
-                                         ? observed_ms_per_stroke *
-                                               static_cast<double>(remaining)
-                                         : -1.0);
+        double eta_ms = terminal
+                            ? 0.0
+                            : (observed_ms_per_stroke > 0.0
+                                   ? observed_ms_per_stroke *
+                                         static_cast<double>(remaining)
+                                   : -1.0);
         const auto pass = runtime_contract::replay_pass_window(
             static_cast<std::size_t>(completed),
             static_cast<std::size_t>(std::max(0, total)),
@@ -15883,13 +16055,54 @@ namespace
         const int pass_total = static_cast<int>(pass.end - pass.begin);
         const int pass_completed = static_cast<int>(
             std::min(pass.end, static_cast<std::size_t>(completed)) - pass.begin);
-        const double pass_eta_ms =
+        double pass_eta_ms =
             terminal ? 0.0
                      : (observed_ms_per_stroke > 0.0
                             ? observed_ms_per_stroke *
                                   static_cast<double>(
                                       std::max(0, pass_total - pass_completed))
                             : -1.0);
+        if (!terminal && job && !job->final_visual_completion_confirmed)
+        {
+            if (job->final_submission_completed_at.time_since_epoch().count() == 0)
+            {
+                if (eta_ms >= 0.0)
+                {
+                    eta_ms +=
+                        static_cast<double>(
+                            job->replication_pacing.final_confirmation_ms);
+                }
+                if (pass.end == static_cast<std::size_t>(std::max(0, total)) &&
+                    pass_eta_ms >= 0.0)
+                {
+                    pass_eta_ms +=
+                        static_cast<double>(
+                            job->replication_pacing.final_confirmation_ms);
+                }
+            }
+            else
+            {
+                const bool final_queue_ready =
+                    job->final_queue_ready_at.time_since_epoch().count() != 0;
+                const int final_queue_ready_elapsed_ms =
+                    final_queue_ready
+                        ? static_cast<int>(
+                              std::chrono::duration_cast<
+                                  std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() -
+                                  job->final_queue_ready_at)
+                                  .count())
+                        : 0;
+                const double final_remaining_ms = static_cast<double>(
+                    runtime_contract::paint_final_confirmation_remaining_ms(
+                        final_queue_ready,
+                        final_queue_ready_elapsed_ms,
+                        job->replication_pacing.final_confirmation_ms,
+                        job->replication_pacing.network_window_ms));
+                eta_ms = std::max(eta_ms, final_remaining_ms);
+                pass_eta_ms = std::max(pass_eta_ms, final_remaining_ms);
+            }
+        }
         std::string out = "\"progress_schema_version\":3";
         out += ",\"phase\":\"" + std::string(mesh_first_phase_name(phase)) + "\"";
         out += ",\"terminal\":" + std::string(json_bool(terminal));
@@ -15899,7 +16112,9 @@ namespace
         out += ",\"total_strokes\":" + std::to_string(total);
         out += ",\"local_batch_limit\":" + std::to_string(batch_limit);
         out += ",\"local_batch_pacing_ms\":" +
-               std::to_string(runtime_contract::FastLocalCadenceMs);
+               std::to_string(
+                   job ? job->replication_pacing.cadence_ms
+                       : runtime_contract::FastLocalCadenceMs);
         out += ",\"local_batches_total\":" +
                std::to_string((total + batch_limit - 1) / batch_limit);
         out += ",\"local_batches_done\":" +
@@ -15918,7 +16133,7 @@ namespace
                std::to_string(std::max(0, pass_completed));
         out += ",\"replay_current_pass_total\":" + std::to_string(pass_total);
         out += ",\"replay_current_pass_eta_ms\":" + std::to_string(pass_eta_ms);
-        out += ",\"paint_eta_source\":\"observed_native_queue_backpressure\"";
+        out += ",\"paint_eta_source\":\"receiver_capacity_paced_native_replication\"";
         out += ",\"paint_observed_ms_per_stroke\":" +
                std::to_string(observed_ms_per_stroke);
         out += ",\"paint_elapsed_ms\":" + std::to_string(mesh_first_elapsed_ms(job));
@@ -24085,7 +24300,68 @@ namespace
                 async_job->direct_queue_pressure_function =
                     ref.find_function(async_job->direct_queue_manager,
                                       "GetReplicationPressure");
+                if (const auto outgoing_batches_property =
+                        find_object_property(
+                            ref,
+                            async_job->direct_queue_manager,
+                            "QueuedOutgoingBatches"))
+                {
+                    async_job->direct_queue_outgoing_batches_offset =
+                        prop_offset(outgoing_batches_property);
+                }
             }
+            const int reported_batches_per_second =
+                read_object_i32_property(
+                    ref,
+                    async_job->direct_queue_manager,
+                    "MaxOutgoingNetworkBatchesPerSecond",
+                    -1);
+            const int reported_strokes_per_batch =
+                read_object_i32_property(
+                    ref,
+                    async_job->direct_queue_manager,
+                    "MaxOutgoingStrokesPerBatch",
+                    -1);
+            const int min_remote_frames_after_local_paint =
+                read_object_i32_property(
+                    ref,
+                    async_job->direct_queue_manager,
+                    "MinRemotePaintFramesAfterLocalPaint",
+                    0);
+            const int max_adaptive_remote_frame_interval =
+                read_object_i32_property(
+                    ref,
+                    async_job->direct_queue_manager,
+                    "MaxAdaptiveRemotePaintFrameInterval",
+                    0);
+            async_job->reported_max_render_target_writes_per_frame =
+                read_object_i32_property(
+                    ref,
+                    async_job->direct_queue_manager,
+                    "MaxReplicatedPaintRenderTargetWritesPerFrame",
+                    -1);
+            bool adaptive_remote_interval = false;
+            if (const auto adaptive_property =
+                    find_object_property(
+                        ref,
+                        async_job->direct_queue_manager,
+                        "bEnableAdaptiveRemotePaintInterval"))
+            {
+                sdk_read_reflected_bool(
+                    adaptive_property,
+                    reinterpret_cast<const std::uint8_t*>(
+                        async_job->direct_queue_manager),
+                    adaptive_remote_interval);
+            }
+            async_job->replication_pacing =
+                runtime_contract::paint_replication_pacing_plan(
+                    reported_batches_per_second,
+                    reported_strokes_per_batch,
+                    async_job->reported_max_render_target_writes_per_frame,
+                    runtime_contract::NativeRecordedPaintMaxCallsPerTick,
+                    min_remote_frames_after_local_paint,
+                    adaptive_remote_interval,
+                    max_adaptive_remote_frame_interval);
             async_job->strokes = std::move(strokes);
             async_job->initial_stroke_count = static_cast<int>(async_job->strokes.size());
             async_job->metadata = metadata +
@@ -24101,12 +24377,29 @@ namespace
             async_job->replay_fill_end = effective_fill_end;
             async_job->direct_queue_requested_target_strokes =
                 research_direct_queue_target_strokes;
-            const int local_sample_batch_limit = runtime_contract::NativeRecordedPaintMaxCallsPerTick;
+            const int local_sample_batch_limit =
+                async_job->replication_pacing.calls_per_tick;
             async_job->local_render_target_write_budget =
                 local_sample_batch_limit * std::max(1, paint_target_render_writes);
+            if (async_job->reported_max_render_target_writes_per_frame > 0)
+            {
+                async_job->local_render_target_write_budget =
+                    std::min(
+                        async_job->local_render_target_write_budget,
+                        async_job->reported_max_render_target_writes_per_frame);
+            }
             async_job->metadata += ",\"local_logical_sample_batch_limit\":" +
                                    std::to_string(local_sample_batch_limit);
             async_job->metadata += ",\"native_queue_backpressure\":true";
+            async_job->metadata +=
+                ",\"replication_pacing_source\":\"" +
+                std::string(
+                    reported_batches_per_second > 0 &&
+                            reported_strokes_per_batch > 0 &&
+                            async_job->reported_max_render_target_writes_per_frame > 0
+                        ? "reflected_network_and_receiver_limits"
+                        : "supported_build_fallback") +
+                "\"";
             async_job->metadata += ",\"native_queue_component_counter_available\":" +
                                    std::string(json_bool(
                                        async_job->direct_queue_component_count_function != 0));
@@ -24410,7 +24703,8 @@ namespace
                                       nullptr,
                                       paint_dispatch_timer_queue_proc,
                                       nullptr,
-                                      static_cast<DWORD>(runtime_contract::FastLocalCadenceMs),
+                                      static_cast<DWORD>(
+                                          job->replication_pacing.cadence_ms),
                                       0,
                                       WT_EXECUTEONLYONCE | WT_EXECUTEINTIMERTHREAD))
             {
@@ -24421,7 +24715,8 @@ namespace
             ++job->direct_fast_wakeup_fallback_count;
             const auto timer_id = SetTimer(nullptr,
                                            0,
-                                           static_cast<UINT>(runtime_contract::FastLocalCadenceMs),
+                                           static_cast<UINT>(
+                                               job->replication_pacing.cadence_ms),
                                            paint_dispatch_timer_proc);
             if (timer_id)
             {
@@ -24510,15 +24805,25 @@ namespace
         direct_paint_record_queue_snapshot(job, queue_before);
         const int pending_before = direct_paint_owned_queue_strokes(queue_before);
         const int queue_target_before = direct_paint_queue_target_strokes(job, queue_before);
-        if (pending_before >= queue_target_before)
+        const int outgoing_before =
+            queue_before.outgoing_available ? queue_before.outgoing_strokes : -1;
+        if (pending_before >= queue_target_before ||
+            outgoing_before >=
+                job->replication_pacing.conservative_strokes_per_window)
         {
             ++job->direct_queue_waits;
             write_progress("mesh_direct_paint_drain",
-                           "waiting for the game's recorded-paint queue",
+                           outgoing_before >=
+                                   job->replication_pacing
+                                       .conservative_strokes_per_window
+                               ? "waiting for the game's outgoing paint batch"
+                               : "waiting for the game's recorded-paint queue",
                            false,
                            "running",
                            "\"native_queue_pending_strokes\":" +
                                std::to_string(pending_before) +
+                               ",\"native_queue_outgoing_strokes\":" +
+                               std::to_string(outgoing_before) +
                                ",\"native_queue_target_strokes\":" +
                                std::to_string(queue_target_before));
             schedule_next();
@@ -24529,7 +24834,7 @@ namespace
         int calls = 0;
         int writes = 0;
         while (job->local_offset < job->strokes.size() &&
-               calls < runtime_contract::NativeRecordedPaintMaxCallsPerTick)
+               calls < job->replication_pacing.calls_per_tick)
         {
             if (queued_paint_cancel_reason(job->queued) != PaintCancelReason::None)
             {
@@ -24577,7 +24882,13 @@ namespace
             const int pending_after_call = direct_paint_owned_queue_strokes(queue_after_call);
             const int queue_target_after_call =
                 direct_paint_queue_target_strokes(job, queue_after_call);
-            if (pending_after_call >= queue_target_after_call)
+            const int outgoing_after_call =
+                queue_after_call.outgoing_available
+                    ? queue_after_call.outgoing_strokes
+                    : -1;
+            if (pending_after_call >= queue_target_after_call ||
+                outgoing_after_call >=
+                    job->replication_pacing.conservative_strokes_per_window)
             {
                 // This is backpressure from the game-owned renderer, not an
                 // arbitrary bridge rate limit. Keep its lead to one small
@@ -24614,37 +24925,78 @@ namespace
         }
         if (job->local_offset >= job->strokes.size())
         {
+            if (job->final_submission_completed_at.time_since_epoch().count() == 0)
+            {
+                job->final_submission_completed_at =
+                    std::chrono::steady_clock::now();
+            }
             const auto queue_after_submission = direct_paint_capture_queue_snapshot(job);
             direct_paint_record_queue_snapshot(job, queue_after_submission);
             const int pending_after_submission =
                 direct_paint_owned_queue_strokes(queue_after_submission);
-            if (pending_after_submission > 0)
+            const int outgoing_after_submission =
+                queue_after_submission.outgoing_available
+                    ? queue_after_submission.outgoing_strokes
+                    : -1;
+            const bool final_queue_ready =
+                runtime_contract::paint_final_queue_ready(
+                    job->direct_queue_observer_available,
+                    job->direct_queue_observed_activity,
+                    pending_after_submission,
+                    queue_after_submission.outgoing_available,
+                    outgoing_after_submission);
+            const auto final_queue_observed_at =
+                std::chrono::steady_clock::now();
+            if (!final_queue_ready)
             {
-                ++job->direct_queue_waits;
-                job->direct_queue_final_idle_polls = 0;
+                if (job->final_queue_ready_at.time_since_epoch().count() != 0)
+                {
+                    ++job->final_queue_ready_resets;
+                }
+                job->final_queue_ready_at = {};
+            }
+            else if (job->final_queue_ready_at.time_since_epoch().count() == 0)
+            {
+                job->final_queue_ready_at = final_queue_observed_at;
+            }
+            const int final_elapsed_ms = static_cast<int>(
+                job->final_queue_ready_at.time_since_epoch().count() != 0
+                    ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                          final_queue_observed_at - job->final_queue_ready_at)
+                          .count()
+                    : 0);
+            if (!runtime_contract::paint_visual_drain_complete(
+                    job->direct_queue_observer_available,
+                    job->direct_queue_observed_activity,
+                    pending_after_submission,
+                    queue_after_submission.outgoing_available,
+                    outgoing_after_submission,
+                    final_elapsed_ms,
+                    job->replication_pacing.final_confirmation_ms))
+            {
+                ++job->direct_queue_final_confirmation_waits;
                 write_progress("mesh_direct_paint_drain",
-                               "waiting for the game's recorded-paint queue",
+                               outgoing_after_submission > 0
+                                   ? "waiting for the game's outgoing paint batch"
+                                   : "confirming remote paint rendering is complete",
                                false,
                                "running",
                                "\"native_queue_pending_strokes\":" +
-                                   std::to_string(pending_after_submission));
+                                   std::to_string(pending_after_submission) +
+                                   ",\"native_queue_outgoing_strokes\":" +
+                                   std::to_string(outgoing_after_submission) +
+                                   ",\"final_queue_ready\":" +
+                                   std::string(json_bool(final_queue_ready)) +
+                                   ",\"final_confirmation_elapsed_ms\":" +
+                                   std::to_string(final_elapsed_ms) +
+                                   ",\"final_confirmation_required_ms\":" +
+                                   std::to_string(
+                                       job->replication_pacing
+                                           .final_confirmation_ms));
                 schedule_next();
                 return;
             }
-            if (job->direct_queue_observer_available &&
-                job->direct_queue_final_idle_polls < 2)
-            {
-                // The queue counter can reach zero between two game-thread
-                // phases. Observe two idle polls before declaring the final
-                // recorded sample visibly complete.
-                ++job->direct_queue_final_idle_polls;
-                write_progress("mesh_direct_paint_drain",
-                               "confirming the game's recorded-paint queue is idle",
-                               false,
-                               "running");
-                schedule_next();
-                return;
-            }
+            job->final_visual_completion_confirmed = true;
             finish(true,
                    "mesh_direct_paint_done",
                    "mesh-first direct paint completed");
@@ -29593,6 +29945,8 @@ namespace
                                  ",\"instance_id\":\"" + bytes_to_hex(g_bridge_identity.instance_guid, 16) + "\"" +
                                  ",\"bridge_hash\":\"" + bytes_to_hex(g_bridge_identity.sha256, 32) + "\"" +
                                  ",\"protocol_version\":" + std::to_string(BridgeBootstrapProtocolV1) +
+                                 ",\"progress_path\":\"" +
+                                     json_escape(wstring_to_utf8(bridge_progress_path())) + "\"" +
                                  ",\"port\":" + std::to_string(g_bound_port.load()));
     }
 
@@ -34011,6 +34365,16 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         return EspNativeScope::All;
     }
 
+    auto esp_native_scope_name(EspNativeScope scope) -> const char*
+    {
+        switch (scope)
+        {
+        case EspNativeScope::Hider: return "hider";
+        case EspNativeScope::Hunter: return "hunter";
+        default: return "all";
+        }
+    }
+
     auto esp_native_display_name(const std::string& utf8, std::wstring& output) -> bool
     {
         output.clear();
@@ -34714,6 +35078,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                 std::lock_guard<std::mutex> lock(g_esp_native_config_mutex);
                 g_esp_native_config_signature = signature;
             }
+            g_esp_native_config_generation.fetch_add(1, std::memory_order_relaxed);
             return response_json(true, "esp_native_present", 0, 0, "Native Present ESP disabled",
                                  "\"renderer\":\"d3d12_direct\",\"status\":\"disabled\"");
         }
@@ -34769,6 +35134,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
             std::lock_guard<std::mutex> lock(g_esp_native_config_mutex);
             g_esp_native_config_signature = signature;
         }
+        g_esp_native_config_generation.fetch_add(1, std::memory_order_relaxed);
         esp_native_set_state(EspNativePresentState::Initializing, "waiting for first game-thread snapshot and command queue");
         return response_json(true, "esp_native_present", 0, 0, "Native Present ESP is initializing",
                              "\"renderer\":\"d3d12_direct\",\"status\":\"initializing\",\"fallback\":false");
@@ -34813,12 +35179,20 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         const auto capture_age_ms = enabled ? esp_native_capture_age_ms(now_ms) : 0;
         const auto last_capture_ms =
             g_esp_native_last_capture_tick_ms.load(std::memory_order_acquire);
+        const auto capture_state = runtime_contract::esp_capture_status(
+            enabled,
+            last_capture_ms != 0,
+            capture_age_ms,
+            esp_native_paint_busy());
         const char* capture_status =
-            !enabled ? "disabled" :
-            last_capture_ms == 0 ? "waiting" :
-            capture_age_ms >= runtime_contract::EspHudCaptureStallMs ? "stalled" :
-            "active";
+            capture_state == runtime_contract::EspCaptureStatus::Disabled ? "disabled" :
+            capture_state == runtime_contract::EspCaptureStatus::Waiting ? "waiting" :
+            capture_state == runtime_contract::EspCaptureStatus::Active ? "active" :
+            capture_state == runtime_contract::EspCaptureStatus::Busy ? "busy" :
+            "stalled";
         const auto diagnostics = esp_native_snapshot_diagnostics();
+        const auto configured_scope =
+            static_cast<EspNativeScope>(g_esp_native_scope.load(std::memory_order_acquire));
         const char* roster_source =
             diagnostics.roster_source == 1 ? "player_array" :
             diagnostics.roster_source == 2 ? "role_roster_fallback" :
@@ -34831,6 +35205,10 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                              "\"status\":\"" + std::string(esp_native_state_name(state)) + "\"" +
                                  ",\"renderer\":\"d3d12_direct\"" +
                                  ",\"swapchain_format\":\"" + json_escape(format) + "\"" +
+                                 ",\"configured_scope\":\"" +
+                                     std::string(esp_native_scope_name(configured_scope)) + "\"" +
+                                 ",\"configuration_generation\":" +
+                                     std::to_string(g_esp_native_config_generation.load()) +
                                  ",\"snapshot_sequence\":" + std::to_string(sequence) +
                                  ",\"capture_frames\":" + std::to_string(g_esp_native_capture_frames.load()) +
                                  ",\"capture_age_ms\":" + std::to_string(capture_age_ms) +

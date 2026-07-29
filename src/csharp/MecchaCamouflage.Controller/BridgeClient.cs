@@ -13,7 +13,8 @@ public sealed record BridgeReply(
     int? ProcessId = null,
     Guid? InstanceId = null,
     string? BridgeHash = null,
-    uint? ProtocolVersion = null);
+    uint? ProtocolVersion = null,
+    string? ProgressPath = null);
 
 /// <summary>
 /// A one-command TCP client. Every connection is authenticated with the direct bridge's
@@ -102,7 +103,7 @@ public sealed class BridgeClient
     private static BridgeReply Parse(string raw, BridgeHelloIdentity identity)
     {
         if (string.IsNullOrWhiteSpace(raw))
-            return new BridgeReply(false, false, "empty_response", "Bridge returned no response.", raw, identity.ProcessId, identity.InstanceId, identity.BridgeHash, identity.ProtocolVersion);
+            return new BridgeReply(false, false, "empty_response", "Bridge returned no response.", raw, identity.ProcessId, identity.InstanceId, identity.BridgeHash, identity.ProtocolVersion, identity.ProgressPath);
         try
         {
             using var doc = JsonDocument.Parse(raw);
@@ -117,13 +118,13 @@ public sealed class BridgeClient
                 pidProp.TryGetInt32(out var responsePid) &&
                 responsePid != identity.ProcessId)
             {
-                return new BridgeReply(false, false, "identity_error", "Bridge response PID did not match its authenticated hello.", raw, identity.ProcessId, identity.InstanceId, identity.BridgeHash, identity.ProtocolVersion);
+                return new BridgeReply(false, false, "identity_error", "Bridge response PID did not match its authenticated hello.", raw, identity.ProcessId, identity.InstanceId, identity.BridgeHash, identity.ProtocolVersion, identity.ProgressPath);
             }
-            return new BridgeReply(true, success, stage, message, raw, processId, identity.InstanceId, identity.BridgeHash, identity.ProtocolVersion);
+            return new BridgeReply(true, success, stage, message, raw, processId, identity.InstanceId, identity.BridgeHash, identity.ProtocolVersion, identity.ProgressPath);
         }
         catch (Exception ex)
         {
-            return new BridgeReply(false, false, "parse_error", ex.Message, raw, identity.ProcessId, identity.InstanceId, identity.BridgeHash, identity.ProtocolVersion);
+            return new BridgeReply(false, false, "parse_error", ex.Message, raw, identity.ProcessId, identity.InstanceId, identity.BridgeHash, identity.ProtocolVersion, identity.ProgressPath);
         }
     }
 }

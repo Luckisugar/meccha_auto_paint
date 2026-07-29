@@ -900,7 +900,19 @@ public sealed class RuntimeBridgeService
         lock (bridgeStateGate)
         {
             if (ReferenceEquals(activeInstance, instance))
+            {
+                if (reply.Ok &&
+                    reply.ProcessId == instance.Target.ProcessId &&
+                    reply.InstanceId == instance.InstanceId &&
+                    string.Equals(
+                        reply.BridgeHash,
+                        instance.ExpectedBridgeHash,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    instance.TrySetProgressPath(reply.ProgressPath);
+                }
                 bridgeConnected = IsBridgeReadyForInstance(reply, instance) || (reply.Ok && reply.InstanceId == instance.InstanceId);
+            }
         }
         return new ActiveBridgeRequest(instance, reply);
     }

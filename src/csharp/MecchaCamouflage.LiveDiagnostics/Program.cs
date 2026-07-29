@@ -24,7 +24,7 @@ internal static class Program
     private const string TextureProbePreservePayload =
         "{\"type\":\"paint_replication_texture_probe\",\"research_texture_target\":\"resolved\",\"research_compact\":true,\"research_texture_preserve_baseline\":true}";
     private const string Usage =
-        "Usage: meccha-live-diagnostics --pid <game-pid> --command <ping|capabilities|replication|texture|material-memory|material-memory-inventory|appearance-emission-isolation-probe|appearance-emission-target-differential|appearance-preview|appearance-color-differential|appearance-preview-hold|manual-preview-hold|appearance-candidate-hold|appearance-candidate-differential|appearance-emissive-zero|appearance-restore|appearance-present-probe|emissive-texture-probe|direct-emissive-channel-probe|bridge-shutdown> [--allow-local-preview] [--allow-direct-stroke] [--allow-bridge-shutdown] [--include-shadows] [--preview-color-compression <0-10>] [--artifacts <directory>]";
+        "Usage: meccha-live-diagnostics --pid <game-pid> --command <ping|capabilities|esp-status|replication|replication-pressure|texture|material-memory|material-memory-inventory|appearance-emission-isolation-probe|appearance-emission-target-differential|appearance-preview|appearance-color-differential|appearance-preview-hold|manual-preview-hold|appearance-candidate-hold|appearance-candidate-differential|appearance-emissive-zero|appearance-restore|appearance-present-probe|emissive-texture-probe|direct-emissive-channel-probe|bridge-shutdown> [--allow-local-preview] [--allow-direct-stroke] [--allow-bridge-shutdown] [--include-shadows] [--preview-color-compression <0-10>] [--artifacts <directory>]";
 
     private sealed record Options(
         int ProcessId,
@@ -221,8 +221,22 @@ internal static class Program
                 case "capabilities":
                     summary["reply"] = await SendAndStoreAsync(client, "capabilities", "{\"type\":\"capabilities\"}", runDirectory);
                     break;
+                case "esp-status":
+                    summary["reply"] = await SendAndStoreAsync(
+                        client,
+                        "esp-status",
+                        "{\"type\":\"esp_native_present_status\"}",
+                        runDirectory);
+                    break;
                 case "replication":
                     summary["reply"] = await SendAndStoreAsync(client, "replication", "{\"type\":\"paint_replication_probe\"}", runDirectory);
+                    break;
+                case "replication-pressure":
+                    summary["reply"] = await SendAndStoreAsync(
+                        client,
+                        "replication-pressure",
+                        "{\"type\":\"paint_replication_pressure_probe\"}",
+                        runDirectory);
                     break;
                 case "texture":
                     summary["reply"] = await SendAndStoreAsync(client, "texture", TextureProbePayload, runDirectory);

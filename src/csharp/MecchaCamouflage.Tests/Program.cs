@@ -29,10 +29,12 @@ var tests = new List<(string Name, Action Run)>
     ("custom freecam surface is absent", CustomFreecamSurfaceIsAbsent),
     ("misc configures the native Present ESP renderer", MiscUsesNativePresentEspRenderer),
     ("native Present ESP command uses role-fixed scope and colors", NativePresentEspCommandUsesRoleFixedScopeAndColors),
+    ("latest async request queue preserves the final ESP scope", LatestAsyncRequestQueuePreservesFinalEspScope),
     ("native Present status logging ignores healthy counter churn", NativePresentStatusLoggingIgnoresHealthyCounterChurn),
     ("native Present ESP has no external frame-render fallback", NativePresentEspHasNoExternalFallback),
     ("native Present ESP hooks queue, owns wrapped backbuffers, and reports lifecycle state", NativePresentEspOwnsRendererLifecycle),
     ("runtime keeps one resident bridge across GUI updates", RuntimeKeepsResidentBridgeAcrossGuiUpdates),
+    ("resident bridge reconnect retains its progress path", ResidentBridgeReconnectRetainsProgressPath),
     ("research hot reload quiesces and serializes bridge generations", ResearchHotReloadQuiescesAndSerializesBridgeGenerations),
     ("connected game process remains pinned", ConnectedGameProcessRemainsPinned),
     ("live game identity blocks target replacement", LiveGameIdentityBlocksTargetReplacement),
@@ -992,6 +994,9 @@ static void MiscUsesNativePresentEspRenderer()
            app.Contains("bindColorPair(\"esp-hunter-color-picker\", \"esp-hunter-color\", \"esp.hunterColor\")", StringComparison.Ordinal) &&
            !app.Contains("esp.enemyColor", StringComparison.Ordinal) &&
            mainForm.Contains("QueueNativePresentEspConfiguration", StringComparison.Ordinal) &&
+           mainForm.Contains("nativeEspConfigurationQueue.Enqueue", StringComparison.Ordinal) &&
+           mainForm.Contains("ApplyNativePresentEspConfigurationAsync", StringComparison.Ordinal) &&
+           !mainForm.Contains("nativeEspConfigurationSignature", StringComparison.Ordinal) &&
            mainForm.Contains("\"hiderColor\"", StringComparison.Ordinal) &&
            mainForm.Contains("\"hunterColor\"", StringComparison.Ordinal) &&
            !mainForm.Contains("EspOverlayForm", StringComparison.Ordinal) &&
@@ -1070,6 +1075,52 @@ static async Task NativePresentEspCommandUsesRoleFixedScopeAndColorsAsync()
         "native Present ESP command should express fixed Hider/Hunter scope and colors");
 }
 
+static void LatestAsyncRequestQueuePreservesFinalEspScope() =>
+    LatestAsyncRequestQueuePreservesFinalEspScopeAsync().GetAwaiter().GetResult();
+
+static async Task LatestAsyncRequestQueuePreservesFinalEspScopeAsync()
+{
+    var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var applied = new List<string>();
+    var queue = new LatestAsyncRequestQueue<string>(async scope =>
+    {
+        if (scope == "all")
+        {
+            firstStarted.SetResult();
+            await releaseFirst.Task;
+        }
+        lock (applied)
+            applied.Add(scope);
+        return true;
+    });
+
+    Assert(queue.Enqueue("all"), "the initial ESP scope should start a configuration request");
+    await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    Assert(queue.Enqueue("hider") && queue.Enqueue("hunter"),
+        "new ESP scopes should replace pending configuration");
+    releaseFirst.SetResult();
+    await queue.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(2));
+
+    string[] observed;
+    lock (applied)
+        observed = applied.ToArray();
+    Assert(observed.SequenceEqual(["all", "hunter"]),
+        "an in-flight request may finish, but only the latest pending ESP scope may run next");
+    Assert(!queue.Enqueue("hunter"),
+        "the last successfully applied ESP scope should not be resent as unchanged");
+
+    var attempt = 0;
+    var retryQueue = new LatestAsyncRequestQueue<string>(_ =>
+        Task.FromResult(++attempt > 1));
+    Assert(retryQueue.Enqueue("hider"), "a failed ESP scope should be attempted");
+    await retryQueue.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(2));
+    Assert(retryQueue.Enqueue("hider"),
+        "a failed ESP scope must remain eligible for a later bridge retry");
+    await retryQueue.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(2));
+    Assert(attempt == 2, "the same ESP scope should retry exactly once after failure");
+}
+
 static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
 {
     var first = new NativePresentStatusLogSample
@@ -1077,6 +1128,7 @@ static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
         Status = "ready",
         Reason = "native D3D12 Present compositor active",
         Format = "R10G10B10A2_UNORM",
+        ConfiguredScope = "all",
         CaptureStatus = "active",
         CaptureAgeMs = 16,
         HudRebinds = 0,
@@ -1141,12 +1193,25 @@ static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
         NativePresentStatusLogPolicy.Signature(later, verbose: true),
         "explicit verbose ESP logging must retain raw diagnostic counter changes");
 
+    var scopeChanged = later with { ConfiguredScope = "hunter" };
+    Assert(
+        NativePresentStatusLogPolicy.Signature(later, verbose: false) !=
+        NativePresentStatusLogPolicy.Signature(scopeChanged, verbose: false),
+        "normal ESP status logging must expose the native scope that was actually applied");
+
     var stalled = later with { CaptureStatus = "stalled", CaptureAgeMs = 1500 };
     Assert(
         NativePresentStatusLogPolicy.Signature(later, verbose: false) !=
         NativePresentStatusLogPolicy.Signature(stalled, verbose: false) &&
         NativePresentStatusLogPolicy.ShouldWarn(stalled),
         "capture stalls must remain visible as a warning state transition");
+
+    var paintBusy = later with { CaptureStatus = "busy", CaptureAgeMs = 1500 };
+    Assert(
+        NativePresentStatusLogPolicy.Signature(later, verbose: false) !=
+        NativePresentStatusLogPolicy.Signature(paintBusy, verbose: false) &&
+        !NativePresentStatusLogPolicy.ShouldWarn(paintBusy),
+        "paint-owned capture pauses must remain visible without being misreported as ESP failure");
 
     var offscreen = later with
     {
@@ -1274,6 +1339,70 @@ static void RuntimeKeepsResidentBridgeAcrossGuiUpdates()
            runtime.Contains("restart the game before testing native changes", StringComparison.Ordinal) &&
            !runtime.Contains("WaitForResidentCoreExitAsync", StringComparison.Ordinal),
         "a GUI update must reconnect to its authenticated resident bridge instead of stacking another native DLL in a live game, while reporting an old resident binary explicitly");
+}
+
+static void ResidentBridgeReconnectRetainsProgressPath() =>
+    ResidentBridgeReconnectRetainsProgressPathAsync().GetAwaiter().GetResult();
+
+static async Task ResidentBridgeReconnectRetainsProgressPathAsync()
+{
+    using var temp = new TempHome();
+    var paths = new AppPaths("resident-progress-reconnect-test");
+    var service = new RuntimeBridgeService(paths, new RuntimeLog(paths));
+    var instanceId = Guid.Parse("31415926-5358-9793-2384-626433832795");
+    var token = Enumerable.Range(1, BridgeStartBlockV1.TokenLength).Select(value => (byte)value).ToArray();
+    var hash = string.Concat(Enumerable.Repeat("ef", 32));
+    var progressPath = Path.Combine(paths.BridgeProgressDirectory, $"{instanceId:N}.progress.json");
+    using var listener = new TcpListener(IPAddress.Loopback, 0);
+    listener.Start();
+    var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+    var target = TargetProcessIdentity.Create(4242, 1, Path.Combine(Path.GetTempPath(), "game.exe"));
+    var resident = new BridgeInstance(target, instanceId, token, hash, "", "", "");
+    resident.SetPort(port);
+
+    var activeField = typeof(RuntimeBridgeService).GetField(
+        "activeInstance",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("activeInstance field missing");
+    activeField.SetValue(service, resident);
+
+    var server = Task.Run(async () =>
+    {
+        using var accepted = await listener.AcceptTcpClientAsync();
+        await using var stream = accepted.GetStream();
+        using var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
+        await using var writer = new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        _ = await reader.ReadLineAsync();
+        await writer.WriteLineAsync(JsonSerializer.Serialize(new
+        {
+            success = true,
+            stage = "hello",
+            message = "ok",
+            metadata = new
+            {
+                pid = 4242,
+                instance_id = instanceId.ToString("N"),
+                bridge_hash = hash,
+                protocol_version = 1,
+                progress_path = progressPath
+            }
+        }));
+        _ = await reader.ReadLineAsync();
+        await writer.WriteLineAsync("{\"success\":true,\"stage\":\"ping\",\"message\":\"ok\"}");
+    });
+
+    var reply = await service.PingAsync();
+    await server;
+
+    Assert(reply.Ok && reply.Success &&
+           string.Equals(service.ProgressPath, Path.GetFullPath(progressPath), StringComparison.Ordinal),
+        "an authenticated resident reconnect must retain the exact native progress path");
+
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    Assert(bridge.Contains("\\\"progress_path\\\"", StringComparison.Ordinal) &&
+           bridge.Contains("bridge_progress_path()", StringComparison.Ordinal),
+        "the native authenticated hello must publish its actual progress sidecar path");
 }
 
 static void ResearchHotReloadQuiescesAndSerializesBridgeGenerations()
@@ -1783,22 +1912,37 @@ static void NativeProductionLocalSyncUsesPerStrokePaint()
            bridge.Contains("paint_at_uv_with_brush_native_replication", StringComparison.Ordinal) &&
            bridge.Contains("sdk_call_paint_at_uv_with_brush", StringComparison.Ordinal),
         "production paint must use the game-native recorded per-stroke route");
-    Assert(bridge.Contains("const int local_sample_batch_limit = runtime_contract::NativeRecordedPaintMaxCallsPerTick;", StringComparison.Ordinal),
-        "production paint must schedule only the bounded game-native route");
+    Assert(bridge.Contains("const int local_sample_batch_limit =", StringComparison.Ordinal) &&
+           bridge.Contains("async_job->replication_pacing.calls_per_tick;", StringComparison.Ordinal),
+        "production paint must schedule only the reflected, bounded game-native route");
     var contract = File.ReadAllText(Path.Combine(
         FindRepositoryRoot(),
         "src", "native", "include", "runtime_contract.hpp"));
     Assert(contract.Contains("constexpr int NativeRecordedPaintMaxCallsPerTick = 4;", StringComparison.Ordinal) &&
            contract.Contains("constexpr int NativeRecordedPaintQueueTargetStrokes = 2;", StringComparison.Ordinal) &&
-           contract.Contains("constexpr int FastLocalCadenceMs = 1;", StringComparison.Ordinal),
-        "native paint must retain a conservative bounded dispatch and game-owned queue window");
+           contract.Contains("ConservativeReplicationCapacityNumerator = 4;", StringComparison.Ordinal) &&
+           contract.Contains("ConservativeReplicationCapacityDenominator = 5;", StringComparison.Ordinal) &&
+           contract.Contains("ConservativeReplicationBurstCalls = 3;", StringComparison.Ordinal) &&
+           contract.Contains("AssumedRemotePaintFps = 60;", StringComparison.Ordinal) &&
+           contract.Contains("paint_replication_pacing_plan(", StringComparison.Ordinal),
+        "native paint must retain a conservative bounded dispatch derived from game-owned network and receiver limits");
     Assert(bridge.Contains("direct_paint_capture_queue_snapshot", StringComparison.Ordinal) &&
            bridge.Contains("GetQueuedStrokeCountForComponent", StringComparison.Ordinal) &&
+           bridge.Contains("\"QueuedOutgoingBatches\"", StringComparison.Ordinal) &&
+           bridge.Contains("direct_paint_queue_array_remaining", StringComparison.Ordinal) &&
            bridge.Contains("native_queue_backpressure", StringComparison.Ordinal) &&
            bridge.Contains("direct_paint_queue_target_strokes", StringComparison.Ordinal) &&
            bridge.Contains("mesh_direct_paint_cancel_drain", StringComparison.Ordinal) &&
            bridge.Contains("waiting for the game's recorded-paint queue", StringComparison.Ordinal),
-        "native paint must use the game-owned component queue for backpressure, completion, and cancel drain");
+        "native paint must use game-owned component and outgoing queues for backpressure, completion, and cancel drain");
+    Assert(bridge.Contains("paint_queue_observer_authoritative(", StringComparison.Ordinal) &&
+           bridge.Contains("paint_final_queue_ready(", StringComparison.Ordinal) &&
+           bridge.Contains("paint_visual_drain_complete(", StringComparison.Ordinal) &&
+           bridge.Contains("final_queue_ready_at", StringComparison.Ordinal) &&
+           bridge.Contains("replication_conservative_receiver_strokes_per_second", StringComparison.Ordinal) &&
+           bridge.Contains("replay_visual_offset", StringComparison.Ordinal) &&
+           bridge.Contains("final_visual_completion_confirmed", StringComparison.Ordinal),
+        "submission must remain incomplete until sender drain and a stable receiver confirmation window both finish");
     Assert(bridge.Contains("json_int_field(request, \"diagnostic_stroke_limit\", 0, 0, 10000)", StringComparison.Ordinal) &&
            bridge.Contains("diagnostic_stroke_limit_applied", StringComparison.Ordinal),
         "diagnostic runs must report their explicit stroke limit without changing normal paint");

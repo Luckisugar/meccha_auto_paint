@@ -363,6 +363,86 @@ int main()
         return 10;
     }
 
+    const auto conservative_replication =
+        runtime_contract::paint_replication_pacing_plan(
+            20,
+            20,
+            6,
+            runtime_contract::NativeRecordedPaintMaxCallsPerTick,
+            2,
+            false,
+            12);
+    const auto fallback_replication =
+        runtime_contract::paint_replication_pacing_plan(
+            0,
+            -1,
+            -1,
+            runtime_contract::NativeRecordedPaintMaxCallsPerTick,
+            2,
+            false,
+            0);
+    const auto small_batch_replication =
+        runtime_contract::paint_replication_pacing_plan(
+            10,
+            3,
+            6,
+            runtime_contract::NativeRecordedPaintMaxCallsPerTick,
+            2,
+            true,
+            12);
+    if (conservative_replication.max_outgoing_batches_per_second != 20 ||
+        conservative_replication.max_outgoing_strokes_per_batch != 20 ||
+        conservative_replication.conservative_network_strokes_per_second != 320 ||
+        conservative_replication.conservative_receiver_strokes_per_second != 144 ||
+        conservative_replication.effective_strokes_per_second != 144 ||
+        conservative_replication.conservative_strokes_per_window != 8 ||
+        conservative_replication.calls_per_tick != 3 ||
+        conservative_replication.network_window_ms != 50 ||
+        conservative_replication.cadence_ms != 21 ||
+        conservative_replication.final_confirmation_ms != 467 ||
+        fallback_replication.max_outgoing_batches_per_second != 20 ||
+        fallback_replication.max_outgoing_strokes_per_batch != 20 ||
+        fallback_replication.conservative_receiver_strokes_per_second != 320 ||
+        fallback_replication.effective_strokes_per_second != 320 ||
+        fallback_replication.calls_per_tick != 3 ||
+        fallback_replication.cadence_ms != 10 ||
+        small_batch_replication.conservative_strokes_per_window != 2 ||
+        small_batch_replication.calls_per_tick != 2 ||
+        small_batch_replication.cadence_ms != 100 ||
+        small_batch_replication.conservative_receiver_strokes_per_second != 24 ||
+        small_batch_replication.effective_strokes_per_second != 20 ||
+        small_batch_replication.final_confirmation_ms != 1200)
+    {
+        return 118;
+    }
+
+    if (runtime_contract::paint_queue_observer_authoritative(false, false) ||
+        runtime_contract::paint_queue_observer_authoritative(true, false) ||
+        !runtime_contract::paint_queue_observer_authoritative(true, true) ||
+        runtime_contract::paint_final_queue_ready(
+            true, true, 1, true, 0) ||
+        runtime_contract::paint_final_queue_ready(
+            true, false, 0, true, 1) ||
+        !runtime_contract::paint_final_queue_ready(
+            true, true, 0, true, 0) ||
+        runtime_contract::paint_visual_drain_complete(
+            true, false, 0, true, 0, 466, 467) ||
+        !runtime_contract::paint_visual_drain_complete(
+            true, false, 0, true, 0, 467, 467) ||
+        runtime_contract::paint_visual_drain_complete(
+            true, true, 1, true, 0, 500, 467) ||
+        runtime_contract::paint_visual_drain_complete(
+            true, true, 0, true, 1, 500, 467) ||
+        runtime_contract::paint_final_confirmation_remaining_ms(
+            false, 0, 467, 50) != 517 ||
+        runtime_contract::paint_final_confirmation_remaining_ms(
+            true, 200, 467, 50) != 267 ||
+        runtime_contract::paint_final_confirmation_remaining_ms(
+            true, 467, 467, 50) != 0)
+    {
+        return 119;
+    }
+
     std::array<runtime_contract::SpatialScanlineKey, 4> scanline{{
         {runtime_contract::spatial_scanline_row(100.0, 100.0, 10.0), 10.0, 0},
         {runtime_contract::spatial_scanline_row(100.0, 90.0, 10.0), -20.0, 1},
@@ -1827,6 +1907,24 @@ int main()
         runtime_contract::production_material_sample_index(2) != 2)
     {
         return 23;
+    }
+    if (runtime_contract::esp_capture_status(
+            false, false, 0, false) !=
+            runtime_contract::EspCaptureStatus::Disabled ||
+        runtime_contract::esp_capture_status(
+            true, false, 500, false) !=
+            runtime_contract::EspCaptureStatus::Waiting ||
+        runtime_contract::esp_capture_status(
+            true, true, 16, false) !=
+            runtime_contract::EspCaptureStatus::Active ||
+        runtime_contract::esp_capture_status(
+            true, true, 1500, true) !=
+            runtime_contract::EspCaptureStatus::Busy ||
+        runtime_contract::esp_capture_status(
+            true, true, 1500, false) !=
+            runtime_contract::EspCaptureStatus::Stalled)
+    {
+        return 117;
     }
     if (runtime_contract::ProductionMaterialPaintChannels !=
         std::array<std::uint8_t, 1>{

@@ -219,7 +219,7 @@ public sealed class BridgeInstance
     public string ExpectedBridgeHash { get; }
     public string BridgePath { get; }
     public string InjectorPath { get; }
-    public string ProgressPath { get; }
+    public string ProgressPath { get; private set; }
     public int? Port { get; private set; }
 
     public void SetPort(int port)
@@ -227,6 +227,18 @@ public sealed class BridgeInstance
         if (port is < 1 or > 65535)
             throw new ArgumentOutOfRangeException(nameof(port));
         Port = port;
+    }
+
+    public bool TrySetProgressPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) ||
+            path.IndexOf('\0', StringComparison.Ordinal) >= 0 ||
+            !Path.IsPathFullyQualified(path))
+        {
+            return false;
+        }
+        ProgressPath = Path.GetFullPath(path);
+        return true;
     }
 
     public BridgeEndpoint Endpoint => Port is int port
@@ -274,7 +286,12 @@ public sealed class BridgeEndpoint
     public override string ToString() => $"BridgeEndpoint {{ Host = {Host}, Port = {Port}, InstanceId = {InstanceId:N} }}";
 }
 
-public sealed record BridgeHelloIdentity(int ProcessId, Guid InstanceId, string BridgeHash, uint ProtocolVersion);
+public sealed record BridgeHelloIdentity(
+    int ProcessId,
+    Guid InstanceId,
+    string BridgeHash,
+    uint ProtocolVersion,
+    string? ProgressPath);
 
 public static class BridgeProtocolV1
 {
@@ -311,7 +328,24 @@ public static class BridgeProtocolV1
                 error = "Bridge hello identity did not match the requested instance.";
                 return false;
             }
-            identity = new BridgeHelloIdentity(pid, instanceId, endpoint.ExpectedBridgeHash, version);
+            string? progressPath = null;
+            if (metadata.TryGetProperty("progress_path", out var progressPathElement) &&
+                progressPathElement.ValueKind == JsonValueKind.String)
+            {
+                var reportedPath = progressPathElement.GetString();
+                if (!string.IsNullOrWhiteSpace(reportedPath) &&
+                    reportedPath.IndexOf('\0', StringComparison.Ordinal) < 0 &&
+                    Path.IsPathFullyQualified(reportedPath))
+                {
+                    progressPath = Path.GetFullPath(reportedPath);
+                }
+            }
+            identity = new BridgeHelloIdentity(
+                pid,
+                instanceId,
+                endpoint.ExpectedBridgeHash,
+                version,
+                progressPath);
             return true;
         }
         catch (JsonException ex)
