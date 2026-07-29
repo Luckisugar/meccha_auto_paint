@@ -24,7 +24,7 @@ internal static class Program
     private const string TextureProbePreservePayload =
         "{\"type\":\"paint_replication_texture_probe\",\"research_texture_target\":\"resolved\",\"research_compact\":true,\"research_texture_preserve_baseline\":true}";
     private const string Usage =
-        "Usage: meccha-live-diagnostics --pid <game-pid> --command <ping|capabilities|replication|texture|material-memory|material-memory-inventory|appearance-emission-isolation-probe|appearance-emission-target-differential|appearance-preview|appearance-color-differential|appearance-preview-hold|manual-preview-hold|appearance-candidate-hold|appearance-candidate-differential|appearance-emissive-zero|appearance-restore|appearance-present-probe|emissive-texture-probe|direct-emissive-channel-probe|bridge-shutdown> [--allow-local-preview] [--allow-direct-stroke] [--allow-bridge-shutdown] [--preview-color-compression <0-10>] [--artifacts <directory>]";
+        "Usage: meccha-live-diagnostics --pid <game-pid> --command <ping|capabilities|replication|texture|material-memory|material-memory-inventory|appearance-emission-isolation-probe|appearance-emission-target-differential|appearance-preview|appearance-color-differential|appearance-preview-hold|manual-preview-hold|appearance-candidate-hold|appearance-candidate-differential|appearance-emissive-zero|appearance-restore|appearance-present-probe|emissive-texture-probe|direct-emissive-channel-probe|bridge-shutdown> [--allow-local-preview] [--allow-direct-stroke] [--allow-bridge-shutdown] [--include-shadows] [--preview-color-compression <0-10>] [--artifacts <directory>]";
 
     private sealed record Options(
         int ProcessId,
@@ -32,6 +32,7 @@ internal static class Program
         bool AllowLocalPreview,
         bool AllowDirectStroke,
         bool AllowBridgeShutdown,
+        bool IncludeShadows,
         string ArtifactRoot,
         double PreviewBrushSize,
         double PreviewRoughness,
@@ -370,7 +371,11 @@ internal static class Program
                     summary["reply"] = await SendAndStoreAsync(
                         client,
                         "appearance-preview",
-                        BuildPreviewPayload(target, autoMaterial: true, emissive: 0.0),
+                        BuildPreviewPayload(
+                            target,
+                            autoMaterial: true,
+                            emissive: 0.0,
+                            includeShadows: options.IncludeShadows),
                         runDirectory,
                         TimeSpan.FromSeconds(20));
                     break;
@@ -386,7 +391,8 @@ internal static class Program
                             autoMaterial: true,
                             emissive: 0.0,
                             appearanceCaptureArtifacts: true,
-                            appearanceDiagnosticSamples: true),
+                            appearanceDiagnosticSamples: true,
+                            includeShadows: options.IncludeShadows),
                         runDirectory,
                         TimeSpan.FromSeconds(20));
                     break;
@@ -398,7 +404,11 @@ internal static class Program
                     var reply = await SendAndStoreAsync(
                         client,
                         "appearance-preview-hold",
-                        BuildPreviewPayload(target, autoMaterial: true, emissive: 0.0),
+                        BuildPreviewPayload(
+                            target,
+                            autoMaterial: true,
+                            emissive: 0.0,
+                            includeShadows: options.IncludeShadows),
                         runDirectory,
                         TimeSpan.FromSeconds(20));
                     summary["reply"] = reply;
@@ -423,6 +433,7 @@ internal static class Program
                             emissive: 0.0,
                             researchArtifacts: true,
                             appearanceDiagnosticSamples: true,
+                            includeShadows: options.IncludeShadows,
                             brushSize: options.PreviewBrushSize,
                             roughness: options.PreviewRoughness,
                             colorCompressionTolerance:
@@ -767,6 +778,7 @@ internal static class Program
         var allowLocalPreview = false;
         var allowDirectStroke = false;
         var allowBridgeShutdown = false;
+        var includeShadows = false;
         var artifacts = Path.Combine(Environment.CurrentDirectory, "artifacts", "live-diagnostics");
         var previewBrushSize = 4.0;
         var previewRoughness = 0.65;
@@ -789,6 +801,9 @@ internal static class Program
                     break;
                 case "--allow-bridge-shutdown":
                     allowBridgeShutdown = true;
+                    break;
+                case "--include-shadows":
+                    includeShadows = true;
                     break;
                 case "--artifacts" when ++index < args.Length && !string.IsNullOrWhiteSpace(args[index]):
                     artifacts = args[index];
@@ -835,6 +850,7 @@ internal static class Program
             allowLocalPreview,
             allowDirectStroke,
             allowBridgeShutdown,
+            includeShadows,
             artifacts,
             previewBrushSize,
             previewRoughness,
@@ -945,6 +961,7 @@ internal static class Program
         bool appearanceDiagnosticSamples = false,
         bool appearanceEmissionIsolationProbe = false,
         bool appearanceEmissionIsolationTargetVisible = false,
+        bool includeShadows = false,
         double brushSize = 4.0,
         double roughness = 0.65,
         double colorCompressionTolerance = 5.0) =>
@@ -981,6 +998,7 @@ internal static class Program
                 side_source_max_uv = 0.08,
                 front_back_source_max_uv = 0.45,
                 auto_material = autoMaterial,
+                include_shadows = includeShadows,
                 metallic = 0.0,
                 roughness,
                 emissive,
@@ -1168,6 +1186,7 @@ internal static class Program
                 property.Name.StartsWith("preview_", StringComparison.Ordinal) ||
                 property.Name.StartsWith("unpreview_", StringComparison.Ordinal) ||
                 property.Name is "material_properties_mode" or "direct_route_only" or
+                    "include_shadows" or
                     "local_paint_rpc" or "local_paint_target_channel" or
                     "paint_target_channel" or "function_paint_at_uv_with_brush_available" or
                     "runtime_paint_component_inventory_detected_count" or

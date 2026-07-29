@@ -941,6 +941,41 @@ int main()
         0.20, 0.19, 0.18};
     const runtime_contract::AppearanceRgb yellow_emission_target{
         1.0, 0.30, 0.01};
+    const runtime_contract::AppearanceRgb shadowed_display{
+        0.04, 0.03, 0.02};
+    const auto shadows_excluded_target =
+        runtime_contract::appearance_source_albedo_target(
+            neutral_emission_base,
+            shadowed_display,
+            yellow_emission_target,
+            false,
+            false);
+    const auto shadows_included_target =
+        runtime_contract::appearance_source_albedo_target(
+            neutral_emission_base,
+            shadowed_display,
+            yellow_emission_target,
+            false,
+            true);
+    const auto emission_target_with_shadows_enabled =
+        runtime_contract::appearance_source_albedo_target(
+            neutral_emission_base,
+            shadowed_display,
+            yellow_emission_target,
+            true,
+            true);
+    if (runtime_contract::appearance_max_channel_delta(
+            shadows_excluded_target,
+            neutral_emission_base) > 0.000001 ||
+        runtime_contract::appearance_max_channel_delta(
+            shadows_included_target,
+            shadowed_display) > 0.000001 ||
+        runtime_contract::appearance_max_channel_delta(
+            emission_target_with_shadows_enabled,
+            yellow_emission_target) > 0.000001)
+    {
+        return 101;
+    }
     const auto scaled_emission_albedo =
         runtime_contract::appearance_parameterized_albedo(
             neutral_emission_base,

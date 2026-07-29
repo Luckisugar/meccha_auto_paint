@@ -12443,6 +12443,7 @@ namespace
 
     struct MeshFirstAppearanceMatchResult
     {
+        bool include_shadows{false};
         bool hdr_available{false};
         bool tone_curve_available{false};
         bool intrinsic_emission_available{false};
@@ -14108,6 +14109,11 @@ namespace
                         sample.appearance_display_r,
                         sample.appearance_display_g,
                         sample.appearance_display_b};
+                    const runtime_contract::AppearanceRgb
+                        emission_albedo{
+                            sample.appearance_emission_albedo_r,
+                            sample.appearance_emission_albedo_g,
+                            sample.appearance_emission_albedo_b};
                     if (force_fallback ||
                         !sample.appearance_supported ||
                         sample.appearance_cluster < 0 ||
@@ -14119,7 +14125,7 @@ namespace
                             !sample.unsafe &&
                             runtime_contract::
                                 appearance_rgb_finite(base);
-                        const auto fallback =
+                        auto fallback =
                             fallback_mode ==
                                     MeshFirstAppearanceFallbackMode::
                                         IntrinsicEmissionDisplayElseBase
@@ -14141,6 +14147,14 @@ namespace
                                 : runtime_contract::
                                       appearance_make_fallback(
                                           display);
+                        if (match.include_shadows &&
+                            !sample.appearance_emission_roi)
+                        {
+                            fallback =
+                                runtime_contract::
+                                    appearance_make_fallback(
+                                        display);
+                        }
                         sample.appearance_albedo_r =
                             fallback.albedo.r;
                         sample.appearance_albedo_g =
@@ -14173,19 +14187,18 @@ namespace
                                 material.emissive);
                     const runtime_contract::AppearanceRgb
                         albedo_target =
-                            emission_active
-                                ? runtime_contract::
-                                      AppearanceRgb{
-                                          sample
-                                              .appearance_emission_albedo_r,
-                                          sample
-                                              .appearance_emission_albedo_g,
-                                          sample
-                                              .appearance_emission_albedo_b}
-                                : display;
+                            runtime_contract::
+                                appearance_source_albedo_target(
+                                    base,
+                                    display,
+                                    emission_albedo,
+                                    sample
+                                        .appearance_emission_roi,
+                                    match.include_shadows);
                     const auto albedo =
                         use_feedback_albedo &&
-                                !emission_active &&
+                                !sample
+                                     .appearance_emission_roi &&
                                 sample
                                     .appearance_feedback_albedo_valid
                             ? runtime_contract::
@@ -14268,7 +14281,8 @@ namespace
                 response_parameters,
                 force_fallback,
                 use_feedback_albedo,
-                MeshFirstAppearanceFallbackMode::BaseColor))
+                MeshFirstAppearanceFallbackMode::
+                    IntrinsicEmissionDisplayElseBase))
         {
             return false;
         }
@@ -17200,6 +17214,7 @@ namespace
         const double tuning_side_source_max_uv = clamp_range(json_number_field(request, "side_source_max_uv", 0.08), 0.001, 0.50);
         const double tuning_front_back_source_max_uv = clamp_range(json_number_field(request, "front_back_source_max_uv", 0.45), 0.001, 2.00);
         const bool tuning_auto_material = json_bool_field(request, "auto_material", false);
+        const bool tuning_include_shadows = json_bool_field(request, "include_shadows", false);
         const double tuning_metallic = clamp_range(json_number_field(request, "metallic", 0.0), 0.0, 1.0);
         const double tuning_roughness = clamp_range(json_number_field(request, "roughness", 1.0), 0.0, 1.0);
         const double tuning_emissive = clamp_range(json_number_field(request, "emissive", 0.0), 0.0, 1.0);
@@ -17375,6 +17390,12 @@ namespace
         metadata += ",\"side_source_max_uv\":" + std::to_string(tuning_side_source_max_uv);
         metadata += ",\"front_back_source_max_uv\":" + std::to_string(tuning_front_back_source_max_uv);
         metadata += ",\"auto_material\":" + std::string(json_bool(tuning_auto_material));
+        metadata += ",\"include_shadows\":" + std::string(json_bool(tuning_include_shadows));
+        metadata += ",\"appearance_shadow_policy\":\"" +
+                    std::string(tuning_include_shadows
+                                    ? "include_source_display"
+                                    : "exclude_source_lighting") +
+                    "\"";
         metadata += ",\"appearance_diagnostic_samples_requested\":" +
                     std::string(json_bool(
                         appearance_diagnostic_samples));
@@ -19026,7 +19047,7 @@ namespace
                                                                  &appearance_capture_pool);
                 record_appearance_capture(
                     appearance_final_hdr);
-                if (tuning_auto_material &&
+                if (appearance_source_feedback_requested &&
                     std::chrono::steady_clock::now() <
                     appearance_preprocessing_deadline)
                 {
@@ -19214,11 +19235,11 @@ namespace
                                                                        &appearance_capture_pool);
                     record_appearance_capture(
                         appearance_tone_curve);
-                    // Geometry evidence is only required for Auto Material's
-                    // intrinsic-emission segmentation. Manual colour feedback
-                    // holds M/R/E fixed and therefore needs only source and
-                    // target colour response.
-                    if (tuning_auto_material &&
+                    // Intrinsic source decomposition is shared by Auto
+                    // Material and fixed Manual material. M/R/E policy is
+                    // selected only after the same shadow-aware source colour
+                    // has been built.
+                    if (appearance_source_feedback_requested &&
                         std::chrono::steady_clock::now() < appearance_preprocessing_deadline)
                     {
                         appearance_normal = sdk_capture_front_colors(ref,
@@ -19232,7 +19253,7 @@ namespace
                         record_appearance_capture(
                             appearance_normal);
                     }
-                    if (tuning_auto_material &&
+                    if (appearance_source_feedback_requested &&
                         std::chrono::steady_clock::now() < appearance_preprocessing_deadline)
                     {
                         appearance_depth = sdk_capture_front_colors(ref,
@@ -19276,6 +19297,8 @@ namespace
                     &appearance_intrinsic_emission,
                     &appearance_normal,
                     &appearance_depth);
+                appearance_match.include_shadows =
+                    tuning_include_shadows;
                 if (manual_color_feedback_requested)
                 {
                     metadata +=
@@ -21104,7 +21127,9 @@ namespace
                 appearance_match_reason =
                     "shared_albedo_response_not_run";
                 appearance_fallback_color_mode =
-                    "shared_display_color_fixed_material";
+                    appearance_match.include_shadows
+                        ? "shared_display_color_fixed_material"
+                        : "shared_intrinsic_base_fixed_material";
                 auto manual_display_parameters =
                     runtime_contract::
                         appearance_fixed_material_parameters(
@@ -21404,6 +21429,8 @@ namespace
                                 &appearance_normal,
                                 &appearance_depth,
                                 &e0_isolation.noise);
+                        appearance_match.include_shadows =
+                            tuning_include_shadows;
                         appearance_emission_roi_samples =
                             appearance_match
                                 .emission_roi_samples;

@@ -15,6 +15,7 @@ var tests = new List<(string Name, Action Run)>
     ("app defaults use 99 percent opacity", AppDefaultsUse99PercentOpacity),
     ("ESP persists role colors and migrates legacy team-relative settings", EspRoleColorsPersistAndMigrateLegacySettings),
     ("payload sends a single brush and compression tolerance", PayloadSendsSingleBrushPipeline),
+    ("payload carries the independent include shadows policy", PayloadCarriesIndependentIncludeShadowsPolicy),
     ("image payload carries a full canonical canvas", ImagePayloadCarriesFullCanonicalCanvas),
     ("image transparency fills regions before painting opaque pixels", ImageTransparencyFillsRegionsBeforePaintingOpaquePixels),
     ("image region skip suppresses only Fill", ImageRegionSkipSuppressesOnlyFill),
@@ -83,6 +84,8 @@ var tests = new List<(string Name, Action Run)>
     ("diagnostics log write is best effort when file is locked", DiagnosticsLogWriteIsBestEffortWhenFileLocked),
     ("runtime log write is best effort when file is locked", RuntimeLogWriteIsBestEffortWhenFileLocked),
     ("auto material defaults off", AutoMaterialDefaultsOff),
+    ("include shadows defaults off", IncludeShadowsDefaultsOff),
+    ("include shadows persists", IncludeShadowsPersists),
     ("ESP snaplines default on", EspSnaplinesDefaultOn),
     ("regions default to side and back paint", RegionsDefaultToSideAndBackPaint),
     ("image design defaults are safe and persist", ImageDesignDefaultsAreSafeAndPersist),
@@ -100,7 +103,9 @@ var tests = new List<(string Name, Action Run)>
     ("bridge messages are user friendly", BridgeMessagesAreUserFriendly),
     ("settings detect supported system language", SettingsDetectSupportedSystemLanguage),
     ("ui snapshot exposes a single brush", UiSnapshotExposesSingleBrush),
+    ("ui snapshot exposes include shadows independently", UiSnapshotExposesIncludeShadowsIndependently),
     ("web ui exposes one brush slider and compression tolerance", WebUiExposesSingleBrushSliderAndCompressionTolerance),
+    ("web ui exposes the include shadows toggle", WebUiExposesIncludeShadowsToggle),
     ("web ui persists image designs through the tabbed editor", WebUiImagePaintEditorUsesSavedTransaction),
     ("web ui keeps a running paint editable as a next-run draft", WebUiKeepsRunningPaintEditableAsNextRunDraft),
     ("web ui preserves image actions during paint snapshots", WebUiPreservesImageActionsDuringPaintSnapshots),
@@ -132,6 +137,7 @@ var tests = new List<(string Name, Action Run)>
     ("host session reset restores setting default", HostSessionResetRestoresDefault),
     ("host session resets the brush section with current vocabulary", HostSessionResetsBrushSectionWithCurrentVocabulary),
     ("host session updates a single brush", HostSessionUpdatesSingleBrush),
+    ("host session updates include shadows", HostSessionUpdatesIncludeShadows),
     ("host session rolls back invalid hotkey update", HostSessionRollsBackInvalidHotkeyUpdate),
     ("host session applies multiple setting updates atomically", HostSessionAppliesMultipleSettingUpdatesAtomically),
     ("host session rolls back duplicate hotkey batch", HostSessionRollsBackDuplicateHotkeyBatch),
@@ -675,6 +681,26 @@ static void PayloadSendsSingleBrushPipeline()
         "payload should send the compression tolerance");
     Assert(!tuning.TryGetProperty("brush_1_size_texels", out _) && !tuning.TryGetProperty("brush_2_size_texels", out _),
         "payload should not send retired two-brush keys");
+}
+
+static void PayloadCarriesIndependentIncludeShadowsPolicy()
+{
+    var settings = new AppSettings();
+    settings.Paint.AutoMaterial = false;
+    settings.Paint.IncludeShadows = true;
+
+    var payload = BridgePayloadBuilder.BuildPaintPayload(
+        settings,
+        42,
+        "Game.exe",
+        new PaintRequestOptions());
+    using var doc = JsonDocument.Parse(payload);
+    var tuning = doc.RootElement.GetProperty("tuning");
+
+    Assert(!tuning.GetProperty("auto_material").GetBoolean(),
+        "include shadows must not enable Auto Material");
+    Assert(tuning.GetProperty("include_shadows").GetBoolean(),
+        "payload should send include shadows independently");
 }
 
 static void ImagePayloadCarriesFullCanonicalCanvas()
@@ -2273,6 +2299,25 @@ static void LocalesHaveCompleteKeys()
         ["zh-Hans"] = "自动材质",
         ["zh-Hant"] = "自動材質"
     };
+    var expectedSceneLighting = new Dictionary<string, string>
+    {
+        ["en"] = "Scene Lighting",
+        ["id"] = "Cahaya adegan",
+        ["de"] = "Szenenlicht",
+        ["es"] = "Luz de escena",
+        ["fr"] = "Éclairage scène",
+        ["it"] = "Luce di scena",
+        ["nl"] = "Scènelicht",
+        ["pl"] = "Światło sceny",
+        ["pt-BR"] = "Luz da cena",
+        ["vi"] = "Ánh sáng cảnh",
+        ["tr"] = "Sahne ışığı",
+        ["ru"] = "Свет сцены",
+        ["ja"] = "シーン照明",
+        ["ko"] = "씬 조명",
+        ["zh-Hans"] = "场景光照",
+        ["zh-Hant"] = "場景光照"
+    };
     var englishKeys = all["en"].Keys.Order().ToArray();
     foreach (var locale in LocalizationCatalog.SupportedLocales)
     {
@@ -2281,6 +2326,8 @@ static void LocalesHaveCompleteKeys()
         Assert(englishKeys.SequenceEqual(keys), $"key mismatch for {locale.Code}");
         Assert(all[locale.Code]["auto.material"] == expectedAutoMaterial[locale.Code],
             $"auto.material must use the Auto Material product name in {locale.Code}");
+        Assert(all[locale.Code]["include.shadows"] == expectedSceneLighting[locale.Code],
+            $"include.shadows must use a concise Scene Lighting label in {locale.Code}");
     }
 }
 
@@ -2446,6 +2493,24 @@ static void AutoMaterialDefaultsOff()
     Assert(!new AppSettings().Paint.AutoMaterial, "auto material should default off");
 }
 
+static void IncludeShadowsDefaultsOff()
+{
+    Assert(!new AppSettings().Paint.IncludeShadows, "include shadows should default off");
+}
+
+static void IncludeShadowsPersists()
+{
+    using var temp = new TempHome();
+    var paths = new AppPaths("include-shadows-persistence-test");
+    var settings = new AppSettings();
+    settings.Paint.IncludeShadows = true;
+
+    new SettingsStore(paths).Save(settings);
+    var loaded = new SettingsStore(paths).Load();
+
+    Assert(loaded.Paint.IncludeShadows, "include shadows should survive a settings round-trip");
+}
+
 static void EspSnaplinesDefaultOn()
 {
     var esp = new AppSettings().Esp;
@@ -2585,6 +2650,35 @@ static void UiSnapshotExposesSingleBrush()
         "snapshot should not expose retired two-brush fields");
 }
 
+static void UiSnapshotExposesIncludeShadowsIndependently()
+{
+    var snapshot = new PaintSnapshot(
+        5.0,
+        false,
+        0.0,
+        1.0,
+        0.0,
+        "skip",
+        "paint",
+        "paint",
+        "#FFFFFF",
+        0.0,
+        1.0,
+        0.0,
+        false,
+        IncludeShadows: true);
+    var json = JsonSerializer.Serialize(snapshot, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    });
+    using var doc = JsonDocument.Parse(json);
+
+    Assert(!doc.RootElement.GetProperty("autoMaterial").GetBoolean(),
+        "include shadows must not change Auto Material in the UI snapshot");
+    Assert(doc.RootElement.GetProperty("includeShadows").GetBoolean(),
+        "the UI snapshot should expose include shadows");
+}
+
 static void WebUiExposesSingleBrushSliderAndCompressionTolerance()
 {
     var repository = FindRepositoryRoot();
@@ -2632,6 +2726,46 @@ static void WebUiKeepsThemeColorOnReadonlyControls()
         "passive themed controls must reject keyboard and label-driven edits outside Edit mode, including dependent locks");
     Assert(app.Contains("document.activeElement === control", StringComparison.Ordinal),
         "locking a previously focused themed control must blur it before keyboard input can change its visible value");
+}
+
+static void WebUiExposesIncludeShadowsToggle()
+{
+    var repository = FindRepositoryRoot();
+    var index = File.ReadAllText(Path.Combine(
+        repository,
+        "src",
+        "csharp",
+        "MecchaCamouflage.WebHost",
+        "web",
+        "index.html"));
+    var app = File.ReadAllText(Path.Combine(
+        repository,
+        "src",
+        "csharp",
+        "MecchaCamouflage.WebHost",
+        "web",
+        "app.js"));
+
+    Assert(index.Contains("id=\"include-shadows\"", StringComparison.Ordinal) &&
+           index.Contains("data-i18n=\"include.shadows\"", StringComparison.Ordinal),
+        "the Material group should expose a localized Scene Lighting checkbox");
+    var autoMaterialIndex = index.IndexOf("id=\"auto-material\"", StringComparison.Ordinal);
+    var includeShadowsIndex = index.IndexOf("id=\"include-shadows\"", StringComparison.Ordinal);
+    var autoMaterialFieldIndex = index.LastIndexOf(
+        "<label class=\"field\">",
+        autoMaterialIndex,
+        StringComparison.Ordinal);
+    var includeShadowsFieldIndex = index.LastIndexOf(
+        "<label class=\"field\">",
+        includeShadowsIndex,
+        StringComparison.Ordinal);
+    Assert(autoMaterialFieldIndex >= 0 &&
+           includeShadowsFieldIndex > autoMaterialFieldIndex,
+        "Auto Material and Scene Lighting should occupy the left and right columns of the same settings row");
+    Assert(app.Contains("setChecked(\"include-shadows\", paint.includeShadows)", StringComparison.Ordinal) &&
+           app.Contains("bindCheckbox(\"include-shadows\", \"paint.includeShadows\")", StringComparison.Ordinal) &&
+           app.Contains("\"paint.includeShadows\"", StringComparison.Ordinal),
+        "the Scene Lighting checkbox should participate in snapshot rendering, editing, and diffing");
 }
 
 static void WebUiImagePaintEditorUsesSavedTransaction()
@@ -3523,6 +3657,23 @@ static void HostSessionUpdatesSingleBrush()
 
     var snapshot = session.GetSnapshotAsync().GetAwaiter().GetResult();
     Assert(Math.Abs(snapshot.Settings.Paint.BrushSizeTexels - 6.5) < 0.000001, "snapshot should expose the single brush");
+}
+
+static void HostSessionUpdatesIncludeShadows()
+{
+    using var temp = new TempHome();
+    var session = new HostSession("host-include-shadows-sync-test");
+
+    var update = session.UpdateSetting(
+        "paint.includeShadows",
+        JsonSerializer.SerializeToElement(true));
+
+    Assert(update.Success, update.Message);
+    Assert(session.Settings.Paint.IncludeShadows,
+        "host settings should update include shadows");
+    var snapshot = session.GetSnapshotAsync().GetAwaiter().GetResult();
+    Assert(snapshot.Settings.Paint.IncludeShadows,
+        "the updated include shadows value should reach the UI snapshot");
 }
 
 static void HostSessionRollsBackInvalidHotkeyUpdate()

@@ -500,6 +500,8 @@
                  "fill_stroke_radius_texels",
                  "fill_stroke_radius_source",
                  "auto_material",
+                 "include_shadows",
+                 "appearance_shadow_policy",
                  "material_properties_requested_mode",
                  "material_properties_mode",
                  "material_properties_source",

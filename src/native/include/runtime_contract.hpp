@@ -2257,6 +2257,24 @@ namespace runtime_contract
                                         base_linear.b + (display_linear.b - base_linear.b) * safe_blend});
     }
 
+    inline AppearanceRgb appearance_source_albedo_target(
+        const AppearanceRgb& base_linear,
+        const AppearanceRgb& display_linear,
+        const AppearanceRgb& emission_linear,
+        bool emission_roi,
+        bool include_shadows)
+    {
+        if (emission_roi && appearance_rgb_finite(emission_linear))
+        {
+            return appearance_clamp_albedo(emission_linear);
+        }
+        if (include_shadows && appearance_rgb_finite(display_linear))
+        {
+            return appearance_clamp_albedo(display_linear);
+        }
+        return appearance_clamp_albedo(base_linear);
+    }
+
     inline AppearanceRgb appearance_parameterized_albedo(
         const AppearanceRgb& base_linear,
         const AppearanceRgb& target_linear,

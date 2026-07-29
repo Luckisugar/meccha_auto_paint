@@ -999,6 +999,7 @@ internal static class ResearchRunner
             back_region_mode = SettingsStore.RegionModeText(paint.BackRegionMode),
             fill_color = paint.FillColor.ToHex(),
             auto_material = paint.AutoMaterial,
+            include_shadows = paint.IncludeShadows,
             metallic = paint.Metallic,
             roughness = paint.Roughness,
             emissive = paint.Emissive,

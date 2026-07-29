@@ -22,6 +22,7 @@ public sealed class HostSession
         "paint.brushSizeTexels",
         "paint.colorCompressionTolerance",
         "paint.autoMaterial",
+        "paint.includeShadows",
         "paint.metallic",
         "paint.roughness",
         "paint.emissive",
@@ -1253,6 +1254,8 @@ public sealed class HostSession
                          "first_stroke_emissive",
                          "appearance_match_status",
                          "appearance_match_reason",
+                         "include_shadows",
+                         "appearance_shadow_policy",
                          "appearance_fallback_color_mode",
                          "appearance_emission_isolation_probe_ok",
                          "appearance_production_connected",
@@ -1541,6 +1544,8 @@ public sealed class HostSession
             foreach (var name in new[]
                      {
                          "appearance_match_reason",
+                         "include_shadows",
+                         "appearance_shadow_policy",
                          "appearance_fallback_color_mode",
                          "appearance_paint_emissive_supported",
                          "appearance_paint_emissive_reason",
@@ -2111,7 +2116,8 @@ public sealed class HostSession
                 paint.FillRoughness,
                 paint.FillEmissive,
                 paint.UsesFill,
-                paint.ColorCompressionTolerance),
+                paint.ColorCompressionTolerance,
+                paint.IncludeShadows),
             new AppSnapshot(
                 settings.GameProcessName,
                 settings.AlwaysOnTop,
@@ -2160,7 +2166,8 @@ public sealed class HostSession
         var sections = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
         {
             ["paint.brush"] = map["paint.brushSizeTexels"] || map["paint.colorCompressionTolerance"],
-            ["paint.material"] = map["paint.autoMaterial"] || map["paint.metallic"] || map["paint.roughness"] || map["paint.emissive"],
+            ["paint.material"] = map["paint.autoMaterial"] || map["paint.includeShadows"] ||
+                                 map["paint.metallic"] || map["paint.roughness"] || map["paint.emissive"],
             ["regions"] = map["paint.frontRegionMode"] || map["paint.sideRegionMode"] || map["paint.backRegionMode"],
             ["fill.material"] = map["paint.fillColor"] || map["paint.fillMetallic"] || map["paint.fillRoughness"] || map["paint.fillEmissive"],
             ["image"] = settings.Image.Enabled != defaults.Image.Enabled || settings.Image.Revision != defaults.Image.Revision,
@@ -2178,6 +2185,7 @@ public sealed class HostSession
     {
         "paint.brushSizeTexels" => Nearly(left.Paint.BrushSizeTexels, right.Paint.BrushSizeTexels),
         "paint.autoMaterial" => left.Paint.AutoMaterial == right.Paint.AutoMaterial,
+        "paint.includeShadows" => left.Paint.IncludeShadows == right.Paint.IncludeShadows,
         "paint.metallic" => Nearly(left.Paint.Metallic, right.Paint.Metallic),
         "paint.roughness" => Nearly(left.Paint.Roughness, right.Paint.Roughness),
         "paint.emissive" => Nearly(left.Paint.Emissive, right.Paint.Emissive),
@@ -2219,6 +2227,7 @@ public sealed class HostSession
         {
             case "paint.brushSizeTexels": settings.Paint.BrushSizeTexels = defaults.Paint.BrushSizeTexels; break;
             case "paint.autoMaterial": settings.Paint.AutoMaterial = defaults.Paint.AutoMaterial; break;
+            case "paint.includeShadows": settings.Paint.IncludeShadows = defaults.Paint.IncludeShadows; break;
             case "paint.metallic": settings.Paint.Metallic = defaults.Paint.Metallic; break;
             case "paint.roughness": settings.Paint.Roughness = defaults.Paint.Roughness; break;
             case "paint.emissive": settings.Paint.Emissive = defaults.Paint.Emissive; break;
@@ -2261,6 +2270,7 @@ public sealed class HostSession
         {
             case "paint.brushSizeTexels": settings.Paint.BrushSizeTexels = value.GetDouble(); break;
             case "paint.autoMaterial": settings.Paint.AutoMaterial = value.GetBoolean(); break;
+            case "paint.includeShadows": settings.Paint.IncludeShadows = value.GetBoolean(); break;
             case "paint.metallic": settings.Paint.Metallic = value.GetDouble(); break;
             case "paint.roughness": settings.Paint.Roughness = value.GetDouble(); break;
             case "paint.emissive": settings.Paint.Emissive = value.GetDouble(); break;
