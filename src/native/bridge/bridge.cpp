@@ -35489,6 +35489,68 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         }
     }
 
+    auto esp_native_present_sample_probe_native() -> std::string
+    {
+        const auto capture =
+            esp_native_request_last_backbuffer_samples(1500);
+        std::string artifact_path{};
+        if (capture.ok)
+        {
+            const auto dir = runtime_log_dir_path();
+            if (!dir.empty())
+            {
+                std::string csv{
+                    "plan,cluster,source_emissive,present_encoded_r,"
+                    "present_encoded_g,present_encoded_b\n"};
+                csv.reserve(capture.samples.size() * 96U);
+                for (const auto& sample : capture.samples)
+                {
+                    csv += std::to_string(sample.plan_index) + "," +
+                           std::to_string(sample.cluster) + "," +
+                           std::to_string(sample.source_emissive) + "," +
+                           std::to_string(sample.encoded.r) + "," +
+                           std::to_string(sample.encoded.g) + "," +
+                           std::to_string(sample.encoded.b) + "\n";
+                }
+                const auto path =
+                    dir + L"\\appearance-present-probe-" +
+                    std::to_wstring(GetTickCount64()) + L".csv";
+                const std::vector<std::uint8_t> bytes(
+                    csv.begin(), csv.end());
+                if (write_binary_file_w(path, bytes))
+                {
+                    artifact_path = wstring_to_utf8(path);
+                }
+            }
+        }
+        const auto metadata =
+            "\"appearance_present_capture_ok\":" +
+            std::string(json_bool(capture.ok)) +
+            ",\"appearance_present_capture_samples\":" +
+            std::to_string(capture.samples.size()) +
+            ",\"appearance_present_capture_failure\":\"" +
+            json_escape(capture.failure) + "\"" +
+            ",\"appearance_present_capture_width\":" +
+            std::to_string(capture.width) +
+            ",\"appearance_present_capture_height\":" +
+            std::to_string(capture.height) +
+            ",\"appearance_present_capture_format\":\"" +
+            json_escape(esp_native_format_name(capture.format)) + "\"" +
+            ",\"appearance_present_capture_artifact\":\"" +
+            json_escape(artifact_path) + "\"";
+        return response_json(
+            capture.ok,
+            capture.ok ? "appearance_present_probe"
+                       : "appearance_present_probe_failed",
+            0,
+            capture.ok ? 0 : 1,
+            capture.ok
+                ? "main viewport samples captured"
+                : "main viewport sample capture failed: " +
+                      capture.failure,
+            metadata);
+    }
+
     auto handle_request(const std::string& line) -> std::string
     {
         const std::string request_type = json_string_field(line, "type", "");
@@ -35513,7 +35575,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         }
         if (line.find("\"type\":\"capabilities\"") != std::string::npos)
         {
-            std::string commands = "[\"ping\",\"capabilities\",\"esp_native_present\",\"esp_native_present_status\",\"esp_native_present_probe\",\"paint_full_route\",\"image_guide\",\"cancel_paint\",\"detach\",\"shutdown\"]";
+            std::string commands = "[\"ping\",\"capabilities\",\"esp_native_present\",\"esp_native_present_status\",\"esp_native_present_probe\",\"appearance_present_probe\",\"appearance_emission_isolation_probe\",\"appearance_preview_emissive_override\",\"paint_full_route\",\"image_guide\",\"cancel_paint\",\"detach\",\"shutdown\"]";
             return std::string("{\"success\":true,\"stage\":\"capabilities\",\"applied\":0,\"failures\":0,") +
                    "\"message\":\"ok\",\"timing_ms\":{}," +
                    "\"metadata\":{\"commands\":" + commands + "," +
@@ -35623,6 +35685,19 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         if (request_type == "esp_native_present_probe")
         {
             return esp_native_present_probe_native(line);
+        }
+        if (request_type == "appearance_present_probe")
+        {
+            return esp_native_present_sample_probe_native();
+        }
+        if (request_type == "appearance_emission_isolation_probe")
+        {
+            return paint_full_route_native(line);
+        }
+        if (request_type ==
+            "appearance_preview_emissive_override")
+        {
+            return paint_full_route_native(line);
         }
         if (line.find("\"type\":\"paint_full_route\"") != std::string::npos)
         {

@@ -32,6 +32,7 @@ var tests = new List<(string Name, Action Run)>
     ("native Present ESP has no external frame-render fallback", NativePresentEspHasNoExternalFallback),
     ("native Present ESP hooks queue, owns wrapped backbuffers, and reports lifecycle state", NativePresentEspOwnsRendererLifecycle),
     ("runtime keeps one resident bridge across GUI updates", RuntimeKeepsResidentBridgeAcrossGuiUpdates),
+    ("research hot reload quiesces and serializes bridge generations", ResearchHotReloadQuiescesAndSerializesBridgeGenerations),
     ("connected game process remains pinned", ConnectedGameProcessRemainsPinned),
     ("live game identity blocks target replacement", LiveGameIdentityBlocksTargetReplacement),
     ("unresponsive matching bridge is not reinjected", UnresponsiveMatchingBridgeIsNotReinjected),
@@ -59,6 +60,7 @@ var tests = new List<(string Name, Action Run)>
     ("native preview expires snapshots after a component change", NativePreviewExpiresSnapshotsAfterComponentChange),
     ("native preview returns before recorded-stroke dispatch", NativePreviewReturnsBeforeRecordedStrokeDispatch),
     ("native Appearance Match uses preview feedback and preserves manual routes", NativeAppearanceMatchUsesPreviewFeedbackAndPreservesManualRoutes),
+    ("intrinsic emission probe is diagnostic-only and observable", IntrinsicEmissionProbeIsDiagnosticOnlyAndObservable),
     ("appearance capture hides only the live brush visual", AppearanceCaptureHidesOnlyLiveBrushVisual),
     ("payload uses native paint route and includes fill material", PayloadUsesNativePaintRouteAndFillMaterial),
     ("legacy mirror-like Fill PBR defaults migrate to manual material", LegacyFillPbrDefaultsMigrateToManualMaterial),
@@ -1242,8 +1244,33 @@ static void RuntimeKeepsResidentBridgeAcrossGuiUpdates()
     Assert(runtime.Contains("TryAttachResidentCore", StringComparison.Ordinal) &&
            !runtime.Contains("ReplaceObsoleteResidentCoreAsync", StringComparison.Ordinal) &&
            !runtime.Contains("TryGetPackagedBridgeHash", StringComparison.Ordinal) &&
+           runtime.Contains("LogResidentBridgeBinaryState", StringComparison.Ordinal) &&
+           runtime.Contains("restart the game before testing native changes", StringComparison.Ordinal) &&
            !runtime.Contains("WaitForResidentCoreExitAsync", StringComparison.Ordinal),
-        "a GUI update must reconnect to its authenticated resident bridge instead of stacking another native DLL in a live game");
+        "a GUI update must reconnect to its authenticated resident bridge instead of stacking another native DLL in a live game, while reporting an old resident binary explicitly");
+}
+
+static void ResearchHotReloadQuiescesAndSerializesBridgeGenerations()
+{
+    var root = FindRepositoryRoot();
+    var script = ReadRepositoryText(Path.Combine(
+        root,
+        "scripts",
+        "research",
+        "hot-reload-bridge.ps1"));
+
+    Assert(script.Contains(@"Local\MecchaCamouflage.Inject.$TargetPid", StringComparison.Ordinal) &&
+           script.Contains("active_paint_quiescent", StringComparison.Ordinal) &&
+           script.Contains("hook_callbacks_quiescent", StringComparison.Ordinal) &&
+           script.Contains("Wait-ResidentCoreAbsent", StringComparison.Ordinal) &&
+           script.Contains("runtime-bridge-hot-$hash.dll", StringComparison.Ordinal) &&
+           script.Contains("MaxGenerations", StringComparison.Ordinal) &&
+           script.Contains("ProfileDirectory", StringComparison.Ordinal) &&
+           script.Contains(@"mesh-profiles", StringComparison.Ordinal) &&
+           script.Contains("Get-FileHash -Algorithm SHA256", StringComparison.Ordinal) &&
+           script.Contains("Invoke-Injector", StringComparison.Ordinal) &&
+           script.Contains("redacted", StringComparison.Ordinal),
+        "research hot reload must hold the production injection mutex, verify native quiescence, inject a content-addressed DLL, cap inert generations, and never expose bridge credentials");
 }
 
 static void ConnectedGameProcessRemainsPinned()
@@ -2084,6 +2111,39 @@ static void NativeAppearanceMatchUsesPreviewFeedbackAndPreservesManualRoutes()
            bridge.Contains("local_render_target_write_budget", StringComparison.Ordinal) &&
            bridge.Contains("local_logical_sample_batch_limit", StringComparison.Ordinal),
         "normal local paint must report its CPU and write-budget pacing for live performance checks");
+}
+
+static void IntrinsicEmissionProbeIsDiagnosticOnlyAndObservable()
+{
+    var root = FindRepositoryRoot();
+    var bridge = ReadRepositoryText(Path.Combine(
+        root, "src", "native", "bridge", "bridge.cpp"));
+    var bridgeJson = ReadRepositoryText(Path.Combine(
+        root, "src", "native", "bridge", "bridge_json.inc"));
+    var diagnostics = ReadRepositoryText(Path.Combine(
+        root,
+        "src",
+        "csharp",
+        "MecchaCamouflage.LiveDiagnostics",
+        "Program.cs"));
+
+    Assert(bridge.Contains("SdkSceneCaptureProfile::IntrinsicEmission", StringComparison.Ordinal) &&
+           bridge.Contains("SetShowFlagSettings", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_intrinsic_emission_show_flags", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_show_flags_readback_ok", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_emission_isolation_probe_complete", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_preview_count\\\":0", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_direct_stroke_count\\\":0", StringComparison.Ordinal) &&
+           bridge.Contains("appearance_production_connected\\\":false", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_isolation_energy_mean\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_show_flags_requested_names\"", StringComparison.Ordinal) &&
+           diagnostics.Contains("appearance-emission-isolation-probe", StringComparison.Ordinal) &&
+           diagnostics.Contains("appearance-emission-target-differential", StringComparison.Ordinal) &&
+           diagnostics.Contains("appearance-color-differential", StringComparison.Ordinal) &&
+           diagnostics.Contains("manual-preview-hold", StringComparison.Ordinal) &&
+           diagnostics.Contains("appearanceCaptureArtifacts: true", StringComparison.Ordinal) &&
+           diagnostics.Contains("appearance_emission_isolation_target_visible", StringComparison.Ordinal),
+        "the intrinsic emission backend must expose applied ShowFlags and E0/E1 research evidence without applying Preview or direct production strokes");
 }
 
 static void AppearanceCaptureHidesOnlyLiveBrushVisual()
