@@ -392,6 +392,20 @@ try {
     }
 
     Invoke-BuildStep -Name $(if ($BuildMode -eq "DevLooseSelfContained") { "publish WebHost loose dev" } else { "publish WebHost single-file" }) -ScriptBlock {
+        # External EmbeddedResource inputs are not part of the default C#
+        # incremental compile graph. Remove only the WebHost artifacts so a
+        # changed mesh profile or native binary cannot be bundled from a stale
+        # assembly while retaining restored dependencies and other projects.
+        $webHostArtifactPaths = @(
+            (Join-Path $DotNetArtifactRoot "bin\MecchaCamouflage.WebHost"),
+            (Join-Path $DotNetArtifactRoot "obj\MecchaCamouflage.WebHost")
+        )
+        foreach ($artifactPath in $webHostArtifactPaths) {
+            if (Test-Path -LiteralPath $artifactPath) {
+                Remove-Item -LiteralPath $artifactPath -Recurse -Force
+            }
+        }
+
         $publishArgs = @(
             "publish", $WebHostProject,
             "-c", "Release",

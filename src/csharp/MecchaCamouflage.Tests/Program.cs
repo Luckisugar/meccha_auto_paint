@@ -175,6 +175,7 @@ var tests = new List<(string Name, Action Run)>
     ("runtime launch stages a local Windows copy", RuntimeLaunchStagesLocalWindowsCopy),
     ("direct bridge names avoid historical loader pattern", DirectBridgeNamesAvoidHistoricalLoaderPattern),
     ("release packaging contains only direct bridge components", ReleasePackagingContainsOnlyDirectBridge),
+    ("release publish rebuilds embedded runtime assets", ReleasePublishRebuildsEmbeddedRuntimeAssets),
     ("required submodules are declared and checked out", RequiredSubmodulesAreDeclaredAndCheckedOut),
     ("missing Defender exclusion is added with elevation", MissingDefenderExclusionIsAddedWithElevation),
     ("Defender exclusion marker prevents repeated elevation", DefenderExclusionMarkerPreventsRepeatedElevation),
@@ -5319,6 +5320,20 @@ static void ReleasePackagingContainsOnlyDirectBridge()
     var release = File.ReadAllText(Path.Combine(root, "scripts", "release.ps1"));
     Assert(release.Contains("Release output directory contains debug artifacts", StringComparison.Ordinal),
         "release packaging must reject a package directory containing debug sidecars");
+}
+
+static void ReleasePublishRebuildsEmbeddedRuntimeAssets()
+{
+    var root = FindRepositoryRoot();
+    var build = File.ReadAllText(Path.Combine(root, "scripts", "build.ps1"));
+    var publishStart = build.IndexOf("\"publish\", $WebHostProject", StringComparison.Ordinal);
+    Assert(publishStart >= 0, "release WebHost publish command must remain discoverable");
+    var publishBlock = build[
+        build.LastIndexOf("Invoke-BuildStep", publishStart, StringComparison.Ordinal)..publishStart];
+    Assert(publishBlock.Contains("bin\\MecchaCamouflage.WebHost", StringComparison.Ordinal) &&
+           publishBlock.Contains("obj\\MecchaCamouflage.WebHost", StringComparison.Ordinal) &&
+           publishBlock.Contains("Remove-Item -LiteralPath $artifactPath -Recurse -Force", StringComparison.Ordinal),
+        "release packaging must discard only stale WebHost artifacts before embedding current mesh profiles and native assets");
 }
 
 static void RequiredSubmodulesAreDeclaredAndCheckedOut()
