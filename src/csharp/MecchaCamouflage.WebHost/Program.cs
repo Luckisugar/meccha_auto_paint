@@ -10,6 +10,11 @@ internal static class Program
     private static void Main(string[] args)
     {
         var paths = new MecchaCamouflage.Core.AppPaths(VersionInfo.Current);
+        if (args.Any(argument => string.Equals(argument, "--verify-runtime-bundle", StringComparison.Ordinal)))
+        {
+            Environment.ExitCode = VerifyRuntimeBundle(paths);
+            return;
+        }
         var startupCatalog = LocalizationCatalog.Load();
         var startupLocale = LocalizationCatalog.DetectSystemLanguage();
         DiagnosticsState.Initialize(paths, VersionInfo.Current);
@@ -60,6 +65,33 @@ internal static class Program
                 startupCatalog.Text(startupLocale, "app.title"),
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
+        }
+    }
+
+    private static int VerifyRuntimeBundle(AppPaths paths)
+    {
+        try
+        {
+            var bundle = NativeRuntimeBundle.CreatePackaged(paths);
+            Console.Out.WriteLine(JsonSerializer.Serialize(new
+            {
+                success = true,
+                app_version = VersionInfo.Current,
+                package_asset_set_id = PackagedAssets.CurrentAssetSetId,
+                runtime_bundle_id = bundle.Id,
+                bridge_sha256 = bundle.BridgeSha256,
+                profiles = bundle.Profiles.Select(profile => new
+                {
+                    relative_path = profile.RelativePath,
+                    sha256 = profile.Sha256
+                })
+            }));
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine("Runtime bundle verification failed: " + exception.Message);
+            return 1;
         }
     }
 

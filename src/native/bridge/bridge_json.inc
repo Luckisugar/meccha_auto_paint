@@ -1178,7 +1178,7 @@
         out += std::to_string(failures);
         out += ",\"message\":\"";
         out += json_escape(message);
-        out += "\",\"timing_ms\":{},\"metadata\":{\"bridge\":\"meccha-direct-bridge-v1\"";
+        out += "\",\"timing_ms\":{},\"metadata\":{\"bridge\":\"meccha-direct-bridge-v2\"";
         if (!metadata.empty())
         {
             const auto sanitized = sanitize_json_non_finite_numbers(

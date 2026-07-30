@@ -51,3 +51,8 @@ jobs:
           $exePath = ".build/package/meccha-camouflage-$($env:BUILD_VERSION).exe"
           if (-not (Test-Path $exePath)) { throw "package exe missing" }
           if ((Get-Item $exePath).Length -le 10000000) { throw "package exe is unexpectedly small" }
+          .\scripts\verify-runtime-bundle.ps1 `
+            -ExePath $exePath `
+            -ExpectedVersion $env:BUILD_VERSION `
+            -BridgePath ".build/obj/$env:BUILD_VERSION/package-native/runtime-bridge.dll" `
+            -ProfileDirectory "resources/mesh-profiles"

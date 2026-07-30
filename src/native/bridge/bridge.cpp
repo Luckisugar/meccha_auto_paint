@@ -151,21 +151,22 @@ namespace
     // mapping carries only the already-authenticated loopback endpoint for
     // this PID; it lets a later GUI attach instead of injecting a second
     // Present owner over the first one.
-    constexpr std::uint32_t BridgeResidentCoreMagicV1 = 0x3152434D; // "MCR1"
-    constexpr std::uint32_t BridgeResidentCoreAbiV1 = 1;
-    struct BridgeResidentCoreV1
+    constexpr std::uint32_t BridgeResidentCoreMagicV2 = 0x3252434D; // "MCR2"
+    constexpr std::uint32_t BridgeResidentCoreAbiV2 = 2;
+    struct BridgeResidentCoreV2
     {
-        std::uint32_t magic{BridgeResidentCoreMagicV1};
+        std::uint32_t magic{BridgeResidentCoreMagicV2};
         std::uint32_t size{0};
-        std::uint32_t abi{BridgeResidentCoreAbiV1};
+        std::uint32_t abi{BridgeResidentCoreAbiV2};
         std::uint32_t pid{0};
         std::uint32_t port{0};
-        std::uint32_t protocol{BridgeBootstrapProtocolV1};
+        std::uint32_t protocol{BridgeBootstrapProtocolV2};
         std::uint8_t instance_guid[16]{};
         std::uint8_t token[32]{};
         std::uint8_t sha256[32]{};
+        std::uint8_t runtime_bundle_sha256[32]{};
     };
-    static_assert(sizeof(BridgeResidentCoreV1) == 104, "resident core rendezvous ABI mismatch");
+    static_assert(sizeof(BridgeResidentCoreV2) == 136, "resident core rendezvous ABI mismatch");
     HANDLE g_bridge_resident_core_mapping{nullptr};
     void* g_bridge_resident_core_view{nullptr};
     // Command admission is distinct from the listener lifetime.  Shutdown closes
@@ -179,7 +180,7 @@ namespace
     std::atomic<int> g_paint_request_admission_state{
         static_cast<int>(PaintRequestAdmissionState::Idle)};
     std::mutex g_bridge_start_mutex;
-    BridgeStartBlockV1 g_bridge_identity{};
+    BridgeStartBlockV2 g_bridge_identity{};
     std::atomic<int> g_active_client_handlers{0};
     std::atomic<bool> g_process_event_hook_installed{false};
     std::atomic<std::uintptr_t> g_original_process_event{0};
@@ -1586,18 +1587,30 @@ namespace
         const std::wstring path(module_path, path_length);
         const auto separator = path.find_last_of(L"\\/");
         const std::wstring file_name = separator == std::wstring::npos ? path : path.substr(separator + 1);
-        static constexpr wchar_t DirectBridgePrefix[] = L"meccha-direct-bridge-v1-";
-        constexpr std::size_t PrefixLength = sizeof(DirectBridgePrefix) / sizeof(DirectBridgePrefix[0]) - 1;
-        if (file_name.size() <= PrefixLength)
-        {
-            return false;
-        }
-        for (std::size_t index = 0; index < PrefixLength; ++index)
-        {
-            if (std::towlower(file_name[index]) != DirectBridgePrefix[index])
+        static constexpr wchar_t DirectBridgePrefixV1[] = L"meccha-direct-bridge-v1-";
+        static constexpr wchar_t DirectBridgePrefixV2[] = L"meccha-direct-bridge-v2-";
+        const auto has_prefix = [&file_name](const wchar_t* prefix, std::size_t prefix_length) {
+            if (file_name.size() <= prefix_length)
             {
                 return false;
             }
+            for (std::size_t index = 0; index < prefix_length; ++index)
+            {
+                if (std::towlower(file_name[index]) != prefix[index])
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+        constexpr std::size_t PrefixLengthV1 =
+            sizeof(DirectBridgePrefixV1) / sizeof(DirectBridgePrefixV1[0]) - 1;
+        constexpr std::size_t PrefixLengthV2 =
+            sizeof(DirectBridgePrefixV2) / sizeof(DirectBridgePrefixV2[0]) - 1;
+        if (!has_prefix(DirectBridgePrefixV1, PrefixLengthV1) &&
+            !has_prefix(DirectBridgePrefixV2, PrefixLengthV2))
+        {
+            return false;
         }
         return true;
     }
@@ -4094,7 +4107,7 @@ namespace
     }
 
     auto auto_event_watch_snapshot_json(const char* stage,
-                                        const BridgeStartBlockV1& identity,
+                                        const BridgeStartBlockV2& identity,
                                         std::uint64_t generation) -> std::string
     {
         int available = 0;
@@ -4112,6 +4125,8 @@ namespace
         out += bytes_to_hex(identity.instance_guid, 16);
         out += "\",\"bridge_hash\":\"";
         out += bytes_to_hex(identity.sha256, 32);
+        out += "\",\"runtime_bundle_id\":\"";
+        out += bytes_to_hex(identity.runtime_bundle_sha256, 32);
         out += "\"";
         out += ",\"generation\":" + std::to_string(generation);
         out += ",\"tick_ms\":";
@@ -4438,7 +4453,7 @@ namespace
         });
 
         const auto generation = g_auto_event_watch_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
-        const BridgeStartBlockV1 identity = g_bridge_identity;
+        const BridgeStartBlockV2 identity = g_bridge_identity;
         g_auto_event_watch_enabled.store(true, std::memory_order_release);
         g_auto_event_watch_writer_running.store(true, std::memory_order_release);
         write_text_file_w(output_path, auto_event_watch_snapshot_json("event_watch_started", identity, generation));
@@ -29947,7 +29962,9 @@ namespace
                                  "\"pid\":" + std::to_string(GetCurrentProcessId()) +
                                  ",\"instance_id\":\"" + bytes_to_hex(g_bridge_identity.instance_guid, 16) + "\"" +
                                  ",\"bridge_hash\":\"" + bytes_to_hex(g_bridge_identity.sha256, 32) + "\"" +
-                                 ",\"protocol_version\":" + std::to_string(BridgeBootstrapProtocolV1) +
+                                 ",\"runtime_bundle_id\":\"" +
+                                     bytes_to_hex(g_bridge_identity.runtime_bundle_sha256, 32) + "\"" +
+                                 ",\"protocol_version\":" + std::to_string(BridgeBootstrapProtocolV2) +
                                  ",\"progress_path\":\"" +
                                      json_escape(wstring_to_utf8(bridge_progress_path())) + "\"" +
                                  ",\"port\":" + std::to_string(g_bound_port.load()));
@@ -35876,26 +35893,29 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                                                   nullptr,
                                                   PAGE_READWRITE,
                                                   0,
-                                                  static_cast<DWORD>(sizeof(BridgeResidentCoreV1)),
+                                                  static_cast<DWORD>(sizeof(BridgeResidentCoreV2)),
                                                   name.c_str());
         if (!mapping || GetLastError() == ERROR_ALREADY_EXISTS)
         {
             if (mapping) CloseHandle(mapping);
             return false;
         }
-        void* const view = MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, sizeof(BridgeResidentCoreV1));
+        void* const view = MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, sizeof(BridgeResidentCoreV2));
         if (!view)
         {
             CloseHandle(mapping);
             return false;
         }
-        BridgeResidentCoreV1 core{};
+        BridgeResidentCoreV2 core{};
         core.size = sizeof(core);
         core.pid = GetCurrentProcessId();
         core.port = g_bound_port.load(std::memory_order_acquire);
         std::memcpy(core.instance_guid, g_bridge_identity.instance_guid, sizeof(core.instance_guid));
         std::memcpy(core.token, g_bridge_identity.token, sizeof(core.token));
         std::memcpy(core.sha256, g_bridge_identity.sha256, sizeof(core.sha256));
+        std::memcpy(core.runtime_bundle_sha256,
+                    g_bridge_identity.runtime_bundle_sha256,
+                    sizeof(core.runtime_bundle_sha256));
         std::memcpy(view, &core, sizeof(core));
         FlushViewOfFile(view, sizeof(core));
         g_bridge_resident_core_mapping = mapping;
@@ -35923,7 +35943,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                g_accepting_bridge_commands.load(std::memory_order_acquire) &&
                g_running.load(std::memory_order_acquire) &&
                json_string_field(request, "type", "") == "hello" &&
-               json_int_field(request, "bootstrap_protocol", 0, 0, 100) == static_cast<int>(BridgeBootstrapProtocolV1) &&
+               json_int_field(request, "bootstrap_protocol", 0, 0, 100) == static_cast<int>(BridgeBootstrapProtocolV2) &&
                fixed_hex_matches(json_string_field(request, "instance_id", ""), g_bridge_identity.instance_guid, 16) &&
                fixed_hex_matches(json_string_field(request, "token", ""), g_bridge_identity.token, 32);
     }
@@ -36341,42 +36361,44 @@ namespace
         return combined == 0;
     }
 
-    auto start_block_is_valid(const BridgeStartBlockV1& block) -> bool
+    auto start_block_is_valid(const BridgeStartBlockV2& block) -> bool
     {
-        return block.magic == BridgeStartMagicV1 &&
-               block.size == sizeof(BridgeStartBlockV1) &&
-               block.abi == BridgeStartAbiV1 &&
+        return block.magic == BridgeStartMagicV2 &&
+               block.size == sizeof(BridgeStartBlockV2) &&
+               block.abi == BridgeStartAbiV2 &&
                block.pid == GetCurrentProcessId() &&
                block.requested_port == 0 &&
                block.result_state == BRIDGE_START_UNINITIALIZED &&
                block.bound_port == 0 &&
-               block.protocol == BridgeBootstrapProtocolV1 &&
+               block.protocol == BridgeBootstrapProtocolV2 &&
                block.win32_error == 0 &&
                block.winsock_error == 0 &&
                block.reserved0 == 0 &&
                block.reserved1 == 0 &&
-               !all_zero_bytes(block.token, sizeof(block.token));
+               !all_zero_bytes(block.token, sizeof(block.token)) &&
+               !all_zero_bytes(block.sha256, sizeof(block.sha256)) &&
+               !all_zero_bytes(block.runtime_bundle_sha256, sizeof(block.runtime_bundle_sha256));
     }
 
     auto write_start_result(void* remote_block,
-                            const BridgeStartBlockV1& input,
-                            BridgeStartResultV1 state,
+                            const BridgeStartBlockV2& input,
+                            BridgeStartResult state,
                             std::uint32_t port,
                             DWORD win32_error,
                             DWORD winsock_error) -> bool
     {
-        BridgeStartBlockV1 result = input;
+        BridgeStartBlockV2 result = input;
         result.result_state = state;
         result.bound_port = port;
-        result.protocol = BridgeBootstrapProtocolV1;
+        result.protocol = BridgeBootstrapProtocolV2;
         result.win32_error = win32_error;
         result.winsock_error = winsock_error;
         return safe_copy(remote_block, &result, sizeof(result));
     }
 
     auto start_failure(void* remote_block,
-                       const BridgeStartBlockV1& input,
-                       BridgeStartResultV1 state,
+                       const BridgeStartBlockV2& input,
+                       BridgeStartResult state,
                        DWORD win32_error,
                        DWORD winsock_error,
                        DWORD exit_code) -> DWORD
@@ -36394,9 +36416,9 @@ namespace
 // The injector invokes this only after LoadLibraryW has returned and it has found
 // this exact module by path in the target. Do not move substantive work into
 // DllMain: this entry owns listener setup and publishes readiness synchronously.
-extern "C" __declspec(dllexport) DWORD WINAPI BridgeStartV1(void* remote_block)
+extern "C" __declspec(dllexport) DWORD WINAPI BridgeStartV2(void* remote_block)
 {
-    BridgeStartBlockV1 input{};
+    BridgeStartBlockV2 input{};
     if (!remote_block || !safe_copy(&input, remote_block, sizeof(input)))
     {
         return ERROR_INVALID_PARAMETER;

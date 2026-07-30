@@ -197,9 +197,9 @@ internal static class ResearchRunner
             summary["bridge_ready"] = ready;
             if (!ready)
             {
-                // Preserve the failed start as evidence. Normal direct-bridge startup intentionally
-                // permits a fresh instance even when an older DLL remains resident, so this runner
-                // must not turn an indeterminate startup failure into a forced game restart.
+                // Preserve the failed start as evidence. The shared generation manager has already
+                // authenticated and quiesced any obsolete resident, or failed closed before this
+                // research runner can issue a probe or paint request.
                 summary["bridge_start_failed"] = true;
                 throw new InvalidOperationException("The authenticated research bridge did not become ready.");
             }
@@ -208,6 +208,7 @@ internal static class ResearchRunner
                 ?? throw new InvalidOperationException("Research bridge identity was unavailable after successful startup.");
             summary["bridge_instance_id"] = bridgeIdentity.InstanceId.ToString("N");
             summary["bridge_hash"] = bridgeIdentity.BridgeHash;
+            summary["runtime_bundle_id"] = bridgeIdentity.RuntimeBundleId;
             summary["staged_bridge_path"] = bridgeIdentity.BridgePath;
 
             var eventWatch = await WaitForEventWatchAsync(eventWatchPath, bridgeIdentity, TimeSpan.FromSeconds(10));
@@ -937,6 +938,15 @@ internal static class ResearchRunner
         if (!root.TryGetProperty("bridge_hash", out var bridgeHash) ||
             bridgeHash.ValueKind != JsonValueKind.String ||
             !string.Equals(bridgeHash.GetString(), expectedIdentity.BridgeHash, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        if (!root.TryGetProperty("runtime_bundle_id", out var runtimeBundleId) ||
+            runtimeBundleId.ValueKind != JsonValueKind.String ||
+            !string.Equals(
+                runtimeBundleId.GetString(),
+                expectedIdentity.RuntimeBundleId,
+                StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }

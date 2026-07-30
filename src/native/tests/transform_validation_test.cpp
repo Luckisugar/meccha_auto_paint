@@ -1,5 +1,6 @@
 #include "../include/sdk.hpp"
 #include "../include/runtime_contract.hpp"
+#include "../include/direct_bridge_abi.hpp"
 
 #include <algorithm>
 #include <array>
@@ -19,6 +20,21 @@ namespace
 
 int main()
 {
+    BridgeStartBlockV2 bootstrap{};
+    bootstrap.magic = BridgeStartMagicV2;
+    bootstrap.size = sizeof(bootstrap);
+    bootstrap.abi = BridgeStartAbiV2;
+    bootstrap.protocol = BridgeBootstrapProtocolV2;
+    bootstrap.runtime_bundle_sha256[0] = 1;
+    if (sizeof(bootstrap) != 160 ||
+        offsetof(BridgeStartBlockV2, runtime_bundle_sha256) != 96 ||
+        bootstrap.magic != 0x3253434D ||
+        bootstrap.abi != 2 ||
+        bootstrap.protocol != 2)
+    {
+        return 118;
+    }
+
     struct DuplicateUvTriangle
     {
         int geometry_id{0};

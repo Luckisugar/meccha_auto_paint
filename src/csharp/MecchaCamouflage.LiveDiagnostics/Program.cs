@@ -16,9 +16,10 @@ namespace MecchaCamouflage.LiveDiagnostics;
 /// </summary>
 internal static class Program
 {
-    private const uint ResidentCoreMagic = 0x3152434D; // "MCR1"
-    private const uint ResidentCoreAbi = 1;
-    private const int ResidentCoreSize = 104;
+    private const uint ResidentCoreMagicV1 = 0x3152434D; // "MCR1"
+    private const uint ResidentCoreMagicV2 = 0x3252434D; // "MCR2"
+    private const int ResidentCoreSizeV1 = 104;
+    private const int ResidentCoreSizeV2 = 136;
     private const string TextureProbePayload =
         "{\"type\":\"paint_replication_texture_probe\",\"research_texture_target\":\"resolved\",\"research_compact\":true}";
     private const string TextureProbePreservePayload =
@@ -48,6 +49,7 @@ internal static class Program
         private readonly Guid instanceId;
         private readonly byte[] token;
         private readonly string bridgeHash;
+        private readonly string? runtimeBundleId;
         private readonly uint protocol;
 
         public AuthenticatedBridgeClient(
@@ -56,6 +58,7 @@ internal static class Program
             Guid instanceId,
             ReadOnlySpan<byte> token,
             string bridgeHash,
+            string? runtimeBundleId,
             uint protocol)
         {
             this.expectedProcessId = expectedProcessId;
@@ -63,6 +66,7 @@ internal static class Program
             this.instanceId = instanceId;
             this.token = token.ToArray();
             this.bridgeHash = bridgeHash;
+            this.runtimeBundleId = runtimeBundleId;
             this.protocol = protocol;
         }
 
@@ -118,7 +122,13 @@ internal static class Program
                        metadata.TryGetProperty("bridge_hash", out var hash) &&
                        string.Equals(hash.GetString(), bridgeHash, StringComparison.OrdinalIgnoreCase) &&
                        metadata.TryGetProperty("protocol_version", out var receivedProtocol) &&
-                       receivedProtocol.GetUInt32() == protocol;
+                       receivedProtocol.GetUInt32() == protocol &&
+                       (runtimeBundleId is null ||
+                        metadata.TryGetProperty("runtime_bundle_id", out var receivedBundle) &&
+                        string.Equals(
+                            receivedBundle.GetString(),
+                            runtimeBundleId,
+                            StringComparison.OrdinalIgnoreCase));
             }
             catch (JsonException)
             {
@@ -199,7 +209,7 @@ internal static class Program
                 process.Id,
                 process.StartTime.ToUniversalTime().ToFileTimeUtc(),
                 Path.GetFullPath(executablePath));
-            client = OpenResidentClient(target);
+            client = OpenResidentClient(target, options.Command);
 
             summary["game_executable"] = executablePath;
             summary["bridge_attached"] = true;
@@ -871,16 +881,18 @@ internal static class Program
             previewColorCompression);
     }
 
-    private static AuthenticatedBridgeClient OpenResidentClient(TargetProcess target)
+    private static AuthenticatedBridgeClient OpenResidentClient(TargetProcess target, string command)
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Live resident bridge diagnostics require Windows.");
         using var mapping = MemoryMappedFile.OpenExisting(
             $@"Local\MecchaCamouflage.ResidentCore.{target.ProcessId}",
             MemoryMappedFileRights.Read);
-        using var view = mapping.CreateViewStream(0, ResidentCoreSize, MemoryMappedFileAccess.Read);
-        var bytes = new byte[ResidentCoreSize];
-        view.ReadExactly(bytes);
+        var header = ReadMappedBytes(mapping, 12);
+        var mappedSize = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(4, 4));
+        if (mappedSize is not (ResidentCoreSizeV1 or ResidentCoreSizeV2))
+            throw new InvalidOperationException("The resident bridge rendezvous has an unsupported size.");
+        var bytes = ReadMappedBytes(mapping, checked((int)mappedSize));
         var span = bytes.AsSpan();
         var magic = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(0, 4));
         var size = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(4, 4));
@@ -888,12 +900,25 @@ internal static class Program
         var mappedPid = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(12, 4));
         var port = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(16, 4));
         var protocol = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(20, 4));
-        if (magic != ResidentCoreMagic || size != ResidentCoreSize || abi != ResidentCoreAbi ||
-            mappedPid != target.ProcessId || protocol != 1 || port is 0 or > 65535 ||
+        var legacy = magic == ResidentCoreMagicV1 && size == ResidentCoreSizeV1 && abi == 1;
+        var current = magic == ResidentCoreMagicV2 && size == ResidentCoreSizeV2 && abi == 2;
+        if ((!legacy && !current) ||
+            mappedPid != target.ProcessId || protocol != (legacy ? 1U : 2U) || port is 0 or > 65535 ||
             !HasEntropy(span.Slice(40, 32)))
         {
             throw new InvalidOperationException("The resident bridge rendezvous was invalid or belongs to another game instance.");
         }
+        if (legacy && !string.Equals(command, "bridge-shutdown", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "A legacy resident bridge may only be opened for authenticated shutdown and generation replacement.");
+        }
+
+        var runtimeBundleId = current
+            ? Convert.ToHexString(span.Slice(104, 32)).ToLowerInvariant()
+            : null;
+        if (current && !HasEntropy(span.Slice(104, 32)))
+            throw new InvalidOperationException("The resident bridge has no runtime bundle identity.");
 
         // The token is kept only in the authenticated client and is never written to an artifact or console.
         return new AuthenticatedBridgeClient(
@@ -902,7 +927,16 @@ internal static class Program
             new Guid(span.Slice(24, 16), bigEndian: true),
             span.Slice(40, 32),
             Convert.ToHexString(span.Slice(72, 32)).ToLowerInvariant(),
+            runtimeBundleId,
             protocol);
+    }
+
+    private static byte[] ReadMappedBytes(MemoryMappedFile mapping, int size)
+    {
+        using var view = mapping.CreateViewStream(0, size, MemoryMappedFileAccess.Read);
+        var bytes = new byte[size];
+        view.ReadExactly(bytes);
+        return bytes;
     }
 
     private static bool HasEntropy(ReadOnlySpan<byte> value)

@@ -28,6 +28,54 @@ function Convert-BytesToHex([byte[]]$Bytes) {
     }) -join "")
 }
 
+function Get-NativeRuntimeBundle(
+    [string]$NativeBridgePath,
+    [string]$RuntimeProfileDirectory) {
+    $bridgeHash = (Get-FileHash `
+        -Algorithm SHA256 `
+        -LiteralPath $NativeBridgePath).Hash.ToLowerInvariant()
+    $profileEntries = @(
+        Get-ChildItem `
+            -LiteralPath $RuntimeProfileDirectory `
+            -Filter "*.json" `
+            -File |
+            ForEach-Object {
+                [pscustomobject]@{
+                    RelativePath = "mesh-profiles/$($_.Name)"
+                    Hash = (Get-FileHash `
+                        -Algorithm SHA256 `
+                        -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+                }
+            } |
+            Sort-Object -Property RelativePath -CaseSensitive
+    )
+    if ($profileEntries.Count -eq 0) {
+        throw "Runtime bundle contains no mesh or image profiles."
+    }
+    $manifest = "schema=1`n" +
+        "start_block_abi=2`n" +
+        "resident_core_abi=2`n" +
+        "protocol=2`n" +
+        "bridge=$bridgeHash`n"
+    foreach ($entry in $profileEntries) {
+        $manifest += "profile=$($entry.RelativePath)=$($entry.Hash)`n"
+    }
+    $encoding = [System.Text.UTF8Encoding]::new($false)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bundleBytes = $sha.ComputeHash($encoding.GetBytes($manifest))
+    }
+    finally {
+        $sha.Dispose()
+    }
+    return [pscustomobject]@{
+        Id = Convert-BytesToHex $bundleBytes
+        BridgeHash = $bridgeHash
+        Manifest = $manifest
+        Profiles = $profileEntries
+    }
+}
+
 function Write-U32(
     [byte[]]$Buffer,
     [int]$Offset,
@@ -51,11 +99,28 @@ function Read-ResidentCore([int]$ProcessId) {
         $mapping = [System.IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting(
             "Local\MecchaCamouflage.ResidentCore.$ProcessId",
             [System.IO.MemoryMappedFiles.MemoryMappedFileRights]::Read)
+        $headerView = $mapping.CreateViewStream(
+            0,
+            12,
+            [System.IO.MemoryMappedFiles.MemoryMappedFileAccess]::Read)
+        try {
+            $header = New-Object byte[] 12
+            if ($headerView.Read($header, 0, 12) -ne 12) {
+                throw "Resident core header ended early."
+            }
+        }
+        finally {
+            $headerView.Dispose()
+        }
+        $size = [int][BitConverter]::ToUInt32($header, 4)
+        if ($size -notin @(104, 136)) {
+            throw "Resident core size is unsupported."
+        }
         $view = $mapping.CreateViewStream(
             0,
-            104,
+            $size,
             [System.IO.MemoryMappedFiles.MemoryMappedFileAccess]::Read)
-        $bytes = New-Object byte[] 104
+        $bytes = New-Object byte[] $size
         $read = 0
         while ($read -lt $bytes.Length) {
             $count = $view.Read(
@@ -67,9 +132,14 @@ function Read-ResidentCore([int]$ProcessId) {
             }
             $read += $count
         }
-        if ([BitConverter]::ToUInt32($bytes, 0) -ne 0x3152434D -or
-            [BitConverter]::ToUInt32($bytes, 4) -ne 104 -or
-            [BitConverter]::ToUInt32($bytes, 8) -ne 1 -or
+        $magic = [BitConverter]::ToUInt32($bytes, 0)
+        $abi = [BitConverter]::ToUInt32($bytes, 8)
+        $protocol = [BitConverter]::ToUInt32($bytes, 20)
+        $legacy = $magic -eq 0x3152434D -and $size -eq 104 -and
+            $abi -eq 1 -and $protocol -eq 1
+        $current = $magic -eq 0x3252434D -and $size -eq 136 -and
+            $abi -eq 2 -and $protocol -eq 2
+        if ((-not $legacy -and -not $current) -or
             [BitConverter]::ToUInt32($bytes, 12) -ne $ProcessId) {
             throw "Resident core identity is invalid."
         }
@@ -79,12 +149,20 @@ function Read-ResidentCore([int]$ProcessId) {
         [Array]::Copy($bytes, 24, $instanceBytes, 0, 16)
         [Array]::Copy($bytes, 40, $tokenBytes, 0, 32)
         [Array]::Copy($bytes, 72, $hashBytes, 0, 32)
+        $bundleId = $null
+        if ($current) {
+            $bundleBytes = New-Object byte[] 32
+            [Array]::Copy($bytes, 104, $bundleBytes, 0, 32)
+            $bundleId = Convert-BytesToHex $bundleBytes
+        }
         return [pscustomobject]@{
             Port = [int][BitConverter]::ToUInt32($bytes, 16)
-            Protocol = [int][BitConverter]::ToUInt32($bytes, 20)
+            Protocol = [int]$protocol
             InstanceId = Convert-BytesToHex $instanceBytes
             Token = Convert-BytesToHex $tokenBytes
             Hash = Convert-BytesToHex $hashBytes
+            RuntimeBundleId = $bundleId
+            Legacy = $legacy
         }
     }
     catch [System.IO.FileNotFoundException] {
@@ -133,8 +211,18 @@ function Invoke-BridgeCommand(
                 throw "Bridge returned no hello reply."
             }
             $helloObject = $helloReply | ConvertFrom-Json
-            if (-not $helloObject.success) {
-                throw "Bridge authentication failed."
+            if (-not $helloObject.success -or
+                [string]$helloObject.metadata.instance_id -ne
+                    [string]$Resident.InstanceId -or
+                [int]$helloObject.metadata.protocol_version -ne
+                    [int]$Resident.Protocol -or
+                ($Resident.Hash -and
+                    [string]$helloObject.metadata.bridge_hash -ne
+                        [string]$Resident.Hash) -or
+                ($Resident.RuntimeBundleId -and
+                    [string]$helloObject.metadata.runtime_bundle_id -ne
+                        [string]$Resident.RuntimeBundleId)) {
+                throw "Bridge authentication or generation identity failed."
             }
             $writer.WriteLine($Command)
             $replyText = $reader.ReadToEnd()
@@ -172,7 +260,8 @@ function New-StartBlock(
     [int]$ProcessId,
     [long]$CreationTime,
     [string]$TargetExe,
-    [string]$Hash) {
+    [string]$Hash,
+    [string]$RuntimeBundleId) {
     $instanceId = [Guid]::NewGuid().ToString("N")
     $tokenBytes = New-Object byte[] 32
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -182,10 +271,10 @@ function New-StartBlock(
     finally {
         $rng.Dispose()
     }
-    $block = New-Object byte[] 128
-    Write-U32 $block 0 0x3153434D
-    Write-U32 $block 4 128
-    Write-U32 $block 8 1
+    $block = New-Object byte[] 160
+    Write-U32 $block 0 0x3253434D
+    Write-U32 $block 4 160
+    Write-U32 $block 8 2
     Write-U32 $block 12 ([uint32]$ProcessId)
     [Array]::Copy(
         (Convert-HexToBytes $instanceId),
@@ -200,12 +289,18 @@ function New-StartBlock(
         $block,
         64,
         32)
-    Write-U32 $block 96 0
-    Write-U32 $block 100 0
-    Write-U32 $block 104 0
-    Write-U32 $block 108 1
-    Write-U32 $block 112 0
-    Write-U32 $block 116 0
+    [Array]::Copy(
+        (Convert-HexToBytes $RuntimeBundleId),
+        0,
+        $block,
+        96,
+        32)
+    Write-U32 $block 128 0
+    Write-U32 $block 132 0
+    Write-U32 $block 136 0
+    Write-U32 $block 140 2
+    Write-U32 $block 144 0
+    Write-U32 $block 148 0
     return [pscustomobject]@{
         Block = $block
         ProcessId = $ProcessId
@@ -214,6 +309,7 @@ function New-StartBlock(
         InstanceId = $instanceId
         Token = Convert-BytesToHex $tokenBytes
         Hash = $Hash
+        RuntimeBundleId = $RuntimeBundleId
     }
 }
 
@@ -286,33 +382,45 @@ if (-not (Test-Path -LiteralPath $ProfileDirectory -PathType Container)) {
 $target = Get-Process -Id $TargetPid
 $targetExe = $target.Path
 $creationTime = $target.StartTime.ToUniversalTime().ToFileTimeUtc()
-$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $BridgePath).
-    Hash.ToLowerInvariant()
+$bundle = Get-NativeRuntimeBundle $BridgePath $ProfileDirectory
+$hash = $bundle.BridgeHash
 New-Item -ItemType Directory -Force -Path $GenerationDirectory |
     Out-Null
-$stagedProfileDirectory = Join-Path `
+$bundleDirectory = Join-Path `
     $GenerationDirectory `
-    "mesh-profiles"
-New-Item -ItemType Directory -Force -Path $stagedProfileDirectory |
-    Out-Null
-Get-ChildItem -LiteralPath $ProfileDirectory -Filter "*.json" -File |
-    ForEach-Object {
-        Copy-Item `
-            -LiteralPath $_.FullName `
-            -Destination (Join-Path $stagedProfileDirectory $_.Name) `
-            -Force
-    }
-$aliasName = "runtime-bridge-hot-$hash.dll"
-$aliasPath = Join-Path $GenerationDirectory $aliasName
+    "bundle-$($bundle.Id)"
 $existingGenerations = @(
     Get-ChildItem -LiteralPath $GenerationDirectory `
-        -Filter "runtime-bridge-hot-*.dll" `
-        -File
+        -Filter "bundle-*" `
+        -Directory
 )
-if (-not (Test-Path -LiteralPath $aliasPath -PathType Leaf) -and
+if (-not (Test-Path -LiteralPath $bundleDirectory -PathType Container) -and
     $existingGenerations.Count -ge $MaxGenerations) {
     throw "Hot-reload generation cap reached ($MaxGenerations). Restart the game before loading another native generation."
 }
+New-Item -ItemType Directory -Force -Path $bundleDirectory |
+    Out-Null
+$stagedProfileDirectory = Join-Path `
+    $bundleDirectory `
+    "mesh-profiles"
+New-Item -ItemType Directory -Force -Path $stagedProfileDirectory |
+    Out-Null
+foreach ($entry in $bundle.Profiles) {
+    $fileName = [System.IO.Path]::GetFileName($entry.RelativePath)
+    $sourcePath = Join-Path $ProfileDirectory $fileName
+    $targetPath = Join-Path $stagedProfileDirectory $fileName
+    if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+        Copy-Item -LiteralPath $sourcePath -Destination $targetPath
+    }
+    $stagedHash = (Get-FileHash `
+        -Algorithm SHA256 `
+        -LiteralPath $targetPath).Hash.ToLowerInvariant()
+    if ($stagedHash -ne $entry.Hash) {
+        throw "Immutable runtime profile hash mismatch: $fileName"
+    }
+}
+$aliasName = "runtime-bridge-hot-$($bundle.Id).dll"
+$aliasPath = Join-Path $bundleDirectory $aliasName
 if (-not (Test-Path -LiteralPath $aliasPath -PathType Leaf)) {
     Copy-Item -LiteralPath $BridgePath -Destination $aliasPath
 }
@@ -320,6 +428,12 @@ $aliasHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $aliasPath).
     Hash.ToLowerInvariant()
 if ($aliasHash -ne $hash) {
     throw "Content-addressed bridge alias hash mismatch."
+}
+$stagedBundle = Get-NativeRuntimeBundle `
+    $aliasPath `
+    $stagedProfileDirectory
+if ($stagedBundle.Id -ne $bundle.Id) {
+    throw "Staged native runtime bundle identity mismatch."
 }
 
 $mutexName = "Local\MecchaCamouflage.Inject.$TargetPid"
@@ -355,28 +469,37 @@ try {
         $TargetPid `
         $creationTime `
         $targetExe `
-        $hash
+        $hash `
+        $bundle.Id
     $injector = Invoke-Injector `
         $start `
         $aliasPath `
         $InjectorPath
     if (-not $injector.success -or
-        $injector.state -ne "listening") {
-        throw "New bridge generation did not reach listening state."
+        $injector.state -ne "listening" -or
+        [int]$injector.protocol -ne 2 -or
+        [string]$injector.instance_id -ne $start.InstanceId -or
+        [string]$injector.bridge_hash -ne $hash -or
+        [string]$injector.runtime_bundle_id -ne $bundle.Id) {
+        throw "New bridge generation did not return the staged V2 identity."
     }
     $newResident = [pscustomobject]@{
         Port = [int]$injector.port
-        Protocol = 1
+        Protocol = 2
         InstanceId = $start.InstanceId
         Token = $start.Token
+        Hash = $hash
+        RuntimeBundleId = $bundle.Id
     }
     $ping = Invoke-BridgeCommand $newResident '{"type":"ping"}'
     if (-not $ping.success -or $ping.stage -ne "ping") {
         throw "New bridge generation failed its authenticated ping."
     }
     $published = Read-ResidentCore $TargetPid
-    if ($null -eq $published -or $published.Hash -ne $hash) {
-        throw "New resident core was not published with the staged content hash."
+    if ($null -eq $published -or
+        $published.Hash -ne $hash -or
+        $published.RuntimeBundleId -ne $bundle.Id) {
+        throw "New resident core was not published with the staged runtime bundle identity."
     }
 
     [pscustomobject]@{
@@ -384,11 +507,12 @@ try {
         target_pid = $TargetPid
         old_bridge_hash = $oldHash
         new_bridge_hash = $hash
+        runtime_bundle_id = $bundle.Id
         staged_bridge = $aliasPath
         generation_count = @(
             Get-ChildItem -LiteralPath $GenerationDirectory `
-                -Filter "runtime-bridge-hot-*.dll" `
-                -File
+                -Filter "bundle-*" `
+                -Directory
         ).Count
         max_generations = $MaxGenerations
         shutdown_stage = $shutdownStage

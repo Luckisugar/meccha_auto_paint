@@ -33,7 +33,7 @@ var tests = new List<(string Name, Action Run)>
     ("native Present status logging ignores healthy counter churn", NativePresentStatusLoggingIgnoresHealthyCounterChurn),
     ("native Present ESP has no external frame-render fallback", NativePresentEspHasNoExternalFallback),
     ("native Present ESP hooks queue, owns wrapped backbuffers, and reports lifecycle state", NativePresentEspOwnsRendererLifecycle),
-    ("runtime keeps one resident bridge across GUI updates", RuntimeKeepsResidentBridgeAcrossGuiUpdates),
+    ("runtime safely replaces obsolete resident bridge generations", RuntimeSafelyReplacesObsoleteResidentBridgeGenerations),
     ("resident bridge reconnect retains its progress path", ResidentBridgeReconnectRetainsProgressPath),
     ("research hot reload quiesces and serializes bridge generations", ResearchHotReloadQuiescesAndSerializesBridgeGenerations),
     ("connected game process remains pinned", ConnectedGameProcessRemainsPinned),
@@ -71,6 +71,9 @@ var tests = new List<(string Name, Action Run)>
     ("runtime log keeps repeated guard messages", RuntimeLogKeepsRepeatedGuardMessages),
     ("asset validation rejects stale ready cache", AssetValidationRejectsStaleReadyCache),
     ("copy if invalid repairs corrupt target", CopyIfInvalidRepairsCorruptTarget),
+    ("runtime bundle identity tracks native behavior", RuntimeBundleIdentityTracksNativeBehavior),
+    ("bridge generation policy replaces only safe mismatches", BridgeGenerationPolicyReplacesOnlySafeMismatches),
+    ("resident core parser distinguishes legacy and V2 generations", ResidentCoreParserDistinguishesLegacyAndV2Generations),
     ("research event-watch sidecar uses exact staged bridge path", ResearchEventWatchSidecarUsesExactStagedBridgePath),
     ("research texture probe is explicitly dispatched", ResearchTextureProbeIsExplicitlyDispatched),
     ("research runner can isolate one planned replay stroke", ResearchRunnerCanIsolateOnePlannedReplayStroke),
@@ -159,6 +162,8 @@ var tests = new List<(string Name, Action Run)>
     ("host session counts native cancel jobs", HostSessionCountsNativeCancelJobs),
     ("host session keeps cancellation pending until native terminal reply", HostSessionKeepsCancellationPendingUntilNativeTerminalReply),
     ("bridge start block has a fixed portable layout", BridgeStartBlockHasFixedPortableLayout),
+    ("bridge V2 start block carries runtime bundle identity", BridgeV2StartBlockCarriesRuntimeBundleIdentity),
+    ("bridge V2 hello validates runtime bundle identity", BridgeV2HelloValidatesRuntimeBundleIdentity),
     ("injector result requires matching bridge identity", InjectorResultRequiresMatchingBridgeIdentity),
     ("injector distinguishes identity and load failures", InjectorDistinguishesIdentityAndLoadFailures),
     ("bridge hello serializes and validates identity", BridgeHelloSerializesAndValidatesIdentity),
@@ -176,6 +181,7 @@ var tests = new List<(string Name, Action Run)>
     ("direct bridge names avoid historical loader pattern", DirectBridgeNamesAvoidHistoricalLoaderPattern),
     ("release packaging contains only direct bridge components", ReleasePackagingContainsOnlyDirectBridge),
     ("release publish rebuilds embedded runtime assets", ReleasePublishRebuildsEmbeddedRuntimeAssets),
+    ("release verifies embedded runtime bundle identity", ReleaseVerifiesEmbeddedRuntimeBundleIdentity),
     ("required submodules are declared and checked out", RequiredSubmodulesAreDeclaredAndCheckedOut),
     ("missing Defender exclusion is added with elevation", MissingDefenderExclusionIsAddedWithElevation),
     ("Defender exclusion marker prevents repeated elevation", DefenderExclusionMarkerPreventsRepeatedElevation),
@@ -1306,7 +1312,7 @@ static void NativePresentEspOwnsRendererLifecycle()
            bridge.Contains("esp_resize_buffers_detour", StringComparison.Ordinal) &&
            bridge.Contains("esp_create_swapchain_for_hwnd_detour", StringComparison.Ordinal) &&
            bridge.Contains("esp_native_track_swapchain_queue", StringComparison.Ordinal) &&
-           bridge.Contains("BridgeResidentCoreV1", StringComparison.Ordinal) &&
+           bridge.Contains("BridgeResidentCoreV2", StringComparison.Ordinal) &&
            bridge.Contains("bridge host detached; resident core remains available", StringComparison.Ordinal) &&
            bridge.Contains("esp_native_queue_for_late_present", StringComparison.Ordinal) &&
            bridge.Contains("esp_unique_queue_identity", StringComparison.Ordinal) &&
@@ -1360,18 +1366,20 @@ static void NativePresentEspOwnsRendererLifecycle()
         "native Present ESP must capture the exact swapchain queue, use the validated component-space pose contract and direct glyph geometry, retain one resident renderer across host reconnects, publish completed snapshots, and expose lifecycle status");
 }
 
-static void RuntimeKeepsResidentBridgeAcrossGuiUpdates()
+static void RuntimeSafelyReplacesObsoleteResidentBridgeGenerations()
 {
     var root = FindRepositoryRoot();
     var runtime = ReadRepositoryText(Path.Combine(root, "src", "csharp", "MecchaCamouflage.Controller", "RuntimeBridgeService.cs"));
 
     Assert(runtime.Contains("TryAttachResidentCore", StringComparison.Ordinal) &&
-           !runtime.Contains("ReplaceObsoleteResidentCoreAsync", StringComparison.Ordinal) &&
-           !runtime.Contains("TryGetPackagedBridgeHash", StringComparison.Ordinal) &&
-           runtime.Contains("LogResidentBridgeBinaryState", StringComparison.Ordinal) &&
-           runtime.Contains("restart the game before testing native changes", StringComparison.Ordinal) &&
-           !runtime.Contains("WaitForResidentCoreExitAsync", StringComparison.Ordinal),
-        "a GUI update must reconnect to its authenticated resident bridge instead of stacking another native DLL in a live game, while reporting an old resident binary explicitly");
+           runtime.Contains("BridgeGenerationPolicy.Decide", StringComparison.Ordinal) &&
+           runtime.Contains("ShutdownProvedQuiescence", StringComparison.Ordinal) &&
+           runtime.Contains("WaitForResidentCoreAbsent", StringComparison.Ordinal) &&
+           runtime.Contains("RuntimeBundleMatches", StringComparison.Ordinal) &&
+           runtime.Contains("FailGenerationUpgrade", StringComparison.Ordinal) &&
+           runtime.Contains("replacementAttempts", StringComparison.Ordinal) &&
+           !runtime.Contains("LogResidentBridgeBinaryState", StringComparison.Ordinal),
+        "a GUI update must authenticate the complete native bundle, quiesce an obsolete resident, and fail closed instead of reusing stale code");
 }
 
 static void ResidentBridgeReconnectRetainsProgressPath() =>
@@ -1451,10 +1459,12 @@ static void ResearchHotReloadQuiescesAndSerializesBridgeGenerations()
            script.Contains("active_paint_quiescent", StringComparison.Ordinal) &&
            script.Contains("hook_callbacks_quiescent", StringComparison.Ordinal) &&
            script.Contains("Wait-ResidentCoreAbsent", StringComparison.Ordinal) &&
-           script.Contains("runtime-bridge-hot-$hash.dll", StringComparison.Ordinal) &&
+           script.Contains("runtime-bridge-hot-$($bundle.Id).dll", StringComparison.Ordinal) &&
            script.Contains("MaxGenerations", StringComparison.Ordinal) &&
            script.Contains("ProfileDirectory", StringComparison.Ordinal) &&
            script.Contains(@"mesh-profiles", StringComparison.Ordinal) &&
+           script.Contains("Get-NativeRuntimeBundle", StringComparison.Ordinal) &&
+           script.Contains("runtime_bundle_id", StringComparison.Ordinal) &&
            script.Contains("Get-FileHash -Algorithm SHA256", StringComparison.Ordinal) &&
            script.Contains("Invoke-Injector", StringComparison.Ordinal) &&
            script.Contains("redacted", StringComparison.Ordinal),
@@ -1510,24 +1520,16 @@ static void UnresponsiveMatchingBridgeIsNotReinjected()
         mutexAcquired,
         StringComparison.Ordinal);
     var staging = runtime.IndexOf(
-        "PrepareDirectBridgeInstance(target, researchOptions)",
+        "PrepareDirectBridgeInstance(target, researchOptions, desiredBundle)",
         mutexAcquired,
         StringComparison.Ordinal);
 
-    Assert(!GameProcessSelectionPolicy.MayStageDirectInstance(
-               hasMatchingBridge: true,
-               hasPublishedResident: false) &&
-           !GameProcessSelectionPolicy.MayStageDirectInstance(
-               hasMatchingBridge: false,
-               hasPublishedResident: true) &&
-           GameProcessSelectionPolicy.MayStageDirectInstance(
-               hasMatchingBridge: false,
-               hasPublishedResident: false) &&
-           injectionMethod >= 0 &&
+    Assert(injectionMethod >= 0 &&
            mutexAcquired > injectionMethod &&
            residentRecheck > mutexAcquired &&
-           staging > residentRecheck,
-        "automatic warmup must recheck for a matching or published resident after acquiring the injection mutex and before staging");
+           staging > residentRecheck &&
+           runtime.Contains("matching resident bridge is unresponsive", StringComparison.Ordinal),
+        "automatic warmup must recheck under the mutex and fail closed when a matching generation cannot authenticate");
 }
 
 static void NativePresentReportsBackbufferSetupStep()
@@ -2346,7 +2348,9 @@ static void IntrinsicEmissionProbeIsDiagnosticOnlyAndObservable()
            diagnostics.Contains("appearance-color-differential", StringComparison.Ordinal) &&
            diagnostics.Contains("manual-preview-hold", StringComparison.Ordinal) &&
            diagnostics.Contains("appearanceCaptureArtifacts: true", StringComparison.Ordinal) &&
-           diagnostics.Contains("appearance_emission_isolation_target_visible", StringComparison.Ordinal),
+           diagnostics.Contains("appearance_emission_isolation_target_visible", StringComparison.Ordinal) &&
+           diagnostics.Contains("ResidentCoreMagicV2", StringComparison.Ordinal) &&
+           diagnostics.Contains("runtime_bundle_id", StringComparison.Ordinal),
         "the intrinsic emission backend must expose applied ShowFlags and E0/E1 research evidence without applying Preview or direct production strokes");
 }
 
@@ -2589,6 +2593,141 @@ static void CopyIfInvalidRepairsCorruptTarget()
         if (Directory.Exists(root))
             Directory.Delete(root, recursive: true);
     }
+}
+
+static void RuntimeBundleIdentityTracksNativeBehavior()
+{
+    var root = Path.Combine(Path.GetTempPath(), "meccha-runtime-bundle-" + Guid.NewGuid().ToString("N"));
+    var profiles = Path.Combine(root, "mesh-profiles");
+    Directory.CreateDirectory(profiles);
+    try
+    {
+        var bridge = Path.Combine(root, "runtime-bridge.dll");
+        File.WriteAllBytes(bridge, [1, 2, 3, 4]);
+        File.WriteAllText(Path.Combine(profiles, "z.image-profile-v2.json"), "{\"kind\":\"image\"}");
+        File.WriteAllText(Path.Combine(profiles, "a.mesh-profile-v2.json"), "{\"kind\":\"mesh\"}");
+
+        var first = NativeRuntimeBundle.Create(bridge, profiles);
+
+        File.Delete(Path.Combine(profiles, "z.image-profile-v2.json"));
+        File.WriteAllText(Path.Combine(profiles, "z.image-profile-v2.json"), "{\"kind\":\"image\"}");
+        var reordered = NativeRuntimeBundle.Create(bridge, profiles);
+        Assert(first.Id == reordered.Id, "bundle identity must not depend on filesystem enumeration order");
+
+        File.WriteAllText(Path.Combine(profiles, "z.image-profile-v2.json"), "{\"kind\":\"image\",\"revision\":2}");
+        var changedProfile = NativeRuntimeBundle.Create(bridge, profiles);
+        Assert(first.Id != changedProfile.Id, "changing any profile must change the runtime bundle identity");
+
+        File.WriteAllBytes(bridge, [4, 3, 2, 1]);
+        var changedBridge = NativeRuntimeBundle.Create(bridge, profiles);
+        Assert(changedProfile.Id != changedBridge.Id, "changing the native bridge must change the runtime bundle identity");
+        Assert(first.CanonicalManifest.Contains("start_block_abi=2\n", StringComparison.Ordinal) &&
+               first.CanonicalManifest.Contains("resident_core_abi=2\n", StringComparison.Ordinal) &&
+               first.CanonicalManifest.Contains("protocol=2\n", StringComparison.Ordinal),
+            "bundle identity must include every native compatibility boundary");
+        Assert(!first.CanonicalManifest.Contains("app_version", StringComparison.Ordinal) &&
+               !first.CanonicalManifest.Contains("injector", StringComparison.Ordinal),
+            "application version and injector metadata must not change resident behavior identity");
+        static string ManifestId(string manifest) =>
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(manifest))).ToLowerInvariant();
+        Assert(ManifestId(first.CanonicalManifest) != ManifestId(
+                   first.CanonicalManifest.Replace("start_block_abi=2\n", "start_block_abi=3\n", StringComparison.Ordinal)) &&
+               ManifestId(first.CanonicalManifest) != ManifestId(
+                   first.CanonicalManifest.Replace("resident_core_abi=2\n", "resident_core_abi=3\n", StringComparison.Ordinal)) &&
+               ManifestId(first.CanonicalManifest) != ManifestId(
+                   first.CanonicalManifest.Replace("protocol=2\n", "protocol=3\n", StringComparison.Ordinal)),
+            "changing any compatibility ABI or protocol must change the runtime bundle identity");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void BridgeGenerationPolicyReplacesOnlySafeMismatches()
+{
+    var desired = string.Concat(Enumerable.Repeat("ab", 32));
+    var stale = string.Concat(Enumerable.Repeat("cd", 32));
+
+    Assert(BridgeGenerationPolicy.Decide(
+               hasResident: true,
+               residentRuntimeBundleId: desired,
+               desiredRuntimeBundleId: desired,
+               replacementAlreadyAttempted: false,
+               generationCount: 1,
+               generationLimit: 3) == BridgeGenerationAction.Reconnect,
+        "an identical resident generation should reconnect");
+    Assert(BridgeGenerationPolicy.Decide(true, stale, desired, false, 1, 3) == BridgeGenerationAction.Replace,
+        "a stale V2 resident should be replaced once");
+    Assert(BridgeGenerationPolicy.Decide(true, null, desired, false, 1, 3) == BridgeGenerationAction.Replace,
+        "a legacy resident should be upgraded rather than accepted");
+    Assert(BridgeGenerationPolicy.Decide(false, null, desired, false, 0, 3) == BridgeGenerationAction.Inject,
+        "a process without a resident should receive its first generation");
+    Assert(BridgeGenerationPolicy.Decide(true, stale, desired, true, 1, 3) == BridgeGenerationAction.RestartRequired,
+        "a failed replacement must not loop");
+    Assert(BridgeGenerationPolicy.Decide(true, stale, desired, false, 3, 3) == BridgeGenerationAction.RestartRequired,
+        "the production generation cap must fail closed");
+    Assert(!BridgeGenerationPolicy.MayDeleteInstanceDirectory(
+               ownerIsCurrentTarget: true,
+               ownerProcessIsAlive: true,
+               moduleIsLoaded: true) &&
+           !BridgeGenerationPolicy.MayDeleteInstanceDirectory(
+               ownerIsCurrentTarget: false,
+               ownerProcessIsAlive: true,
+               moduleIsLoaded: false) &&
+           BridgeGenerationPolicy.MayDeleteInstanceDirectory(
+               ownerIsCurrentTarget: true,
+               ownerProcessIsAlive: true,
+               moduleIsLoaded: false) &&
+           BridgeGenerationPolicy.MayDeleteInstanceDirectory(
+               ownerIsCurrentTarget: false,
+               ownerProcessIsAlive: false,
+               moduleIsLoaded: false),
+        "cleanup must preserve every loaded generation and every directory owned by another live process");
+}
+
+static void ResidentCoreParserDistinguishesLegacyAndV2Generations()
+{
+    var instanceId = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff");
+    var token = Enumerable.Range(1, 32).Select(value => (byte)value).ToArray();
+    var bridgeHash = Enumerable.Repeat((byte)0xab, 32).ToArray();
+    var bundleHash = Enumerable.Repeat((byte)0xcd, 32).ToArray();
+
+    var legacy = new byte[104];
+    BinaryPrimitives.WriteUInt32LittleEndian(legacy.AsSpan(0, 4), 0x3152434D);
+    BinaryPrimitives.WriteUInt32LittleEndian(legacy.AsSpan(4, 4), 104);
+    BinaryPrimitives.WriteUInt32LittleEndian(legacy.AsSpan(8, 4), 1);
+    BinaryPrimitives.WriteUInt32LittleEndian(legacy.AsSpan(12, 4), 4242);
+    BinaryPrimitives.WriteUInt32LittleEndian(legacy.AsSpan(16, 4), 54321);
+    BinaryPrimitives.WriteUInt32LittleEndian(legacy.AsSpan(20, 4), 1);
+    instanceId.TryWriteBytes(legacy.AsSpan(24, 16), bigEndian: true, out _);
+    token.CopyTo(legacy, 40);
+    bridgeHash.CopyTo(legacy, 72);
+    Assert(BridgeResidentCore.TryParse(legacy, 4242, out var parsedLegacy) &&
+           parsedLegacy.IsLegacy &&
+           parsedLegacy.RuntimeBundleId is null,
+        "V1 resident must remain readable only as an upgrade source");
+
+    var current = new byte[136];
+    BinaryPrimitives.WriteUInt32LittleEndian(current.AsSpan(0, 4), 0x3252434D);
+    BinaryPrimitives.WriteUInt32LittleEndian(current.AsSpan(4, 4), 136);
+    BinaryPrimitives.WriteUInt32LittleEndian(current.AsSpan(8, 4), 2);
+    BinaryPrimitives.WriteUInt32LittleEndian(current.AsSpan(12, 4), 4242);
+    BinaryPrimitives.WriteUInt32LittleEndian(current.AsSpan(16, 4), 54321);
+    BinaryPrimitives.WriteUInt32LittleEndian(current.AsSpan(20, 4), 2);
+    instanceId.TryWriteBytes(current.AsSpan(24, 16), bigEndian: true, out _);
+    token.CopyTo(current, 40);
+    bridgeHash.CopyTo(current, 72);
+    bundleHash.CopyTo(current, 104);
+    Assert(BridgeResidentCore.TryParse(current, 4242, out var parsedCurrent) &&
+           !parsedCurrent.IsLegacy &&
+           parsedCurrent.RuntimeBundleId == Convert.ToHexString(bundleHash).ToLowerInvariant(),
+        "V2 resident must expose the full runtime bundle identity");
+
+    current[104] = 0;
+    Array.Clear(current, 104, 32);
+    Assert(!BridgeResidentCore.TryParse(current, 4242, out _),
+        "V2 resident with a zero bundle identity must fail closed");
 }
 
 static void ResearchEventWatchSidecarUsesExactStagedBridgePath()
@@ -4418,6 +4557,65 @@ static void BridgeStartBlockHasFixedPortableLayout()
     Assert(parsed.ExpectedBridgeHash.SequenceEqual(hash), "hash did not round-trip");
 }
 
+static void BridgeV2StartBlockCarriesRuntimeBundleIdentity()
+{
+    var instanceId = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff");
+    var token = Enumerable.Range(1, BridgeStartBlockV2.TokenLength).Select(value => (byte)value).ToArray();
+    var bridgeHash = Enumerable.Range(0, BridgeStartBlockV2.HashLength).Select(value => (byte)value).ToArray();
+    var bundleHash = Enumerable.Range(0, BridgeStartBlockV2.HashLength).Select(value => (byte)(255 - value)).ToArray();
+    var source = BridgeStartBlockV2.Create(4242, instanceId, token, bridgeHash, bundleHash);
+
+    var bytes = source.Serialize();
+
+    Assert(bytes.Length == 160, "V2 start block size changed");
+    Assert(BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(0, 4)) == 0x3253434D, "V2 magic offset changed");
+    Assert(BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8, 4)) == 2, "V2 ABI offset changed");
+    Assert(bytes.AsSpan(64, 32).SequenceEqual(bridgeHash), "V2 bridge hash offset changed");
+    Assert(bytes.AsSpan(96, 32).SequenceEqual(bundleHash), "V2 runtime bundle hash offset changed");
+    Assert(BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(140, 4)) == BridgeProtocolV2.Version, "V2 protocol offset changed");
+    Assert(BridgeStartBlockV2.TryDeserialize(bytes, out var parsed, out var error), error);
+    Assert(parsed.ExpectedPid == 4242 && parsed.InstanceId == instanceId, "V2 start block did not round-trip");
+    Assert(parsed.ExpectedBridgeHash.SequenceEqual(bridgeHash), "V2 bridge hash did not round-trip");
+    Assert(parsed.ExpectedRuntimeBundleHash.SequenceEqual(bundleHash), "V2 runtime bundle hash did not round-trip");
+}
+
+static void BridgeV2HelloValidatesRuntimeBundleIdentity()
+{
+    var instanceId = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff");
+    var token = Enumerable.Range(1, BridgeStartBlockV2.TokenLength).Select(value => (byte)value).ToArray();
+    var bridgeHash = string.Concat(Enumerable.Repeat("ab", 32));
+    var bundleId = string.Concat(Enumerable.Repeat("cd", 32));
+    var endpoint = new BridgeEndpoint(
+        "127.0.0.1",
+        54321,
+        instanceId,
+        token,
+        bridgeHash,
+        BridgeProtocolV2.Version,
+        bundleId);
+    var reply = JsonSerializer.Serialize(new
+    {
+        success = true,
+        stage = "hello",
+        message = "ok",
+        metadata = new
+        {
+            pid = 4242,
+            instance_id = instanceId.ToString("N"),
+            bridge_hash = bridgeHash,
+            runtime_bundle_id = bundleId,
+            protocol_version = BridgeProtocolV2.Version
+        }
+    });
+
+    Assert(BridgeProtocolV1.TryValidateHelloReply(reply, endpoint, 4242, out var identity, out var error), error);
+    Assert(identity.RuntimeBundleId == bundleId, "V2 hello must retain the authenticated runtime bundle identity");
+
+    var wrongReply = reply.Replace(bundleId, string.Concat(Enumerable.Repeat("ef", 32)), StringComparison.Ordinal);
+    Assert(!BridgeProtocolV1.TryValidateHelloReply(wrongReply, endpoint, 4242, out _, out _),
+        "V2 hello with a different runtime bundle identity must be rejected");
+}
+
 static void InjectorResultRequiresMatchingBridgeIdentity()
 {
     var instanceId = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff");
@@ -4427,11 +4625,21 @@ static void InjectorResultRequiresMatchingBridgeIdentity()
     {"event":"result","protocol":1,"success":true,"state":"listening","pid":4242,"instance_id":"{{instanceId:N}}","bridge_hash":"{{hash}}","port":54321,"win32":0,"winsock":0}
     """;
 
-    Assert(InjectorResultV1.TryParseFinal(raw, out var result, out var error), error);
+    Assert(InjectorResult.TryParseFinal(raw, out var result, out var error), error);
     Assert(result.Matches(4242, instanceId, hash), "matching result should be accepted");
     Assert(!result.Matches(4243, instanceId, hash), "wrong PID must be rejected");
     Assert(!result.Matches(4242, Guid.NewGuid(), hash), "wrong instance GUID must be rejected");
     Assert(!result.Matches(4242, instanceId, string.Concat(Enumerable.Repeat("cd", 32))), "wrong hash must be rejected");
+
+    var bundleId = string.Concat(Enumerable.Repeat("cd", 32));
+    var v2Raw = $$"""
+    {"event":"result","protocol":2,"success":true,"state":"listening","pid":4242,"instance_id":"{{instanceId:N}}","bridge_hash":"{{hash}}","runtime_bundle_id":"{{bundleId}}","port":54321,"win32":0,"winsock":0}
+    """;
+    Assert(InjectorResult.TryParseFinal(v2Raw, out var v2Result, out error), error);
+    Assert(v2Result.Matches(4242, instanceId, hash, bundleId),
+        "V2 injector result should require the complete runtime bundle identity");
+    Assert(!v2Result.Matches(4242, instanceId, hash, string.Concat(Enumerable.Repeat("ef", 32))),
+        "V2 injector result with the wrong runtime bundle must be rejected");
 }
 
 static void BridgeHelloSerializesAndValidatesIdentity()
@@ -5211,8 +5419,13 @@ static void WebStartupLifecycleStabilizesAfterNavigationAndUiReady()
 static void DirectBridgeNamesAvoidHistoricalLoaderPattern()
 {
     var hash = string.Concat(Enumerable.Repeat("0123456789abcdef", 4));
-    var name = BridgeInstanceNaming.CreateBridgeFileName(hash, Guid.Parse("00112233-4455-6677-8899-aabbccddeeff"));
-    Assert(name.StartsWith("meccha-direct-bridge-v1-", StringComparison.Ordinal), "direct bridge prefix missing");
+    var bundle = string.Concat(Enumerable.Repeat("fedcba9876543210", 4));
+    var name = BridgeInstanceNaming.CreateBridgeFileName(
+        hash,
+        bundle,
+        Guid.Parse("00112233-4455-6677-8899-aabbccddeeff"));
+    Assert(name.StartsWith("meccha-direct-bridge-v2-", StringComparison.Ordinal), "direct bridge prefix missing");
+    Assert(name.Contains(bundle[..16], StringComparison.Ordinal), "direct bridge must include its runtime bundle generation");
     Assert(name.Contains(hash, StringComparison.Ordinal), "direct bridge must include its full build hash");
     Assert(!name.Contains("runtime-bridge", StringComparison.OrdinalIgnoreCase), "historical loader pattern must not be used");
 }
@@ -5255,6 +5468,7 @@ static void NativeProcessEventAcceptsResidentDirectBridgeHook()
     var bridge = File.ReadAllText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
 
     Assert(bridge.Contains("address_in_resident_direct_bridge_module", StringComparison.Ordinal) &&
+           bridge.Contains("meccha-direct-bridge-v2-", StringComparison.Ordinal) &&
            bridge.Contains("meccha-direct-bridge-v1-", StringComparison.Ordinal),
         "the bridge must identify only a resident uniquely staged direct bridge hook");
     Assert(bridge.Contains("page.State != MEM_COMMIT", StringComparison.Ordinal) &&
@@ -5334,6 +5548,27 @@ static void ReleasePublishRebuildsEmbeddedRuntimeAssets()
            publishBlock.Contains("obj\\MecchaCamouflage.WebHost", StringComparison.Ordinal) &&
            publishBlock.Contains("Remove-Item -LiteralPath $artifactPath -Recurse -Force", StringComparison.Ordinal),
         "release packaging must discard only stale WebHost artifacts before embedding current mesh profiles and native assets");
+}
+
+static void ReleaseVerifiesEmbeddedRuntimeBundleIdentity()
+{
+    var root = FindRepositoryRoot();
+    var program = ReadRepositoryText(Path.Combine(
+        root, "src", "csharp", "MecchaCamouflage.WebHost", "Program.cs"));
+    var verifierPath = Path.Combine(root, "scripts", "verify-runtime-bundle.ps1");
+    var workflow = ReadRepositoryText(Path.Combine(root, ".github", "workflows", "release.yml"));
+
+    Assert(File.Exists(verifierPath), "release runtime bundle verifier is missing");
+    var verifier = ReadRepositoryText(verifierPath);
+    Assert(program.Contains("--verify-runtime-bundle", StringComparison.Ordinal) &&
+           verifier.Contains("runtime_bundle_id", StringComparison.Ordinal) &&
+           verifier.Contains("Get-FileHash", StringComparison.Ordinal) &&
+           verifier.Contains("-Algorithm SHA256", StringComparison.Ordinal) &&
+           verifier.Contains("ExpectedVersion", StringComparison.Ordinal) &&
+           verifier.Contains("GITHUB_STEP_SUMMARY", StringComparison.Ordinal) &&
+           workflow.Contains("verify-runtime-bundle.ps1", StringComparison.Ordinal) &&
+           workflow.Contains("concurrency:", StringComparison.Ordinal),
+        "release publishing must verify the tagged executable's embedded version and runtime bundle before upload");
 }
 
 static void RequiredSubmodulesAreDeclaredAndCheckedOut()
