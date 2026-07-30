@@ -20741,6 +20741,7 @@ namespace
         int replay_spatial_sort_partitions = 0;
         int replay_spatial_order_violations = 0;
         runtime_contract::ReplayPass previous_pass = runtime_contract::ReplayPass::Fill;
+        runtime_contract::ReplayRegion previous_region = runtime_contract::ReplayRegion::Front;
         runtime_contract::SpatialScanlineKey previous_spatial_key{};
         bool have_previous_partition_entry = false;
         for (const auto& entry : replay_plan.entries)
@@ -20754,7 +20755,9 @@ namespace
                                      "single-brush planner returned an invalid sample index",
                                      metadata + ",\"replay_blocked\":true");
             }
-            if (!have_previous_partition_entry || entry.pass != previous_pass)
+            if (!have_previous_partition_entry ||
+                entry.pass != previous_pass ||
+                entry.region != previous_region)
             {
                 ++replay_spatial_sort_partitions;
                 have_previous_partition_entry = true;
@@ -20765,6 +20768,7 @@ namespace
                 ++replay_spatial_order_violations;
             }
             previous_pass = entry.pass;
+            previous_region = entry.region;
             previous_spatial_key = entry.spatial_key;
         }
         const bool compression_requested = active_color_compression_tolerance > 0.0;
@@ -23855,10 +23859,10 @@ namespace
             ",\"replay_materialize_elapsed_ms\":" +
             std::to_string(replay_materialize_elapsed_ms);
         metadata += ",\"replay_pass_order\":\"fill,paint\"";
-        metadata += ",\"replay_region_order\":\"current_camera_scanline_across_regions\"";
+        metadata += ",\"replay_region_order\":\"back,side,front\"";
         metadata += ",\"replay_fill_end\":" + std::to_string(replay_plan.fill_end);
         metadata += ",\"replay_paint_begin\":" + std::to_string(replay_plan.fill_end);
-        metadata += ",\"replay_spatial_order\":\"current_pose_camera_scanline_before_adaptive_radius_order\"";
+        metadata += ",\"replay_spatial_order\":\"back_side_front_then_current_pose_camera_scanline_before_adaptive_radius_order\"";
         metadata += ",\"replay_spatial_current_view_vertical_min\":" +
                     std::to_string(replay_current_view_vertical_min);
         metadata += ",\"replay_spatial_current_view_vertical_max\":" +

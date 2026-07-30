@@ -711,7 +711,7 @@ int main()
     };
     const auto cross_region_view_order_plan = runtime_contract::build_single_brush_replay_plan(
         cross_region_view_order_candidates, 1024, 5.0, 80.0);
-    const std::array<std::size_t, 3> expected_cross_region_view_order{{0, 1, 2}};
+    const std::array<std::size_t, 3> expected_cross_region_view_order{{2, 1, 0}};
     for (std::size_t index = 0; index < expected_cross_region_view_order.size(); ++index)
     {
         if (cross_region_view_order_plan.entries[index].sample_index != expected_cross_region_view_order[index])
