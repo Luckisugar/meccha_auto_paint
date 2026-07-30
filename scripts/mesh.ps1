@@ -10,7 +10,7 @@ param(
     [string]$OodlePath = "",
     [string]$ZlibPath = "",
     [int]$TextureSize = 1024,
-    [int]$ExpectedVertices = 1660,
+    [int]$ExpectedVertices = 1668,
     [int]$ExpectedIndices = 8352,
     [int]$ExpectedBones = 28
 )

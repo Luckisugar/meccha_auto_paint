@@ -3537,18 +3537,24 @@ static void WebUiUsesPackagedReferenceGuides()
     Assert(mainForm.Contains("mesh-profiles", StringComparison.Ordinal),
         "the Web host must continue serving the packaged mesh profiles to the Image editor");
     Assert(!roundRawProfile.RootElement.TryGetProperty("ImageReferencePose", out _) &&
+           roundRawProfile.RootElement.GetProperty("VertexCount").GetInt32() == 1668 &&
+           roundRawProfile.RootElement.GetProperty("ProfileHash").GetString() ==
+               "cd469e35ad0cbd1e483bd82b2406849429d24037807bd7a294534fb79633f55b" &&
            roundImageProfile.RootElement.TryGetProperty("ProfileRole", out var roundProfileRole) &&
            roundProfileRole.GetString() == "image_reference" &&
            roundImageProfile.RootElement.TryGetProperty("BaseProfileId", out var roundBaseProfileId) &&
            roundBaseProfileId.GetString() == roundRawProfile.RootElement.GetProperty("ProfileId").GetString() &&
+           roundImageProfile.RootElement.TryGetProperty("BaseProfileHash", out var roundBaseProfileHash) &&
+           roundBaseProfileHash.GetString() == roundRawProfile.RootElement.GetProperty("ProfileHash").GetString() &&
            roundImageProfile.RootElement.TryGetProperty("ImageReferencePose", out var roundReferencePose) &&
            roundReferencePose.TryGetProperty("ComponentTransforms", out var roundTransforms) &&
            roundReferencePose.TryGetProperty("Vertices", out var roundVertices) &&
            roundTransforms.ValueKind == JsonValueKind.Array &&
            roundVertices.ValueKind == JsonValueKind.Array &&
            roundTransforms.GetArrayLength() == 28 &&
-           roundVertices.GetArrayLength() == 1660,
-        "the raw round dump must remain free of editor data while its derived Image profile ships one complete captured natural-standing reference pose");
+           roundVertices.GetArrayLength() == 1668 &&
+           refreshScript.Contains("ExpectedVertices = 1668", StringComparison.Ordinal),
+        "the raw round dump must match game 3.3.0 while its derived Image profile ships one complete captured natural-standing reference pose for the same topology");
     Assert(app.Contains("for (const face of [\"front\", \"right\", \"back\", \"left\"])", StringComparison.Ordinal) &&
            !app.Contains("const region = referenceGuideRegion(normal, depthIsY);", StringComparison.Ordinal) &&
            app.Contains("projection: {\n      depthIsY,", StringComparison.Ordinal),

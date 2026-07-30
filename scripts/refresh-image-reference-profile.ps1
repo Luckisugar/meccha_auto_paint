@@ -105,7 +105,7 @@ $configuration = switch ($BodyType) {
             ExportName = "paintman"
             RawProfileFile = "paintman.mesh-profile-v2.json"
             ImageProfileFile = "paintman.image-profile-v2.json"
-            ExpectedVertices = 1660
+            ExpectedVertices = 1668
             ExpectedIndices = 8352
             ExpectedBones = 28
         }
