@@ -500,10 +500,9 @@ public static class BridgeInstanceNaming
         return $"bridge-instance-v2-{processId}-{normalized[..16]}-{instanceId:N}";
     }
 
-    public static string CreateBridgeFileName(string bridgeHash, string runtimeBundleId, Guid instanceId)
+    public static string CreateBridgeFileName(string runtimeBundleId, Guid instanceId)
     {
-        var normalizedBridge = BridgeInstance.NormalizeHash(bridgeHash);
         var normalizedBundle = BridgeInstance.NormalizeHash(runtimeBundleId);
-        return $"meccha-direct-bridge-v2-{normalizedBundle[..16]}-{normalizedBridge}-{instanceId:N}.dll";
+        return $"meccha-direct-bridge-v2-{normalizedBundle[..16]}-{instanceId:N}.dll";
     }
 }

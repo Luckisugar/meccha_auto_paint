@@ -865,7 +865,7 @@ public sealed class RuntimeBridgeService
 
         var bridgePath = Path.Combine(
             instanceDirectory,
-            BridgeInstanceNaming.CreateBridgeFileName(hash, desiredBundle.Id, instanceId));
+            BridgeInstanceNaming.CreateBridgeFileName(desiredBundle.Id, instanceId));
         var injectorPath = Path.Combine(instanceDirectory, "runtime-injector.exe");
         PackagedAssets.CopyIfInvalid(bridgeSource, bridgePath);
         PackagedAssets.CopyIfInvalid(injectorSource, injectorPath);

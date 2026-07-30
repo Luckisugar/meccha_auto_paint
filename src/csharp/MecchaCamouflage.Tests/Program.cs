@@ -5420,14 +5420,20 @@ static void DirectBridgeNamesAvoidHistoricalLoaderPattern()
 {
     var hash = string.Concat(Enumerable.Repeat("0123456789abcdef", 4));
     var bundle = string.Concat(Enumerable.Repeat("fedcba9876543210", 4));
+    var instanceId = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff");
     var name = BridgeInstanceNaming.CreateBridgeFileName(
-        hash,
         bundle,
-        Guid.Parse("00112233-4455-6677-8899-aabbccddeeff"));
+        instanceId);
     Assert(name.StartsWith("meccha-direct-bridge-v2-", StringComparison.Ordinal), "direct bridge prefix missing");
     Assert(name.Contains(bundle[..16], StringComparison.Ordinal), "direct bridge must include its runtime bundle generation");
-    Assert(name.Contains(hash, StringComparison.Ordinal), "direct bridge must include its full build hash");
+    Assert(name.Contains(instanceId.ToString("N"), StringComparison.Ordinal), "direct bridge must include its unique instance id");
+    Assert(!name.Contains(hash, StringComparison.Ordinal), "direct bridge filename must not duplicate the full build hash");
     Assert(!name.Contains("runtime-bridge", StringComparison.OrdinalIgnoreCase), "historical loader pattern must not be used");
+
+    var localRoot = @"C:\Users\abcdefghijklmnopqrst\AppData\Local\MecchaCamouflage\bridge-instances";
+    var directory = BridgeInstanceNaming.CreateDirectoryName(bundle, instanceId, 12345);
+    var bridgePath = Path.Combine(localRoot, directory, name);
+    Assert(bridgePath.Length < 260, "direct bridge path must remain below the legacy Win32 MAX_PATH limit");
 }
 
 static void InjectorDistinguishesIdentityAndLoadFailures()
