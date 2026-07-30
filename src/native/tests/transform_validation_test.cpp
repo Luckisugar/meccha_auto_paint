@@ -769,6 +769,44 @@ int main()
         return 25;
     }
     const std::vector<runtime_contract::AdaptivePaintSample>
+        cross_region_compression_samples{
+            {0.10, 0.10, runtime_contract::ReplayRegion::Back, 0,
+             0.50, 0.50, 0.50, true, true, 1},
+            {0.50, 0.50, runtime_contract::ReplayRegion::Side, 0,
+             0.50, 0.50, 0.50, true, true, 1},
+            {0.90, 0.90, runtime_contract::ReplayRegion::Front, 0,
+             0.50, 0.50, 0.50, true, true, 1},
+            {0.105, 0.10, runtime_contract::ReplayRegion::Back, 0,
+             0.50, 0.50, 0.50, true, true, 2},
+            {0.905, 0.90, runtime_contract::ReplayRegion::Front, 0,
+             0.50, 0.50, 0.50, true, true, 2},
+        };
+    const std::vector<runtime_contract::ReplayEntry>
+        cross_region_compression_entries{
+            {0, runtime_contract::ReplayPass::Paint,
+             runtime_contract::ReplayRegion::Back, {0, 0.0, 0}},
+            {1, runtime_contract::ReplayPass::Paint,
+             runtime_contract::ReplayRegion::Side, {0, 0.0, 1}},
+            {2, runtime_contract::ReplayPass::Paint,
+             runtime_contract::ReplayRegion::Front, {0, 0.0, 2}},
+        };
+    const auto cross_region_compression =
+        runtime_contract::build_adaptive_paint_plan(
+            cross_region_compression_entries,
+            cross_region_compression_samples,
+            0.01,
+            5.0);
+    if (cross_region_compression.entries.size() != 3 ||
+        cross_region_compression.entries[0].replay.region !=
+            runtime_contract::ReplayRegion::Back ||
+        cross_region_compression.entries[1].replay.region !=
+            runtime_contract::ReplayRegion::Side ||
+        cross_region_compression.entries[2].replay.region !=
+            runtime_contract::ReplayRegion::Front)
+    {
+        return 120;
+    }
+    const std::vector<runtime_contract::AdaptivePaintSample>
         five_percent_blue_boundary_samples{
             {0.10, 0.10, runtime_contract::ReplayRegion::Front, 0,
              1.0, 1.0, 0.729412, true, true, 1},

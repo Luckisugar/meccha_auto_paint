@@ -3309,7 +3309,25 @@ namespace runtime_contract
                 }
             });
         }
-        std::stable_sort(paint_entries.begin(), paint_entries.end(), [](const auto& left, const auto& right) {
+        const auto region_order = [](ReplayRegion region) {
+            switch (region)
+            {
+            case ReplayRegion::Back:
+                return 0;
+            case ReplayRegion::Side:
+                return 1;
+            case ReplayRegion::Front:
+                return 2;
+            }
+            return 3;
+        };
+        std::stable_sort(paint_entries.begin(), paint_entries.end(), [&](const auto& left, const auto& right) {
+            const int left_region = region_order(left.replay.region);
+            const int right_region = region_order(right.replay.region);
+            if (left_region != right_region)
+            {
+                return left_region < right_region;
+            }
             return left.radius_multiplier > right.radius_multiplier;
         });
         plan.entries.insert(plan.entries.end(), paint_entries.begin(), paint_entries.end());
