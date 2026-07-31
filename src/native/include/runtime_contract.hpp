@@ -880,6 +880,33 @@ namespace runtime_contract
         return capture_sample_available && projection_visible;
     }
 
+    constexpr bool appearance_projected_material_sample_available(
+        bool capture_sample_available,
+        bool projection_visible,
+        bool shared_face)
+    {
+        // Front and Back are two destinations for the same captured face
+        // material. Visibility chooses which one can be measured on screen,
+        // not whether either destination receives that material.
+        return capture_sample_available &&
+               (shared_face || projection_visible);
+    }
+
+    constexpr bool appearance_use_direct_face_capture(
+        bool capture_sample_available,
+        bool shared_face,
+        bool source_candidate,
+        bool projection_visible)
+    {
+        // Side retains its topology-aware transfer path. Front and Back share
+        // the direct projected sample so camera orientation cannot select a
+        // different material path for either destination.
+        return capture_sample_available &&
+               (shared_face ||
+                source_candidate ||
+                projection_visible);
+    }
+
     struct AppearanceFeedbackSampleEligibility
     {
         bool hdr_available{false};
@@ -887,19 +914,21 @@ namespace runtime_contract
         bool hdr_finite{false};
         bool unsafe{false};
         bool projection_visible{false};
+        bool shared_face{false};
     };
 
     constexpr bool appearance_feedback_sample_supported(
         const AppearanceFeedbackSampleEligibility& sample)
     {
-        // Occluded destination texels still receive a conservative paint
-        // fallback, but their screen pixel belongs to a nearer surface and
-        // therefore cannot be response feedback for this texel.
+        // Front and Back intentionally share the measured face response.
+        // Side remains visibility-gated because it uses a separate
+        // topology-aware source transfer.
         return sample.hdr_available &&
                sample.camera_stable &&
                sample.hdr_finite &&
                !sample.unsafe &&
-               sample.projection_visible;
+               (sample.shared_face ||
+                sample.projection_visible);
     }
 
     constexpr bool
@@ -2467,6 +2496,20 @@ namespace runtime_contract
         if (include_shadows && appearance_rgb_finite(display_linear))
         {
             return appearance_clamp_albedo(display_linear);
+        }
+        return appearance_clamp_albedo(base_linear);
+    }
+
+    inline AppearanceRgb appearance_source_display_or_base(
+        const AppearanceRgb& base_linear,
+        const AppearanceRgb& captured_display_linear,
+        bool captured_display_available)
+    {
+        if (captured_display_available &&
+            appearance_rgb_finite(captured_display_linear))
+        {
+            return appearance_clamp_albedo(
+                captured_display_linear);
         }
         return appearance_clamp_albedo(base_linear);
     }

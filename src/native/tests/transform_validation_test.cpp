@@ -1038,15 +1038,49 @@ int main()
     }
     if (!runtime_contract::
             appearance_feedback_sample_supported(
-                {true, true, true, false, true}) ||
+                {true, true, true, false, true, false}) ||
         runtime_contract::
             appearance_feedback_sample_supported(
-                {true, true, true, false, false}) ||
+                {true, true, true, false, false, false}) ||
+        !runtime_contract::
+            appearance_feedback_sample_supported(
+                {true, true, true, false, false, true}) ||
         runtime_contract::
             appearance_feedback_sample_supported(
-                {true, true, true, true, true}))
+                {true, true, true, true, true, true}) ||
+        !runtime_contract::appearance_use_direct_face_capture(
+            true, true, false, false) ||
+        runtime_contract::appearance_use_direct_face_capture(
+            true, false, false, false) ||
+        !runtime_contract::appearance_projected_material_sample_available(
+            true, false, true) ||
+        runtime_contract::appearance_projected_material_sample_available(
+            true, false, false))
     {
         return 85;
+    }
+    const runtime_contract::AppearanceRgb occluded_source_base{
+        0.05, 0.05, 0.05};
+    const runtime_contract::AppearanceRgb occluded_source_display{
+        0.08, 0.12, 0.20};
+    const auto retained_occluded_source_display =
+        runtime_contract::appearance_source_display_or_base(
+            occluded_source_base,
+            occluded_source_display,
+            true);
+    const auto missing_source_display =
+        runtime_contract::appearance_source_display_or_base(
+            occluded_source_base,
+            occluded_source_display,
+            false);
+    if (runtime_contract::appearance_max_channel_delta(
+            retained_occluded_source_display,
+            occluded_source_display) > 0.000001 ||
+        runtime_contract::appearance_max_channel_delta(
+            missing_source_display,
+            occluded_source_base) > 0.000001)
+    {
+        return 121;
     }
     if (!runtime_contract::
             appearance_candidate_may_zero_emissive(0) ||

@@ -12175,15 +12175,20 @@ namespace
             else
             {
                 const auto* direct_source = direct_source_by_plan_index[sample_index];
+                const bool shared_face =
+                    sample.region != MeshFirstRegion::Side;
                 const bool visible_destination =
                     direct_source &&
                     runtime_contract::
                         appearance_use_visible_destination_base_color(
                             true,
                             direct_source->projection_visible);
-                if (direct_source &&
-                    (sample.source_candidate ||
-                     visible_destination))
+                if (runtime_contract::
+                        appearance_use_direct_face_capture(
+                            direct_source != nullptr,
+                            shared_face,
+                            sample.source_candidate,
+                            visible_destination))
                 {
                     sample.source_distance_component = 0.0;
                     sample.source_distance_uv = 0.0;
@@ -12740,6 +12745,8 @@ namespace
             sample.appearance_base_g = base.g;
             sample.appearance_base_b = base.b;
             const auto* hdr_sample = hdr_by_plan[index];
+            const bool shared_face =
+                sample.region != MeshFirstRegion::Side;
             sample.appearance_projection_visible =
                 hdr_sample &&
                 hdr_sample->projection_visible;
@@ -12757,13 +12764,18 @@ namespace
                              !sanitized.clipped,
                          sample.unsafe,
                          sample
-                             .appearance_projection_visible});
+                             .appearance_projection_visible,
+                         shared_face});
             runtime_contract::AppearanceRgb intrinsic_residual{};
             const auto* intrinsic_sample =
                 intrinsic_by_plan[index];
             if (out.intrinsic_emission_available &&
                 intrinsic_sample &&
-                intrinsic_sample->projection_visible)
+                runtime_contract::
+                    appearance_projected_material_sample_available(
+                        true,
+                        intrinsic_sample->projection_visible,
+                        shared_face))
             {
                 sample.appearance_screen_nx =
                     intrinsic_sample->screen_nx;
@@ -12811,6 +12823,7 @@ namespace
             sample.appearance_emission_albedo_b =
                 emission_albedo.b;
             runtime_contract::AppearanceRgb display = base;
+            bool captured_display_available = false;
             const auto* ldr_sample = ldr_by_plan[index];
             if (ldr_sample && runtime_contract::appearance_rgb_finite(
                                   {ldr_sample->r, ldr_sample->g, ldr_sample->b}))
@@ -12820,6 +12833,7 @@ namespace
                 display = {runtime_contract::appearance_srgb_to_linear(ldr_sample->r),
                            runtime_contract::appearance_srgb_to_linear(ldr_sample->g),
                            runtime_contract::appearance_srgb_to_linear(ldr_sample->b)};
+                captured_display_available = true;
             }
             const auto* tone_sample = tone_by_plan[index];
             if (out.tone_curve_available && tone_sample &&
@@ -12828,15 +12842,26 @@ namespace
             {
                 display = runtime_contract::appearance_clamp_albedo(
                     {tone_sample->r, tone_sample->g, tone_sample->b});
+                captured_display_available = true;
             }
+            if (!captured_display_available &&
+                out.hdr_available &&
+                hdr_sample &&
+                sanitized.finite &&
+                !sanitized.clipped)
+            {
+                display =
+                    runtime_contract::appearance_reinhard_display(
+                        sanitized.value);
+                captured_display_available = true;
+            }
+            display =
+                runtime_contract::appearance_source_display_or_base(
+                    base,
+                    display,
+                    captured_display_available);
             if (supported_sample)
             {
-                if (!(out.tone_curve_available && tone_sample &&
-                      runtime_contract::appearance_rgb_finite(
-                          {tone_sample->r, tone_sample->g, tone_sample->b})))
-                {
-                    display = runtime_contract::appearance_reinhard_display(sanitized.value);
-                }
                 const auto albedo_target =
                     sample.appearance_emission_roi
                         ? emission_albedo
@@ -12891,9 +12916,9 @@ namespace
                         display,
                         !sample.unsafe &&
                             runtime_contract::appearance_rgb_finite(base));
-                sample.appearance_display_r = fallback.albedo.r;
-                sample.appearance_display_g = fallback.albedo.g;
-                sample.appearance_display_b = fallback.albedo.b;
+                sample.appearance_display_r = display.r;
+                sample.appearance_display_g = display.g;
+                sample.appearance_display_b = display.b;
                 sample.appearance_albedo_r = fallback.albedo.r;
                 sample.appearance_albedo_g = fallback.albedo.g;
                 sample.appearance_albedo_b = fallback.albedo.b;
