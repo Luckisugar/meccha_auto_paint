@@ -865,6 +865,16 @@ namespace runtime_contract
         return sample.region_enabled && !sample.unsafe;
     }
 
+    constexpr bool appearance_manual_preview_feedback_required(
+        bool manual_feedback_requested,
+        bool include_scene_lighting,
+        int emission_roi_samples)
+    {
+        return manual_feedback_requested &&
+               (include_scene_lighting ||
+                emission_roi_samples > 0);
+    }
+
     constexpr bool appearance_projected_material_sample_available(
         bool capture_sample_available,
         bool projection_visible,

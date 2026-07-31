@@ -2101,6 +2101,8 @@ static void NativeAppearanceMatchUsesPreviewFeedbackAndPreservesManualRoutes()
            !contract.Contains("brightness_delta > 0.18", StringComparison.Ordinal) &&
            bridgeJson.Contains("\"appearance_manual_color_mode\"", StringComparison.Ordinal) &&
            bridgeJson.Contains("\"appearance_manual_final_ldr_samples\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_manual_preview_skipped\"", StringComparison.Ordinal) &&
+           bridgeJson.Contains("\"appearance_manual_preview_skip_reason\"", StringComparison.Ordinal) &&
            bridgeJson.Contains("\"appearance_manual_color_feedback_applied\"", StringComparison.Ordinal) &&
            bridgeJson.Contains("\"appearance_manual_feedback_excluded_emission_samples\"", StringComparison.Ordinal) &&
            hostSession.Contains("appearance_manual_source_paint_color_space", StringComparison.Ordinal),

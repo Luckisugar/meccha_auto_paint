@@ -544,6 +544,8 @@
                  "appearance_manual_base_color_samples",
                  "appearance_manual_final_ldr_samples",
                  "appearance_manual_source_paint_color_space",
+                 "appearance_manual_preview_skipped",
+                 "appearance_manual_preview_skip_reason",
                  "appearance_manual_color_feedback_requested",
                  "appearance_manual_color_feedback_applied",
                  "appearance_manual_feedback_kept_clusters",

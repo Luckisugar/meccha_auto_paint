@@ -20720,8 +20720,18 @@ namespace
         // preview feedback loop below may refine them for this camera only.
         const bool appearance_match_requested =
             tuning_auto_material && any_paint_region && !image_paint_enabled && !replay_plan.entries.empty();
-        const bool manual_color_fit_requested =
+        const bool manual_preview_feedback_required =
+            runtime_contract::
+                appearance_manual_preview_feedback_required(
+                    manual_color_feedback_requested,
+                    tuning_include_shadows,
+                    appearance_match.emission_roi_samples);
+        const bool manual_preview_feedback_skipped =
             manual_color_feedback_requested &&
+            !manual_preview_feedback_required &&
+            !replay_plan.entries.empty();
+        const bool manual_color_fit_requested =
+            manual_preview_feedback_required &&
             !replay_plan.entries.empty();
         // The capability check accepts either a dedicated Emissive target or
         // the game's documented packed MaterialProperties.R/G/B route.
@@ -20739,10 +20749,24 @@ namespace
                             ? "source_render_passes"
                             : (manual_color_fit_requested
                                    ? "shared_albedo_response_with_fixed_material"
-                                   : (any_paint_region
-                                          ? "manual_tuning"
-                                          : "manual_fill_tuning"))) +
+                                   : (manual_preview_feedback_skipped
+                                          ? "source_base_color_fixed_material"
+                                          : (any_paint_region
+                                                 ? "manual_tuning"
+                                                 : "manual_fill_tuning")))) +
                     "\"";
+        metadata +=
+            ",\"appearance_manual_preview_skipped\":" +
+            std::string(
+                json_bool(
+                    manual_preview_feedback_skipped));
+        metadata +=
+            ",\"appearance_manual_preview_skip_reason\":\"" +
+            std::string(
+                manual_preview_feedback_skipped
+                    ? "scene_lighting_off_no_emission_roi"
+                    : "not_skipped") +
+            "\"";
         metadata += ",\"auto_material_fill_policy\":\"manual_fill_tuning\"";
         metadata +=
             ",\"appearance_manual_source_paint_color_space\":\"" +
@@ -21119,11 +21143,48 @@ namespace
             appearance_fallback_color_mode =
                 "intrinsic_emission_display_else_base_linear";
         };
+        const auto make_manual_display_parameters = [&]() {
+            auto parameters =
+                runtime_contract::
+                    appearance_fixed_material_parameters(
+                        mesh_first_appearance_parameters(
+                            appearance_match),
+                        tuning_metallic,
+                        tuning_roughness,
+                        tuning_emissive);
+            for (std::size_t offset = 0;
+                 offset + 3U < parameters.size();
+                 offset += 4U)
+            {
+                // With Scene Lighting disabled, the target endpoint is the
+                // calibrated source BaseColor. No target preview response is
+                // needed to select it.
+                parameters[offset] = 1.0;
+            }
+            return parameters;
+        };
         if (appearance_match_requested && !appearance_fit_enabled)
         {
             // Avoid applying source lighting twice when the bound material
             // cannot represent the requested emission response.
             apply_safe_final_fallback();
+        }
+        if (manual_preview_feedback_skipped)
+        {
+            const auto manual_display_parameters =
+                make_manual_display_parameters();
+            mesh_first_apply_fixed_material_parameters(
+                plan_samples,
+                appearance_match,
+                manual_display_parameters,
+                false,
+                tuning_metallic,
+                tuning_roughness,
+                tuning_emissive);
+            appearance_match_reason =
+                "manual_preview_redundant";
+            appearance_fallback_color_mode =
+                "shared_intrinsic_base_fixed_material";
         }
         if (appearance_feedback_fit_enabled)
         {
@@ -21409,20 +21470,7 @@ namespace
                         ? "shared_display_color_fixed_material"
                         : "shared_intrinsic_base_fixed_material";
                 auto manual_display_parameters =
-                    runtime_contract::
-                        appearance_fixed_material_parameters(
-                            mesh_first_appearance_parameters(
-                                appearance_match),
-                            tuning_metallic,
-                            tuning_roughness,
-                            tuning_emissive);
-                for (std::size_t offset = 0;
-                     offset + 3U <
-                     manual_display_parameters.size();
-                     offset += 4U)
-                {
-                    manual_display_parameters[offset] = 1.0;
-                }
+                    make_manual_display_parameters();
                 mesh_first_apply_fixed_material_parameters(
                     plan_samples,
                     appearance_match,

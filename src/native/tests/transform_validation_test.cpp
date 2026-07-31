@@ -915,6 +915,21 @@ int main()
     {
         return 82;
     }
+    if (runtime_contract::
+            appearance_manual_preview_feedback_required(
+                true, false, 0) ||
+        !runtime_contract::
+            appearance_manual_preview_feedback_required(
+                true, true, 0) ||
+        !runtime_contract::
+            appearance_manual_preview_feedback_required(
+                true, false, 1) ||
+        runtime_contract::
+            appearance_manual_preview_feedback_required(
+                false, true, 1))
+    {
+        return 122;
+    }
     // Manual and Auto share the bounded Albedo-response parameters. Manual
     // contributes only a fixed M/R/E policy, including legal bound values.
     const auto fixed_material_parameters =
