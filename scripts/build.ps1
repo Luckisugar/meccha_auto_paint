@@ -3,7 +3,7 @@ param(
     [string]$OutDir = "",
     [string]$ExeName = "meccha-camouflage",
     [string]$Version = "",
-    [ValidateSet("ReleaseSingleFile", "DevLooseSelfContained")]
+    [ValidateSet("ReleaseSingleFile", "DevLooseSelfContained", "DevLooseFrameworkDependent")]
     [string]$BuildMode = "ReleaseSingleFile",
     [switch]$ShowTimings
 )
@@ -243,7 +243,7 @@ Write-Host "Build version: $Version"
 Write-Host "Build mode: $BuildMode"
 
 if (-not $OutDir) {
-    $OutDir = if ($BuildMode -eq "DevLooseSelfContained") {
+    $OutDir = if ($BuildMode -eq "DevLooseSelfContained" -or $BuildMode -eq "DevLooseFrameworkDependent") {
         Join-Path $RuntimeRoot ".build\bin-dev"
     }
     else {
@@ -406,12 +406,13 @@ try {
             }
         }
 
+        $selfContained = if ($BuildMode -eq "DevLooseFrameworkDependent") { "false" } else { "true" }
         $publishArgs = @(
             "publish", $WebHostProject,
             "-c", "Release",
             "--maxcpucount:1",
             "-r", "win-x64",
-            "--self-contained", "true",
+            "--self-contained", $selfContained,
             "-o", $OutDir,
             "/p:MecchaAppVersion=$Version",
             "/p:MecchaDotNetArtifactRoot=$DotNetArtifactRoot",
@@ -419,8 +420,13 @@ try {
             "/p:MecchaMeshProfilesDir=$MeshProfilesSourceDir",
             "/p:MecchaWebView2BootstrapperPath=$WebView2BootstrapperPath"
         )
-        if ($BuildMode -eq "DevLooseSelfContained") {
+        if ($BuildMode -eq "DevLooseSelfContained" -or $BuildMode -eq "DevLooseFrameworkDependent") {
             $publishArgs += "/p:PublishSingleFile=false"
+            if ($BuildMode -eq "DevLooseFrameworkDependent") {
+                # Prefer Microsoft-signed apphost is still local; runtime comes from installed
+                # WindowsDesktop.App. Launcher uses signed dotnet.exe when present.
+                $publishArgs += "/p:UseAppHost=true"
+            }
         }
         else {
             $publishArgs += @(

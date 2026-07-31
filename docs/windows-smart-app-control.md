@@ -25,9 +25,27 @@ Publish without single-file packaging so the managed DLL is not extracted under
 
 ```powershell
 .\scripts\build.ps1 -Version "v1.7.1-loose" -BuildMode DevLooseSelfContained -OutDir ".\dist\loose"
+.\scripts\package-loose-launcher.ps1 -PackageDir ".\dist\loose" -Kind SelfContained
 ```
 
-Run `meccha-camouflage.exe` **from inside** that folder (or use `START.bat`).
+**Always start with `START.bat` after a browser/GitHub download.**  
+Downloads get Mark of the Web (`Zone.Identifier`). SAC treats those as untrusted even when the same bytes built locally work. `START.ps1` runs `Unblock-File` on the whole folder, then prefers:
+
+```text
+"C:\Program Files\dotnet\dotnet.exe" exec meccha-camouflage.dll
+```
+
+(that host is Microsoft Authenticode-signed). Fallback: `meccha-camouflage.exe`.
+
+### Framework-dependent package (stronger under SAC)
+
+Smaller folder; requires [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0):
+
+```powershell
+.\scripts\build.ps1 -Version "v1.7.1-fdd" -BuildMode DevLooseFrameworkDependent -OutDir ".\dist\fdd"
+.\scripts\package-loose-launcher.ps1 -PackageDir ".\dist\fdd" -Kind FrameworkDependent
+```
+
 Do not ship only the small host EXE alone.
 
 ## Fix B — In-process inject (bridge)
