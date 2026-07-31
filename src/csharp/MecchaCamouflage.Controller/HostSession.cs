@@ -71,6 +71,7 @@ public sealed class HostSession
         Store = new SettingsStore(Paths);
         Settings = Store.Load();
         Log = new RuntimeLog(Paths);
+        Log.Info(RuntimePlatformDiagnostics.FormatCurrent());
         ImagePresets = new ImagePresetStore(Paths);
         legacyImageDesigns = new ImageDesignLibrary(Paths);
         RestoreActiveImageState();

@@ -85,6 +85,7 @@ var tests = new List<(string Name, Action Run)>
     ("research texture probes stage an actual delta PNG", ResearchTextureProbesStageActualDeltaPng),
     ("research texture probes reject a component switch", ResearchTextureProbesRejectComponentSwitch),
     ("research texture probes reject an unexpected discovery receiver", ResearchTextureProbesRejectUnexpectedDiscoveryReceiver),
+    ("startup diagnostics expose OS and native instruction support", StartupDiagnosticsExposeOsAndNativeInstructionSupport),
     ("diagnostic summary includes file not found details", DiagnosticSummaryIncludesFileNotFoundDetails),
     ("diagnostics log write is best effort when file is locked", DiagnosticsLogWriteIsBestEffortWhenFileLocked),
     ("runtime log write is best effort when file is locked", RuntimeLogWriteIsBestEffortWhenFileLocked),
@@ -2878,6 +2879,45 @@ static void ResearchEventWatchSidecarUsesExactStagedBridgePath()
         if (Directory.Exists(root))
             Directory.Delete(root, recursive: true);
     }
+}
+
+static void StartupDiagnosticsExposeOsAndNativeInstructionSupport()
+{
+    var capabilities = new RuntimePlatformCapabilities(
+        "Microsoft Windows",
+        new Version(10, 0, 26100, 4652),
+        System.Runtime.InteropServices.Architecture.X64,
+        System.Runtime.InteropServices.Architecture.X64,
+        Sse2Supported: true,
+        AvxSupported: true,
+        Avx2Supported: true);
+
+    Assert(
+        RuntimePlatformDiagnostics.Format(capabilities) ==
+        "System: os=Microsoft Windows 10.0.26100.4652 | arch=process:x64 os:x64 | cpu_isa=sse2:on avx:on avx2:on | native=x64/sse2 adaptive_avx2:on",
+        "startup diagnostics must report the OS build, architecture, required SSE2 baseline, and optional AVX2 path in one stable line");
+
+    var unsupportedOptionalPath = capabilities with
+    {
+        AvxSupported = false,
+        Avx2Supported = false
+    };
+    Assert(
+        RuntimePlatformDiagnostics.Format(unsupportedOptionalPath).Contains(
+            "native=x64/sse2 adaptive_avx2:off",
+            StringComparison.Ordinal),
+        "unsupported optional AVX2 must be reported as a safe scalar fallback rather than a startup failure");
+
+    var injectedText = capabilities with
+    {
+        OsDescription = "Windows\r\n[ERROR] fake | field"
+    };
+    var sanitized = RuntimePlatformDiagnostics.Format(injectedText);
+    Assert(
+        !sanitized.Contains('\r') &&
+        !sanitized.Contains('\n') &&
+        sanitized.Count(character => character == '|') == 3,
+        "platform descriptions must not inject extra runtime-log records or fields");
 }
 
 static void DiagnosticSummaryIncludesFileNotFoundDetails()
