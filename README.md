@@ -6,92 +6,111 @@
   />
 </p>
 
-<p align="center">
-  <a href="https://github.com/acentrist/MecchaCamouflage/releases/latest">
-    <img
-      src="https://img.shields.io/github/v/release/acentrist/MecchaCamouflage"
-      alt="Latest release"
-    />
-  </a>
-  <a href="https://github.com/acentrist/MecchaCamouflage/releases">
-    <img
-      src="https://img.shields.io/github/downloads/acentrist/MecchaCamouflage/total"
-      alt="Total downloads"
-    />
-  </a>
-  <a href="https://github.com/acentrist/MecchaCamouflage">
-    <img
-      src="https://img.shields.io/github/stars/acentrist/MecchaCamouflage"
-      alt="GitHub stars"
-    />
-  </a>
-    <a href="LICENSE.txt">
-    <img
-      src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg"
-      alt="License: GPL-3.0-or-later"
-    />
-  </a>
-</p>
+# Meccha Camouflage (unofficial)
 
-<h1>
-  <img
-    src="resources/app-icons/icon.png"
-    alt="Meccha Camouflage icon"
-    width="36"
-  />
-  Meccha Camouflage
-</h1>
+Windows desktop helper for **MECCHA CHAMELEON** (Paint, Image Paint, ESP).
 
-A Windows desktop app for MECCHA CHAMELEON.
+> **Unofficial fork** maintained here for builds that work under Windows 11
+> **Smart App Control**. Not affiliated with or endorsed by upstream.
+>
+> Upstream: [acentrist/MecchaCamouflage](https://github.com/acentrist/MecchaCamouflage)  
+> License: [GPL-3.0-or-later](LICENSE.txt) — original copyright Acentrist; modifications Drigotine / Luckisugar.
+
+## Why this fork exists
+
+On some Windows 11 PCs with **Smart App Control** enabled:
+
+| Official single-file release | This fork |
+|------------------------------|-----------|
+| Host dies while unpacking under `%TEMP%\.net\` | **Loose folder** publish (no Temp extract) |
+| `runtime-injector.exe` blocked on inject | **In-process inject** from the host (no second EXE) |
+
+Details: [docs/windows-smart-app-control.md](docs/windows-smart-app-control.md)
 
 ## Features
 
-- **Paint**: Paint a player character with custom colors and materials.
-- **Image Paint**: Paint imported images onto a player character.
-- **ESP**: Show player locations and information in game.
+- **Paint** — custom colors and materials  
+- **Image Paint** — paint imported images onto the character  
+- **ESP** — player locations / info overlay  
 
 ## Download
 
-Download the latest <code>meccha-camouflage.exe</code> from <a href="https://github.com/acentrist/MecchaCamouflage/releases/latest">GitHub Releases</a>.
+Use **Releases** on this repository for the prebuilt **loose** package when available.
+
+Or build yourself (below). Prefer the **loose** layout under SAC; do not rely on a lone single-file `.exe` if Windows shows *Part of this app has been blocked*.
 
 ## Usage
 
-1. Start MECCHA CHAMELEON.
-2. Start `meccha-camouflage.exe`.
+1. Start MECCHA CHAMELEON.  
+2. Start `meccha-camouflage.exe` from the **loose folder** (keep all DLLs next to it).  
+3. Connect / inject as usual.
 
-Logs are written under:
+Logs:
 
 ```text
 %LOCALAPPDATA%\MecchaCamouflage\versions\<version>\logs\
 ```
 
-If Windows asks, approve the UAC prompt at startup to add this Microsoft
-Defender exclusion:
+Optional Defender exclusion (does **not** replace SAC fixes):
 
 ```text
 %LOCALAPPDATA%\MecchaCamouflage\
 ```
 
+## Build (Windows)
+
+Needs:
+
+- Git + PowerShell  
+- [.NET SDK 10](https://dotnet.microsoft.com/download)  
+- VS 2022 Build Tools with **Desktop development with C++** (x64 `cl.exe`)
+
+```powershell
+git clone --recurse-submodules https://github.com/Luckisugar/meccha_auto_paint.git
+cd meccha_auto_paint
+git submodule update --init --recursive
+
+# Loose self-contained (recommended under Smart App Control)
+.\scripts\build.ps1 `
+  -Version "v1.7.1-loose-inproc" `
+  -BuildMode DevLooseSelfContained `
+  -OutDir ".\dist\loose"
+```
+
+Output: `dist\loose\meccha-camouflage.exe` plus side-by-side runtime files.
+
+Single-file (same packaging as upstream releases — often blocked by SAC):
+
+```powershell
+.\scripts\build.ps1 -Version "v1.7.1-local"
+# -> .build\bin\meccha-camouflage.exe
+```
+
+With GNU Make: `make build` / `make build-dev` / `make run`.
+
+## Changes vs upstream (this fork)
+
+- **In-process direct inject** — `InProcessDirectInjector` + host path in `RuntimeBridgeService` so SAC cannot block `runtime-injector.exe` process start.  
+- **Documented loose packaging** for SAC single-file extract failures.  
+- Prior unofficial paint resilience work (see git history / older tags).
+
+See [BRANDING.md](BRANDING.md): modified builds must not claim to be official upstream releases.
+
 ## Development
 
-```bash
-git clone --recurse-submodules https://github.com/acentrist/MecchaCamouflage.git
-cd MecchaCamouflage
+```powershell
+.\scripts\build.ps1 -BuildMode DevLooseSelfContained -OutDir .build\bin-dev
+# or
 make run
 ```
 
-## Contributors
-
-[![Contributors](https://contrib.rocks/image?repo=acentrist/MecchaCamouflage)](https://github.com/acentrist/MecchaCamouflage/graphs/contributors)
-
-## Contributing
-
-Pull requests welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, code style, and the PR process.
-
 ## Security
 
-Follow the disclosure process in [SECURITY.md](SECURITY.md).
+Report security issues privately per [SECURITY.md](SECURITY.md) when present; otherwise prefer private disclosure to the maintainer.
 
 ## License
 
-[GPL-3.0-or-later](LICENSE.txt) © Acentrist
+[GPL-3.0-or-later](LICENSE.txt)
+
+- Original work: **Acentrist** — https://github.com/acentrist/MecchaCamouflage  
+- Unofficial modifications: **Drigotine / Luckisugar** — this repository  

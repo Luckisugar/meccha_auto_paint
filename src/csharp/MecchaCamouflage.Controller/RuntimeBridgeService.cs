@@ -895,6 +895,43 @@ public sealed class RuntimeBridgeService
 
     private async Task<InjectorInvocation> InvokeDirectInjectorAsync(BridgeInstance instance, CancellationToken cancellationToken)
     {
+        var startBlock = BridgeStartBlockV2.Create(
+            instance.Target.ProcessId,
+            instance.InstanceId,
+            instance.ConnectionToken,
+            Convert.FromHexString(instance.ExpectedBridgeHash),
+            Convert.FromHexString(instance.ExpectedRuntimeBundleId
+                ?? throw new InvalidOperationException("A V2 bridge instance has no runtime bundle identity.")));
+
+        // Prefer in-process inject: Smart App Control commonly blocks launching
+        // the staged runtime-injector.exe while still allowing the host process
+        // to OpenProcess / CreateRemoteThread the bridge DLL into the game.
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            var inProcess = await Task.Run(() => InProcessDirectInjector.Inject(instance, startBlock), cancellationToken)
+                .ConfigureAwait(false);
+            log.Info($"Bridge detail: in-process injector detail={inProcess.Detail} success={inProcess.Success} state={inProcess.State} win32={inProcess.Win32Error}");
+            return new InjectorInvocation(false, true, inProcess, "", "in-process");
+        }
+        catch (OperationCanceledException)
+        {
+            return new InjectorInvocation(true, false, null, "injector operation canceled", "");
+        }
+        catch (Exception ex)
+        {
+            log.Warn($"Bridge detail: in-process injector threw: {ex.Message}; falling back to external injector");
+        }
+
+        // Fallback: external injector (works on systems without SAC blocking it).
+        return await InvokeExternalDirectInjectorAsync(instance, startBlock, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<InjectorInvocation> InvokeExternalDirectInjectorAsync(
+        BridgeInstance instance,
+        BridgeStartBlockV2 startBlock,
+        CancellationToken cancellationToken)
+    {
         var start = new ProcessStartInfo(instance.InjectorPath)
         {
             UseShellExecute = false,
@@ -909,13 +946,6 @@ public sealed class RuntimeBridgeService
         start.ArgumentList.Add(instance.Target.ExecutablePath);
         start.ArgumentList.Add(instance.BridgePath);
 
-        var startBlock = BridgeStartBlockV2.Create(
-            instance.Target.ProcessId,
-            instance.InstanceId,
-            instance.ConnectionToken,
-            Convert.FromHexString(instance.ExpectedBridgeHash),
-            Convert.FromHexString(instance.ExpectedRuntimeBundleId
-                ?? throw new InvalidOperationException("A V2 bridge instance has no runtime bundle identity.")));
         Process? injector;
         try
         {
