@@ -1199,7 +1199,22 @@ public sealed class HostSession
                 "runtime_triangle_cache_warmup_hit_test_uncached_called",
                 "runtime_triangle_cache_warmup_hit_test_uncached_ok",
                 "runtime_triangle_cache_warmup_hit_test_cached_called",
-                "runtime_triangle_cache_warmup_hit_test_cached_ok"
+                "runtime_triangle_cache_warmup_hit_test_cached_ok",
+                "paint_dispatch_exception_stage",
+                "paint_dispatch_exception_stage_id",
+                "paint_dispatch_exception_kind",
+                "paint_dispatch_exception_code",
+                "paint_dispatch_exception_access_operation",
+                "paint_dispatch_exception_fault_address",
+                "paint_dispatch_exception_instruction_address",
+                "paint_dispatch_exception_parameter_count",
+                "paint_dispatch_exception_instruction_module",
+                "paint_dispatch_exception_module_offset",
+                "paint_dispatch_exception_in_bridge",
+                "paint_dispatch_exception_restore_attempted",
+                "paint_dispatch_exception_restore_verified",
+                "paint_dispatch_exception_restore_failure",
+                "paint_dispatch_exception_restore_code"
             ];
             var parts = new List<string>();
             foreach (var field in fields)

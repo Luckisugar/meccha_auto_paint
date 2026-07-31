@@ -34,6 +34,71 @@ int main()
     {
         return 118;
     }
+    if (std::string(
+            runtime_contract::
+                paint_dispatch_exception_kind(
+                    0xC0000005U)) !=
+            "access_violation" ||
+        std::string(
+            runtime_contract::
+                paint_dispatch_exception_kind(
+                    0xC00000FDU)) !=
+            "stack_overflow" ||
+        std::string(
+            runtime_contract::
+                paint_dispatch_exception_kind(
+                    0xDEADBEEFU)) !=
+            "unknown" ||
+        std::string(
+            runtime_contract::
+                paint_dispatch_access_operation(
+                    true, 0U)) !=
+            "read" ||
+        std::string(
+            runtime_contract::
+                paint_dispatch_access_operation(
+                    true, 1U)) !=
+            "write" ||
+        std::string(
+            runtime_contract::
+                paint_dispatch_access_operation(
+                    true, 8U)) !=
+            "execute" ||
+        std::string(
+            runtime_contract::
+                paint_dispatch_access_operation(
+                    false, 0U)) !=
+            "not_applicable")
+    {
+        return 123;
+    }
+    const auto compact_exception_metadata =
+        compact_mesh_response_metadata(
+            "\"paint_dispatch_exception_stage\":\"resolve_runtime_triangles\","
+            "\"paint_dispatch_exception_kind\":\"access_violation\","
+            "\"paint_dispatch_exception_access_operation\":\"read\","
+            "\"paint_dispatch_exception_fault_address\":\"0x10\","
+            "\"paint_dispatch_exception_instruction_module\":\"bridge\","
+            "\"paint_dispatch_exception_module_offset\":\"0x1234\","
+            "\"paint_dispatch_exception_restore_verified\":false");
+    if (compact_exception_metadata.find(
+            "\"paint_dispatch_exception_stage\":\"resolve_runtime_triangles\"") ==
+            std::string::npos ||
+        compact_exception_metadata.find(
+            "\"paint_dispatch_exception_kind\":\"access_violation\"") ==
+            std::string::npos ||
+        compact_exception_metadata.find(
+            "\"paint_dispatch_exception_access_operation\":\"read\"") ==
+            std::string::npos ||
+        compact_exception_metadata.find(
+            "\"paint_dispatch_exception_fault_address\":\"0x10\"") ==
+            std::string::npos ||
+        compact_exception_metadata.find(
+            "\"paint_dispatch_exception_restore_verified\":false") ==
+            std::string::npos)
+    {
+        return 124;
+    }
 
     struct DuplicateUvTriangle
     {

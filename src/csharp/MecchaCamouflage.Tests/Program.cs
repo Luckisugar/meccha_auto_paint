@@ -106,6 +106,7 @@ var tests = new List<(string Name, Action Run)>
     ("image paint rejects an unsaved image design draft", ImagePaintRejectsUnsavedImageDesignDraft),
     ("image and normal settings save atomically", ImageAndNormalSettingsSaveAtomically),
     ("bridge messages are user friendly", BridgeMessagesAreUserFriendly),
+    ("structured paint faults report actionable details", StructuredPaintFaultsReportActionableDetails),
     ("settings detect supported system language", SettingsDetectSupportedSystemLanguage),
     ("ui snapshot exposes a single brush", UiSnapshotExposesSingleBrush),
     ("ui snapshot exposes include shadows independently", UiSnapshotExposesIncludeShadowsIndependently),
@@ -816,6 +817,43 @@ static void ImagePayloadCarriesFullCanonicalCanvas()
            cacheDetail.Contains("runtime_triangle_cache_mode=profile_verified_failed", StringComparison.Ordinal) &&
            cacheDetail.Contains("runtime_triangle_cache_warmup_hit_test_uncached_called=true", StringComparison.Ordinal),
         "triangle-cache failures should log the warm-up boundary needed to diagnose a game-layout change");
+}
+
+static void StructuredPaintFaultsReportActionableDetails()
+{
+    var reply = new BridgeReply(
+        true,
+        false,
+        "game_thread_dispatch_exception",
+        "paint planning stopped after a structured exception on the game thread",
+        """
+        {
+          "success": false,
+          "metadata": {
+            "paint_dispatch_exception_stage": "resolve_runtime_triangles",
+            "paint_dispatch_exception_kind": "access_violation",
+            "paint_dispatch_exception_code": "0xc0000005",
+            "paint_dispatch_exception_access_operation": "read",
+            "paint_dispatch_exception_fault_address": "0x10",
+            "paint_dispatch_exception_instruction_module": "bridge",
+            "paint_dispatch_exception_module_offset": "0x1234",
+            "paint_dispatch_exception_in_bridge": true,
+            "paint_dispatch_exception_restore_verified": false,
+            "paint_dispatch_exception_restore_failure": "emergency_preview_session_unavailable"
+          }
+        }
+        """);
+
+    var detail = HostSession.PaintFailureDetail(reply);
+    Assert(detail is not null &&
+           detail.Contains("paint_dispatch_exception_stage=resolve_runtime_triangles", StringComparison.Ordinal) &&
+           detail.Contains("paint_dispatch_exception_kind=access_violation", StringComparison.Ordinal) &&
+           detail.Contains("paint_dispatch_exception_access_operation=read", StringComparison.Ordinal) &&
+           detail.Contains("paint_dispatch_exception_fault_address=0x10", StringComparison.Ordinal) &&
+           detail.Contains("paint_dispatch_exception_instruction_module=bridge", StringComparison.Ordinal) &&
+           detail.Contains("paint_dispatch_exception_module_offset=0x1234", StringComparison.Ordinal) &&
+           detail.Contains("paint_dispatch_exception_restore_verified=false", StringComparison.Ordinal),
+        "a production fault report must distinguish its stage, exception, access, module, offset, and restore result");
 }
 
 static void ImageTransparencyFillsRegionsBeforePaintingOpaquePixels()

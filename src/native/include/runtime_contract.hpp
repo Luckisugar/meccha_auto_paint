@@ -25,6 +25,57 @@
 
 namespace runtime_contract
 {
+    constexpr const char* paint_dispatch_exception_kind(
+        std::uint32_t code)
+    {
+        switch (code)
+        {
+        case 0x80000003U:
+            return "breakpoint";
+        case 0xC0000005U:
+            return "access_violation";
+        case 0xC0000006U:
+            return "in_page_error";
+        case 0xC000001DU:
+            return "illegal_instruction";
+        case 0xC000008CU:
+            return "array_bounds_exceeded";
+        case 0xC0000094U:
+            return "integer_divide_by_zero";
+        case 0xC0000095U:
+            return "integer_overflow";
+        case 0xC0000096U:
+            return "privileged_instruction";
+        case 0xC00000FDU:
+            return "stack_overflow";
+        case 0xE06D7363U:
+            return "msvc_cpp_exception";
+        default:
+            return "unknown";
+        }
+    }
+
+    constexpr const char* paint_dispatch_access_operation(
+        bool available,
+        std::uintptr_t operation)
+    {
+        if (!available)
+        {
+            return "not_applicable";
+        }
+        switch (operation)
+        {
+        case 0U:
+            return "read";
+        case 1U:
+            return "write";
+        case 8U:
+            return "execute";
+        default:
+            return "unknown";
+        }
+    }
+
     // Supported Shipping build: FProperty ArrayDim@0x30,
     // ElementSize@0x34, PropertyFlags@0x38.
     constexpr std::size_t FPropertyElementSizeOffset = 0x34;

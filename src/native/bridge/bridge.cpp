@@ -199,6 +199,12 @@ namespace
         LoadProfile,
         ResolvePose,
         BuildPlanner,
+        ResolveComponentTransform,
+        SkinProfile,
+        ResolveRuntimeTriangles,
+        WarmRuntimeTriangles,
+        ResolveViewport,
+        ProjectRuntimeTriangles,
         CaptureBaseColor,
         CaptureAppearanceSource,
         PrepareAppearance,
@@ -212,6 +218,12 @@ namespace
         static_cast<int>(PaintDispatchDebugStage::Idle)};
     std::atomic<DWORD> g_paint_dispatch_exception_code{ERROR_SUCCESS};
     std::atomic<std::uintptr_t> g_paint_dispatch_exception_address{0};
+    std::atomic<std::uint32_t>
+        g_paint_dispatch_exception_parameter_count{0};
+    std::atomic<std::uintptr_t>
+        g_paint_dispatch_exception_access_operation{0};
+    std::atomic<std::uintptr_t>
+        g_paint_dispatch_exception_fault_address{0};
     std::atomic<DWORD> g_game_thread_id{0};
     std::atomic<HWND> g_game_window{nullptr};
     // Coalesce wakeups from the listener, timer and ProcessEvent hook.  Without
@@ -271,6 +283,18 @@ namespace
             return "resolve_pose";
         case PaintDispatchDebugStage::BuildPlanner:
             return "build_planner";
+        case PaintDispatchDebugStage::ResolveComponentTransform:
+            return "resolve_component_transform";
+        case PaintDispatchDebugStage::SkinProfile:
+            return "skin_profile";
+        case PaintDispatchDebugStage::ResolveRuntimeTriangles:
+            return "resolve_runtime_triangles";
+        case PaintDispatchDebugStage::WarmRuntimeTriangles:
+            return "warm_runtime_triangles";
+        case PaintDispatchDebugStage::ResolveViewport:
+            return "resolve_viewport";
+        case PaintDispatchDebugStage::ProjectRuntimeTriangles:
+            return "project_runtime_triangles";
         case PaintDispatchDebugStage::CaptureBaseColor:
             return "capture_base_color";
         case PaintDispatchDebugStage::CaptureAppearanceSource:
@@ -295,6 +319,25 @@ namespace
     {
         g_paint_dispatch_debug_stage.store(
             static_cast<int>(stage),
+            std::memory_order_release);
+    }
+
+    void paint_dispatch_reset_exception_diagnostics()
+    {
+        g_paint_dispatch_exception_code.store(
+            ERROR_SUCCESS,
+            std::memory_order_release);
+        g_paint_dispatch_exception_address.store(
+            0,
+            std::memory_order_release);
+        g_paint_dispatch_exception_parameter_count.store(
+            0,
+            std::memory_order_release);
+        g_paint_dispatch_exception_access_operation.store(
+            0,
+            std::memory_order_release);
+        g_paint_dispatch_exception_fault_address.store(
+            0,
             std::memory_order_release);
     }
 
@@ -18060,6 +18103,9 @@ namespace
                               4,
                               0.0,
                               "\"pipeline\":\"mesh_first_paint\",\"pose_transform_count\":" + std::to_string(pose.transform_count));
+        paint_dispatch_set_debug_stage(
+            PaintDispatchDebugStage::
+                ResolveComponentTransform);
         sdk::FTransform component_to_world{};
         std::string component_transform_source{};
         if (!mesh_first_resolve_component_to_world(ref, selected_mesh.mesh, ctx.body_world_position, component_to_world, component_transform_source))
@@ -18111,6 +18157,8 @@ namespace
         std::vector<sdk::FVector> skinned_world_positions{};
         std::string skin_failure{};
         bool skeletal_skin_available = false;
+        paint_dispatch_set_debug_stage(
+            PaintDispatchDebugStage::SkinProfile);
         if (profile_available && pose.ok && pose.trusted)
         {
             skeletal_skin_available = mesh_first_skin_vertices(profile,
@@ -18164,6 +18212,9 @@ namespace
             return selection;
         };
 
+        paint_dispatch_set_debug_stage(
+            PaintDispatchDebugStage::
+                ResolveRuntimeTriangles);
         {
             auto resolved = resolve_runtime_triangle_cache_once();
             runtime_triangle_cache = std::move(std::get<0>(resolved));
@@ -18182,6 +18233,9 @@ namespace
              runtime_coordinate_pre_warm.selected_avg_error > MeshFirstRuntimeCoordinateMaxAvgErrorCm);
         if (runtime_cache_missing_before_warmup || runtime_cache_unstable_before_warmup)
         {
+            paint_dispatch_set_debug_stage(
+                PaintDispatchDebugStage::
+                    WarmRuntimeTriangles);
             const auto warmup_viewport = sdk_get_viewport_info(ref, ctx);
             runtime_cache_warmup = mesh_first_warm_runtime_paint_cache(ref,
                                                                        ctx,
@@ -18196,6 +18250,9 @@ namespace
             runtime_triangle_profile_cache_failure = std::move(std::get<2>(resolved));
             runtime_coordinate_post_warm = runtime_coordinate_probe(runtime_triangle_cache);
         }
+        paint_dispatch_set_debug_stage(
+            PaintDispatchDebugStage::
+                ResolveRuntimeTriangles);
         metadata += ",\"runtime_triangle_cache_warmup_attempted\":" + std::string(json_bool(runtime_cache_warmup.attempted));
         metadata += ",\"runtime_triangle_cache_warmup_reason\":\"" + json_escape(runtime_cache_warmup.reason) + "\"";
         metadata += ",\"runtime_triangle_cache_warmup_pre_avg_error\":" + std::to_string(runtime_coordinate_pre_warm.selected_avg_error);
@@ -18304,6 +18361,8 @@ namespace
         metadata += ",\"mesh_region_normal_source\":\"" + std::string(profile_available ? "profile_v2_triangle_local_normal" : "runtime_triangle_local_normal") + "\"";
         metadata += ",\"texture_size\":" + std::to_string(active_texture_size);
 
+        paint_dispatch_set_debug_stage(
+            PaintDispatchDebugStage::ResolveViewport);
         const auto viewport = sdk_get_viewport_info(ref, ctx);
         if (viewport.width <= 0 || viewport.height <= 0)
         {
@@ -18334,6 +18393,9 @@ namespace
         metadata += ",\"camera_direction_y\":" + std::to_string(camera_direction.Y);
         metadata += ",\"camera_direction_z\":" + std::to_string(camera_direction.Z);
 
+        paint_dispatch_set_debug_stage(
+            PaintDispatchDebugStage::
+                ProjectRuntimeTriangles);
         auto raw_runtime_triangles = runtime_triangle_cache.triangles;
         const auto raw_runtime_projection_selection =
             mesh_first_select_runtime_triangle_projection_coordinates(ref,
@@ -18417,6 +18479,8 @@ namespace
         }
 
         pose_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - pose_start).count();
+        paint_dispatch_set_debug_stage(
+            PaintDispatchDebugStage::BuildPlanner);
         MeshFirstPlanStats plan_stats{};
         std::vector<MeshFirstPlanSample> plan_samples{};
         std::string planner_failure{};
@@ -29315,12 +29379,29 @@ namespace
     {
         if (exception && exception->ExceptionRecord)
         {
+            const auto* record =
+                exception->ExceptionRecord;
             g_paint_dispatch_exception_code.store(
-                exception->ExceptionRecord->ExceptionCode,
+                record->ExceptionCode,
                 std::memory_order_release);
             g_paint_dispatch_exception_address.store(
                 reinterpret_cast<std::uintptr_t>(
-                    exception->ExceptionRecord->ExceptionAddress),
+                    record->ExceptionAddress),
+                std::memory_order_release);
+            g_paint_dispatch_exception_parameter_count.store(
+                record->NumberParameters,
+                std::memory_order_release);
+            g_paint_dispatch_exception_access_operation.store(
+                record->NumberParameters >= 1
+                    ? static_cast<std::uintptr_t>(
+                          record->ExceptionInformation[0])
+                    : 0,
+                std::memory_order_release);
+            g_paint_dispatch_exception_fault_address.store(
+                record->NumberParameters >= 2
+                    ? static_cast<std::uintptr_t>(
+                          record->ExceptionInformation[1])
+                    : 0,
                 std::memory_order_release);
         }
         return EXCEPTION_EXECUTE_HANDLER;
@@ -29334,6 +29415,19 @@ namespace
         const auto address =
             g_paint_dispatch_exception_address.load(
                 std::memory_order_acquire);
+        const auto parameter_count =
+            g_paint_dispatch_exception_parameter_count.load(
+                std::memory_order_acquire);
+        const auto access_operation =
+            g_paint_dispatch_exception_access_operation.load(
+                std::memory_order_acquire);
+        const auto fault_address =
+            g_paint_dispatch_exception_fault_address.load(
+                std::memory_order_acquire);
+        const bool access_details_available =
+            (code == EXCEPTION_ACCESS_VIOLATION ||
+             code == EXCEPTION_IN_PAGE_ERROR) &&
+            parameter_count >= 2;
         const auto stage_value =
             g_paint_dispatch_debug_stage.load(
                 std::memory_order_acquire);
@@ -29356,23 +29450,56 @@ namespace
             module_base != 0 && address >= module_base
                 ? address - module_base
                 : 0;
+        const auto bridge_module_base =
+            reinterpret_cast<std::uintptr_t>(
+                g_module);
+        const auto game_module_base =
+            reinterpret_cast<std::uintptr_t>(
+                GetModuleHandleW(nullptr));
+        const char* instruction_module =
+            !module_resolved
+                ? "unknown"
+                : module_base == bridge_module_base
+                    ? "bridge"
+                    : module_base == game_module_base
+                        ? "game"
+                        : "other";
         return "\"paint_dispatch_exception_stage\":\"" +
                std::string(
                    paint_dispatch_debug_stage_name(stage)) +
                "\",\"paint_dispatch_exception_stage_id\":" +
                std::to_string(stage_value) +
-               ",\"paint_dispatch_exception_code\":\"" +
+               ",\"paint_dispatch_exception_kind\":\"" +
+               runtime_contract::
+                   paint_dispatch_exception_kind(
+                       static_cast<std::uint32_t>(
+                           code)) +
+               "\",\"paint_dispatch_exception_code\":\"" +
                hex_address(static_cast<std::uintptr_t>(code)) +
                "\",\"paint_dispatch_exception_address\":\"" +
                hex_address(address) +
+               "\",\"paint_dispatch_exception_instruction_address\":\"" +
+               hex_address(address) +
+               "\",\"paint_dispatch_exception_parameter_count\":" +
+               std::to_string(parameter_count) +
+               ",\"paint_dispatch_exception_access_operation\":\"" +
+               runtime_contract::
+                   paint_dispatch_access_operation(
+                       access_details_available,
+                       access_operation) +
+               "\",\"paint_dispatch_exception_fault_address\":\"" +
+               hex_address(
+                   access_details_available
+                       ? fault_address
+                       : 0) +
+               "\",\"paint_dispatch_exception_instruction_module\":\"" +
+               instruction_module +
                "\",\"paint_dispatch_exception_module_offset\":\"" +
                hex_address(module_offset) +
                "\",\"paint_dispatch_exception_in_bridge\":" +
                std::string(
                    json_bool(
-                       module_base ==
-                       reinterpret_cast<std::uintptr_t>(
-                           g_module)));
+                       module_base == bridge_module_base));
     }
 
     auto fail_paint_dispatch_after_exception() -> void
@@ -29503,12 +29630,7 @@ namespace
             g_inside_process_event_hook = true;
             bool dispatch_faulted = false;
             g_active_paint_dispatches.fetch_add(1, std::memory_order_acq_rel);
-            g_paint_dispatch_exception_code.store(
-                ERROR_SUCCESS,
-                std::memory_order_release);
-            g_paint_dispatch_exception_address.store(
-                0,
-                std::memory_order_release);
+            paint_dispatch_reset_exception_diagnostics();
             __try
             {
                 drain_paint_jobs_on_game_thread();
@@ -29601,12 +29723,7 @@ namespace
                 g_paint_dispatch_message_pending.store(false, std::memory_order_release);
                 bool dispatch_faulted = false;
                 g_active_paint_dispatches.fetch_add(1, std::memory_order_acq_rel);
-                g_paint_dispatch_exception_code.store(
-                    ERROR_SUCCESS,
-                    std::memory_order_release);
-                g_paint_dispatch_exception_address.store(
-                    0,
-                    std::memory_order_release);
+                paint_dispatch_reset_exception_diagnostics();
                 __try
                 {
                     drain_paint_jobs_on_game_thread();
