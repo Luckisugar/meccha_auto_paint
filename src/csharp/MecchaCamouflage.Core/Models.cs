@@ -339,8 +339,8 @@ public sealed class AppSettings
     public int LayoutVersion { get; set; } = CurrentLayoutVersion;
     public double PanelX { get; set; } = -1.0;
     public double PanelY { get; set; } = -1.0;
-    public double PanelWidth { get; set; } = 1100.0;
-    public double PanelHeight { get; set; } = 720.0;
+    public double PanelWidth { get; set; } = 960.0;
+    public double PanelHeight { get; set; } = 640.0;
     public string Language { get; set; } = "";
     public int LogRetentionDays { get; set; } = 14;
     public string GameProcessName { get; set; } = "PenguinHotel-Win64-Shipping.exe";

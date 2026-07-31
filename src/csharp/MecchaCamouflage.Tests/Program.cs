@@ -13,6 +13,7 @@ var tests = new List<(string Name, Action Run)>
     ("single brush persists and migrates legacy detail settings", SingleBrushPersistsAndMigratesLegacyDetailSettings),
     ("single brush settings clamp to supported range", SingleBrushSettingsClampToSupportedRange),
     ("app defaults use 99 percent opacity", AppDefaultsUse99PercentOpacity),
+    ("app defaults use the minimum window size", AppDefaultsUseMinimumWindowSize),
     ("ESP persists role colors and migrates legacy team-relative settings", EspRoleColorsPersistAndMigrateLegacySettings),
     ("payload sends a single brush and compression tolerance", PayloadSendsSingleBrushPipeline),
     ("payload carries the independent include shadows policy", PayloadCarriesIndependentIncludeShadowsPolicy),
@@ -673,6 +674,18 @@ static void AppDefaultsUse99PercentOpacity()
 
     Assert(Math.Abs(defaults.Opacity - 0.99) < 0.000001, "a new app settings instance should default to 99 percent opacity");
     Assert(Math.Abs(loaded.Opacity - 0.99) < 0.000001, "a new persisted settings file should inherit the 99 percent opacity default");
+}
+
+static void AppDefaultsUseMinimumWindowSize()
+{
+    using var temp = new TempHome();
+    var defaults = new AppSettings();
+    var loaded = new SettingsStore(new AppPaths("window-size-default-test")).Load();
+
+    Assert(defaults.PanelWidth == 960.0 && defaults.PanelHeight == 640.0,
+        "a new app settings instance should default to the minimum window size");
+    Assert(loaded.PanelWidth == 960.0 && loaded.PanelHeight == 640.0,
+        "a new persisted settings file should inherit the minimum window size");
 }
 
 static void PayloadSendsSingleBrushPipeline()
