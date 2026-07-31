@@ -604,7 +604,9 @@ function renderEspScopeButtons(current, editable) {
     for (const scope of ["all", "hider", "hunter"]) {
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = scope[0].toUpperCase() + scope.slice(1);
+      const label = i18n(`esp.scope.${scope}`);
+      button.textContent = label;
+      button.title = label;
       button.className = scope === current ? "active" : "";
       button.disabled = !editable;
       button.addEventListener("click", () => {

@@ -122,6 +122,7 @@ var tests = new List<(string Name, Action Run)>
     ("paint feedback uses one severity path for buttons and hotkeys", PaintFeedbackUsesOneSeverityPath),
     ("web ui reports the WebView zoom factor in the footer", WebUiReportsWebViewZoomFactorInFooter),
     ("web ui localizes every settings tab", WebUiLocalizesEverySettingsTab),
+    ("web ui localizes every ESP control", WebUiLocalizesEveryEspControl),
     ("web ui localizes image editor controls and crop dialog", WebUiLocalizesImageEditorControlsAndCropDialog),
     ("web ui localizes operation errors", WebUiLocalizesOperationErrors),
     ("web ui exposes fukuyoka directly after cube", WebUiExposesFukuyokaDirectlyAfterCube),
@@ -3503,6 +3504,37 @@ static void WebUiLocalizesEverySettingsTab()
     foreach (var locale in LocalizationCatalog.SupportedLocales)
     {
         foreach (var key in new[] { "settings.paint", "settings.image", "settings.misc", "settings.app" })
+        {
+            Assert(!string.Equals(catalog.Text(locale.Code, key), key, StringComparison.Ordinal),
+                $"{locale.Code} must translate {key}");
+        }
+    }
+}
+
+static void WebUiLocalizesEveryEspControl()
+{
+    var repository = FindRepositoryRoot();
+    var markup = File.ReadAllText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "index.html"));
+    var app = File.ReadAllText(Path.Combine(repository, "src", "csharp", "MecchaCamouflage.WebHost", "web", "app.js"));
+    var catalog = LocalizationCatalog.Load();
+    var keys = new[]
+    {
+        "group.esp", "esp.enabled", "esp.boxes", "esp.skeletons",
+        "esp.names", "esp.distance", "esp.snaplines", "esp.targets",
+        "esp.hider.color", "esp.hunter.color", "esp.scope.all",
+        "esp.scope.hider", "esp.scope.hunter"
+    };
+
+    foreach (var key in keys.Take(10))
+    {
+        Assert(markup.Contains($"data-i18n=\"{key}\"", StringComparison.Ordinal),
+            $"ESP markup must localize {key}");
+    }
+    Assert(app.Contains("i18n(`esp.scope.${scope}`)", StringComparison.Ordinal),
+        "dynamic ESP target buttons must use localized scope labels");
+    foreach (var locale in LocalizationCatalog.SupportedLocales)
+    {
+        foreach (var key in keys)
         {
             Assert(!string.Equals(catalog.Text(locale.Code, key), key, StringComparison.Ordinal),
                 $"{locale.Code} must translate {key}");
