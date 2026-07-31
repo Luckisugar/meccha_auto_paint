@@ -10242,6 +10242,18 @@ namespace
         return front;
     }
 
+    auto mesh_first_region_enabled(MeshFirstRegion region,
+                                   bool front,
+                                   bool side,
+                                   bool back) -> bool
+    {
+        if (region == MeshFirstRegion::Side)
+            return side;
+        if (region == MeshFirstRegion::Back)
+            return back;
+        return front;
+    }
+
     auto mesh_first_axis_component(const sdk::FVector& value, char axis) -> double
     {
         if (axis == 'y' || axis == 'Y')
@@ -12159,9 +12171,12 @@ namespace
             [&](std::size_t sample_index,
                 AssignmentWorkerResult& local) {
             auto& sample = samples[sample_index];
-            const bool enabled = (sample.region == MeshFirstRegion::Front && enable_front) ||
-                                 (sample.region == MeshFirstRegion::Side && enable_side) ||
-                                 (sample.region == MeshFirstRegion::Back && enable_back);
+            const bool enabled =
+                mesh_first_region_enabled(
+                    sample.region,
+                    enable_front,
+                    enable_side,
+                    enable_back);
             if (!enabled)
             {
                 return;
@@ -12177,18 +12192,13 @@ namespace
                 const auto* direct_source = direct_source_by_plan_index[sample_index];
                 const bool shared_face =
                     sample.region != MeshFirstRegion::Side;
-                const bool visible_destination =
-                    direct_source &&
-                    runtime_contract::
-                        appearance_use_visible_destination_base_color(
-                            true,
-                            direct_source->projection_visible);
                 if (runtime_contract::
                         appearance_use_direct_face_capture(
                             direct_source != nullptr,
                             shared_face,
                             sample.source_candidate,
-                            visible_destination))
+                            direct_source &&
+                                direct_source->projection_visible))
                 {
                     sample.source_distance_component = 0.0;
                     sample.source_distance_uv = 0.0;
@@ -12202,7 +12212,7 @@ namespace
                     sample.unsafe = false;
                     ++local.source_direct_assignments;
                     if (!sample.source_candidate &&
-                        visible_destination)
+                        direct_source->projection_visible)
                     {
                         ++local
                               .source_visible_destination_assignments;
@@ -14714,9 +14724,12 @@ namespace
         int written_samples = 0;
         for (const auto& sample : samples)
         {
-            const bool enabled = (sample.region == MeshFirstRegion::Front && enable_front) ||
-                                 (sample.region == MeshFirstRegion::Side && enable_side) ||
-                                 (sample.region == MeshFirstRegion::Back && enable_back);
+            const bool enabled =
+                mesh_first_region_enabled(
+                    sample.region,
+                    enable_front,
+                    enable_side,
+                    enable_back);
             if (!enabled)
             {
                 continue;
@@ -14878,9 +14891,12 @@ namespace
         int plan_project_failed = 0;
         for (const auto& sample : samples)
         {
-            const bool enabled = (sample.region == MeshFirstRegion::Front && enable_front) ||
-                                 (sample.region == MeshFirstRegion::Side && enable_side) ||
-                                 (sample.region == MeshFirstRegion::Back && enable_back);
+            const bool enabled =
+                mesh_first_region_enabled(
+                    sample.region,
+                    enable_front,
+                    enable_side,
+                    enable_back);
             if (!enabled || sample.unsafe)
             {
                 continue;
@@ -14960,9 +14976,12 @@ namespace
         for (std::size_t index = 0; index < samples.size(); ++index)
         {
             const auto& sample = samples[index];
-            const bool enabled = (sample.region == MeshFirstRegion::Front && enable_front) ||
-                                 (sample.region == MeshFirstRegion::Side && enable_side) ||
-                                 (sample.region == MeshFirstRegion::Back && enable_back);
+            const bool enabled =
+                mesh_first_region_enabled(
+                    sample.region,
+                    enable_front,
+                    enable_side,
+                    enable_back);
             if (!enabled || sample.unsafe)
             {
                 continue;
@@ -17470,7 +17489,6 @@ namespace
         const double tuning_color_compression_tolerance =
             clamp_range(json_number_field(request, "color_compression_tolerance", 4.0), 0.0, 10.0);
         const double tuning_side_source_max_uv = clamp_range(json_number_field(request, "side_source_max_uv", 0.08), 0.001, 0.50);
-        const double tuning_front_back_source_max_uv = clamp_range(json_number_field(request, "front_back_source_max_uv", 0.45), 0.001, 2.00);
         const bool tuning_auto_material = json_bool_field(request, "auto_material", false);
         const bool tuning_include_shadows = json_bool_field(request, "include_shadows", false);
         const double tuning_metallic = clamp_range(json_number_field(request, "metallic", 0.0), 0.0, 1.0);
@@ -17646,7 +17664,6 @@ namespace
         metadata += ",\"color_compression_tolerance\":" +
                     std::to_string(active_color_compression_tolerance);
         metadata += ",\"side_source_max_uv\":" + std::to_string(tuning_side_source_max_uv);
-        metadata += ",\"front_back_source_max_uv\":" + std::to_string(tuning_front_back_source_max_uv);
         metadata += ",\"auto_material\":" + std::string(json_bool(tuning_auto_material));
         metadata += ",\"include_shadows\":" + std::string(json_bool(tuning_include_shadows));
         metadata += ",\"appearance_shadow_policy\":\"" +
@@ -18628,12 +18645,11 @@ namespace
             }
             const auto& sample = plan_samples[sample_index];
             const bool region_enabled =
-                (sample.region == MeshFirstRegion::Front &&
-                 enable_front) ||
-                (sample.region == MeshFirstRegion::Side &&
-                 enable_side) ||
-                (sample.region == MeshFirstRegion::Back &&
-                 enable_back);
+                mesh_first_region_enabled(
+                    sample.region,
+                    enable_front,
+                    enable_side,
+                    enable_back);
             if (!region_enabled)
             {
                 continue;
@@ -19054,9 +19070,12 @@ namespace
             plan_stats.source_distance_max_component = 0.0;
             for (auto& sample : plan_samples)
             {
-                const bool enabled = (sample.region == MeshFirstRegion::Front && enable_front) ||
-                                     (sample.region == MeshFirstRegion::Side && enable_side) ||
-                                     (sample.region == MeshFirstRegion::Back && enable_back);
+                const bool enabled =
+                    mesh_first_region_enabled(
+                        sample.region,
+                        enable_front,
+                        enable_side,
+                        enable_back);
                 if (!enabled)
                 {
                     continue;
@@ -19182,17 +19201,15 @@ namespace
                 {
                     const auto& sample = plan_samples[sample_index];
                     const bool region_enabled =
-                        (sample.region == MeshFirstRegion::Front &&
-                         enable_front) ||
-                        (sample.region == MeshFirstRegion::Side &&
-                         enable_side) ||
-                        (sample.region == MeshFirstRegion::Back &&
-                         enable_back);
+                        mesh_first_region_enabled(
+                            sample.region,
+                            enable_front,
+                            enable_side,
+                            enable_back);
                     if (!runtime_contract::
                             appearance_capture_sample_included(
                                 {region_enabled,
-                                 sample.unsafe,
-                                 sample.source_candidate}))
+                                 sample.unsafe}))
                     {
                         continue;
                     }
@@ -20346,7 +20363,6 @@ namespace
                                            : "camera_projection_pixel_dynamic")) +
                     "\"";
         metadata += ",\"source_distance_side_max_uv\":" + std::to_string(tuning_side_source_max_uv);
-        metadata += ",\"source_distance_front_back_max_uv\":" + std::to_string(tuning_front_back_source_max_uv);
         metadata += ",\"source_distance_side_max_component\":" + std::to_string(clamp_range(tuning_side_source_max_uv * 500.0, 20.0, 80.0));
         metadata += ",\"source_projection_color_available\":" + std::string(json_bool(capture.capture_pixels_available));
         metadata += ",\"source_samples\":" + std::to_string(capture.samples.size());
@@ -23962,8 +23978,6 @@ namespace
         metadata += ",\"replay_strokes_front_fill\":" + std::to_string(replay_front_fill);
         metadata += ",\"replay_strokes_side_fill\":" + std::to_string(replay_side_fill);
         metadata += ",\"replay_strokes_back_fill\":" + std::to_string(replay_back_fill);
-        metadata += ",\"planner_strokes_paint\":" + std::to_string(replay_paint);
-        metadata += ",\"planner_strokes_fill\":" + std::to_string(replay_fill);
         const auto research_strokes_before_limit = strokes.size();
         metadata += ",\"research_strokes_before_limit\":" + std::to_string(research_strokes_before_limit);
         if (research_stroke_limit > 0 && research_strokes_before_limit > static_cast<std::size_t>(research_stroke_limit))
@@ -24047,10 +24061,6 @@ namespace
         metadata += ",\"replay_strokes_side\":" + std::to_string(replay_side);
         metadata += ",\"replay_strokes_back\":" + std::to_string(replay_back);
         metadata += ",\"replay_strokes_total\":" + std::to_string(strokes.size());
-        metadata += ",\"planner_strokes_front\":" + std::to_string(replay_front);
-        metadata += ",\"planner_strokes_side\":" + std::to_string(replay_side);
-        metadata += ",\"planner_strokes_back\":" + std::to_string(replay_back);
-        metadata += ",\"planner_strokes_total\":" + std::to_string(strokes.size());
         metadata += ",\"skeletal_triangle_anchor_used\":" + std::string(json_bool(replay_triangle_anchors > 0));
         metadata += ",\"replay_anchor_mode\":\"" + std::string(use_mesh_anchors ? "skeletal_triangle" : "uv_only") + "\"";
         metadata += ",\"replay_world_anchors\":" + std::to_string(replay_world_anchors);

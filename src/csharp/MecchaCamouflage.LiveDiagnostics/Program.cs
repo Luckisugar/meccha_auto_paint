@@ -1044,7 +1044,6 @@ internal static class Program
             {
                 brush_size_texels = brushSize,
                 side_source_max_uv = 0.08,
-                front_back_source_max_uv = 0.45,
                 auto_material = autoMaterial,
                 include_shadows = includeShadows,
                 metallic = 0.0,

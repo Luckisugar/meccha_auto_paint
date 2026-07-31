@@ -65,7 +65,6 @@ public static class BridgePayloadBuilder
             {
                 ["brush_size_texels"] = paint.BrushSizeTexels,
                 ["side_source_max_uv"] = paint.SideSourceMaxUv,
-                ["front_back_source_max_uv"] = paint.FrontBackSourceMaxUv,
                 ["auto_material"] = paint.AutoMaterial,
                 ["include_shadows"] = paint.IncludeShadows,
                 ["metallic"] = paint.Metallic,

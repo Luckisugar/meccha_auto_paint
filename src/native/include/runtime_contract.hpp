@@ -857,27 +857,12 @@ namespace runtime_contract
     {
         bool region_enabled{false};
         bool unsafe{false};
-        bool source_candidate{false};
     };
 
     constexpr bool appearance_capture_sample_included(
         const AppearanceCaptureSampleEligibility& sample)
     {
-        // source_candidate describes target-mesh visibility, not whether the
-        // source scene has a valid fixed-view pixel at this destination.
         return sample.region_enabled && !sample.unsafe;
-    }
-
-    constexpr bool appearance_use_visible_destination_base_color(
-        bool capture_sample_available,
-        bool projection_visible)
-    {
-        // A visible destination pixel is a more exact source than the legacy
-        // nearest-surface transfer, especially around side-face decals and
-        // small high-contrast details. Occluded texels still need the
-        // topology-aware transfer fallback because their projected pixel
-        // belongs to a nearer surface.
-        return capture_sample_available && projection_visible;
     }
 
     constexpr bool appearance_projected_material_sample_available(

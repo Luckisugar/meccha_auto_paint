@@ -100,7 +100,6 @@ public sealed class SettingsStore
             ? ReadDouble(root, "brush_size_texels", paint.BrushSizeTexels)
             : legacyBrush2Enabled || !legacyBrush1Enabled ? legacyBrush2Size : legacyBrush1Size;
         paint.SideSourceMaxUv = ReadDouble(root, "side_source_max_uv", paint.SideSourceMaxUv);
-        paint.FrontBackSourceMaxUv = ReadDouble(root, "front_back_source_max_uv", paint.FrontBackSourceMaxUv);
         paint.FrontRegionMode = ReadRegionMode(root, "front_region_mode", paint.FrontRegionMode);
         paint.SideRegionMode = ReadRegionMode(root, "side_region_mode", paint.SideRegionMode);
         paint.BackRegionMode = ReadRegionMode(root, "back_region_mode", paint.BackRegionMode);
@@ -177,7 +176,6 @@ public sealed class SettingsStore
 
         settings.Paint.BrushSizeTexels = Math.Clamp(settings.Paint.BrushSizeTexels, 1.0, 10.0);
         settings.Paint.SideSourceMaxUv = Math.Clamp(settings.Paint.SideSourceMaxUv, 0.001, 0.50);
-        settings.Paint.FrontBackSourceMaxUv = Math.Clamp(settings.Paint.FrontBackSourceMaxUv, 0.001, 2.00);
         settings.Paint.Metallic = Math.Clamp(settings.Paint.Metallic, 0.0, 1.0);
         settings.Paint.Roughness = Math.Clamp(settings.Paint.Roughness, 0.0, 1.0);
         settings.Paint.Emissive = Math.Clamp(settings.Paint.Emissive, 0.0, 1.0);
@@ -227,7 +225,6 @@ public sealed class SettingsStore
         esp_hunter_color = settings.Esp.HunterColor.ToHex(),
         brush_size_texels = settings.Paint.BrushSizeTexels,
         side_source_max_uv = settings.Paint.SideSourceMaxUv,
-        front_back_source_max_uv = settings.Paint.FrontBackSourceMaxUv,
         front_region_mode = RegionModeText(settings.Paint.FrontRegionMode),
         side_region_mode = RegionModeText(settings.Paint.SideRegionMode),
         back_region_mode = RegionModeText(settings.Paint.BackRegionMode),

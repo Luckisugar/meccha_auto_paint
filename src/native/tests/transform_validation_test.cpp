@@ -907,28 +907,13 @@ int main()
     // paint region. Camera-facing source status must not remove back texels;
     // those texels receive the same fixed-view screen projection as BaseColor.
     if (!runtime_contract::appearance_capture_sample_included(
-            {true, false, false}) ||
+            {true, false}) ||
         runtime_contract::appearance_capture_sample_included(
-            {false, false, true}) ||
+            {false, false}) ||
         runtime_contract::appearance_capture_sample_included(
-            {true, true, true}))
+            {true, true}))
     {
         return 82;
-    }
-    if (!runtime_contract::
-            appearance_use_visible_destination_base_color(
-                true,
-                true) ||
-        runtime_contract::
-            appearance_use_visible_destination_base_color(
-                true,
-                false) ||
-        runtime_contract::
-            appearance_use_visible_destination_base_color(
-                false,
-                true))
-    {
-        return 104;
     }
     // Manual and Auto share the bounded Albedo-response parameters. Manual
     // contributes only a fixed M/R/E policy, including legal bound values.

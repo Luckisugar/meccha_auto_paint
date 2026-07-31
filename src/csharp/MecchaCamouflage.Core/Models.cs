@@ -39,7 +39,6 @@ public sealed class PaintSettings
 {
     public double BrushSizeTexels { get; set; } = 5.0;
     public double SideSourceMaxUv { get; set; } = 0.08;
-    public double FrontBackSourceMaxUv { get; set; } = 0.45;
     public RegionMode FrontRegionMode { get; set; } = RegionMode.Skip;
     public RegionMode SideRegionMode { get; set; } = RegionMode.Paint;
     public RegionMode BackRegionMode { get; set; } = RegionMode.Paint;
