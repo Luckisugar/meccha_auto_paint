@@ -569,6 +569,7 @@ namespace
     std::atomic<std::uint32_t> g_esp_native_probe_frames_remaining{0};
     std::atomic<std::uint64_t> g_esp_native_capture_frames{0};
     std::atomic<std::uint64_t> g_esp_native_present_calls{0};
+    std::atomic<std::uint64_t> g_esp_native_execute_calls{0};
     std::atomic<std::uint64_t> g_esp_native_last_capture_tick_ms{0};
     std::atomic<std::uint64_t> g_esp_native_enabled_tick_ms{0};
     std::atomic<std::uint64_t> g_esp_native_last_rebind_request_tick_ms{0};
@@ -851,6 +852,7 @@ namespace
     };
     std::mutex g_esp_native_swapchain_queues_mutex;
     std::vector<EspNativeSwapchainQueue> g_esp_native_swapchain_queues{};
+    std::atomic<std::uint32_t> g_esp_native_swapchain_queue_records{0};
 
     // Late injection cannot replay the original DXGI CreateSwapChain* call.
     // Retain recent DIRECT submissions so Present can use either its own
@@ -863,6 +865,7 @@ namespace
     };
     std::mutex g_esp_native_present_thread_queues_mutex;
     std::array<EspNativePresentThreadQueue, 8> g_esp_native_present_thread_queues{};
+    std::atomic<std::uint32_t> g_esp_native_recent_direct_queue_records{0};
     thread_local bool g_esp_native_overlay_queue_submission{false};
 
     struct EspNativeDirectVertex
@@ -31083,6 +31086,8 @@ namespace
             esp_native_release(entry.swapchain_identity);
         }
         g_esp_native_swapchain_queues.clear();
+        g_esp_native_swapchain_queue_records.store(
+            0, std::memory_order_release);
     }
 
     void esp_native_track_swapchain_queue(IUnknown* device_or_queue, IDXGISwapChain* swapchain)
@@ -31114,6 +31119,10 @@ namespace
             }
         }
         g_esp_native_swapchain_queues.push_back({identity, queue});
+        g_esp_native_swapchain_queue_records.store(
+            static_cast<std::uint32_t>(
+                g_esp_native_swapchain_queues.size()),
+            std::memory_order_release);
     }
 
     auto esp_native_queue_for_swapchain(IDXGISwapChain* swapchain) -> ID3D12CommandQueue*
@@ -31180,6 +31189,13 @@ namespace
         }
         selected->thread_id = thread_id;
         selected->tick = tick;
+        const auto active_records = static_cast<std::uint32_t>(
+            std::count_if(
+                g_esp_native_present_thread_queues.begin(),
+                g_esp_native_present_thread_queues.end(),
+                [](const auto& entry) { return entry.queue != nullptr; }));
+        g_esp_native_recent_direct_queue_records.store(
+            active_records, std::memory_order_release);
     }
 
     auto esp_native_queue_matches_swapchain(ID3D12CommandQueue* queue, IDXGISwapChain* swapchain) -> bool
@@ -31270,6 +31286,8 @@ namespace
             entry.thread_id = 0;
             entry.tick = 0;
         }
+        g_esp_native_recent_direct_queue_records.store(
+            0, std::memory_order_release);
     }
 
     void esp_native_release_direct_backbuffers_locked(EspNativeCompositor& compositor);
@@ -31940,6 +31958,9 @@ float4 main() : SV_TARGET0 { return float4(1.0, 0.0, 0.0, 1.0); }
         case 37: return "device_stack_create_text_format";
         case 38: return "device_stack_set_text_alignment";
         case 39: return "device_stack_set_paragraph_alignment";
+        case 40: return "direct_backbuffer_setup";
+        case 41: return "direct_command_recording";
+        case 42: return "direct_queue_submission";
         default: return "unknown";
         }
     }
@@ -32593,6 +32614,11 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                                                              ID3D12CommandList* const* lists)
     {
         EspNativePresentHookCallbackScope callback_scope{};
+        if (!g_esp_native_overlay_queue_submission)
+        {
+            g_esp_native_execute_calls.fetch_add(
+                1, std::memory_order_relaxed);
+        }
         esp_native_capture_queue(queue);
         const auto original = g_esp_execute_original.load(std::memory_order_acquire);
         if (original)
@@ -32717,6 +32743,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         {
             return;
         }
+        g_esp_native_fault_stage.store(1, std::memory_order_release);
         const EspNativeSnapshot* snapshot = nullptr;
         std::uint32_t snapshot_slot{};
         if (!esp_native_acquire_snapshot(snapshot, snapshot_slot))
@@ -32728,6 +32755,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         // Prefer the exact CreateSwapChain association. For a post-start
         // injection, accept only a recent, unambiguous DIRECT submission on
         // the same D3D12 device.
+        g_esp_native_fault_stage.store(2, std::memory_order_release);
         ID3D12CommandQueue* exact_queue = esp_native_queue_for_swapchain(swapchain);
         bool late_present_association = false;
         if (!exact_queue)
@@ -32769,6 +32797,7 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                                  "late injection associated an observed DIRECT command queue");
         }
 
+        g_esp_native_fault_stage.store(3, std::memory_order_release);
         DXGI_SWAP_CHAIN_DESC description{};
         if (FAILED(swapchain->GetDesc(&description)) ||
             !esp_native_supported_backbuffer_format(description.BufferDesc.Format))
@@ -35489,6 +35518,58 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
         const auto diagnostics = esp_native_snapshot_diagnostics();
         const auto configured_scope =
             static_cast<EspNativeScope>(g_esp_native_scope.load(std::memory_order_acquire));
+        const auto enabled_tick_ms =
+            g_esp_native_enabled_tick_ms.load(std::memory_order_acquire);
+        const auto initialization_age_ms =
+            enabled && enabled_tick_ms != 0 && now_ms >= enabled_tick_ms
+                ? now_ms - enabled_tick_ms
+                : 0;
+        const auto initialization_stage_code =
+            g_esp_native_fault_stage.load(std::memory_order_acquire);
+        const auto present_hook_ready =
+            g_esp_present_sync_ready.load(std::memory_order_acquire);
+        const auto execute_hook_ready =
+            g_esp_execute_hook_ready.load(std::memory_order_acquire);
+        const auto resize_hook_ready =
+            g_esp_resize_hook_ready.load(std::memory_order_acquire);
+        const auto factory_hooks_ready =
+            g_esp_swapchain_factory_hooks_ready.load(
+                std::memory_order_acquire);
+        const auto game_swapchain_seen =
+            g_esp_present_swapchain.load(std::memory_order_acquire) !=
+            nullptr;
+        const auto present_calls =
+            g_esp_native_present_calls.load(std::memory_order_acquire);
+        const auto execute_calls =
+            g_esp_native_execute_calls.load(std::memory_order_acquire);
+        const auto swapchain_queue_records =
+            g_esp_native_swapchain_queue_records.load(
+                std::memory_order_acquire);
+        const auto recent_direct_queue_records =
+            g_esp_native_recent_direct_queue_records.load(
+                std::memory_order_acquire);
+        const char* initialization_stage =
+            state == EspNativePresentState::Ready
+                ? "complete"
+            : state == EspNativePresentState::Disabled
+                ? "disabled"
+            : initialization_stage_code != 0
+                ? esp_native_fault_stage_name(initialization_stage_code)
+            : !present_hook_ready || !execute_hook_ready ||
+                      !resize_hook_ready || !factory_hooks_ready
+                ? "hook_install"
+            : sequence == 0
+                ? "snapshot_acquire"
+            : present_calls == 0
+                ? "present_callback"
+            : !game_swapchain_seen
+                ? "game_swapchain"
+            : swapchain_queue_records == 0 &&
+                      recent_direct_queue_records == 0
+                ? "command_queue_observation"
+            : swapchain_queue_records == 0
+                ? "queue_match"
+                : "renderer_setup";
         const char* roster_source =
             diagnostics.roster_source == 1 ? "player_array" :
             "unavailable";
@@ -35508,7 +35589,29 @@ float4 main(float4 position : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET
                                  ",\"capture_frames\":" + std::to_string(g_esp_native_capture_frames.load()) +
                                  ",\"capture_age_ms\":" + std::to_string(capture_age_ms) +
                                  ",\"capture_status\":\"" + capture_status + "\"" +
-                                 ",\"present_calls\":" + std::to_string(g_esp_native_present_calls.load()) +
+                                 ",\"initialization_age_ms\":" +
+                                     std::to_string(initialization_age_ms) +
+                                 ",\"initialization_stage\":\"" +
+                                     initialization_stage + "\"" +
+                                 ",\"present_hook_ready\":" +
+                                     (present_hook_ready ? "true" : "false") +
+                                 ",\"execute_hook_ready\":" +
+                                     (execute_hook_ready ? "true" : "false") +
+                                 ",\"resize_hook_ready\":" +
+                                     (resize_hook_ready ? "true" : "false") +
+                                 ",\"factory_hooks_ready\":" +
+                                     (factory_hooks_ready ? "true" : "false") +
+                                 ",\"game_swapchain_seen\":" +
+                                     (game_swapchain_seen ? "true" : "false") +
+                                 ",\"present_calls\":" +
+                                     std::to_string(present_calls) +
+                                 ",\"execute_calls\":" +
+                                     std::to_string(execute_calls) +
+                                 ",\"swapchain_queue_records\":" +
+                                     std::to_string(swapchain_queue_records) +
+                                 ",\"recent_direct_queue_records\":" +
+                                     std::to_string(
+                                         recent_direct_queue_records) +
                                  ",\"hud_rebind_attempts\":" + std::to_string(g_esp_native_hud_rebind_attempts.load()) +
                                  ",\"hud_rebinds\":" + std::to_string(g_esp_native_hud_rebind_successes.load()) +
                                  ",\"hider_roster_count\":" + std::to_string(diagnostics.hider_roster_count) +

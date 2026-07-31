@@ -43,6 +43,17 @@ public sealed record NativePresentStatusLogSample
     public double ProjectionScaleY { get; init; } = 1.0;
     public ulong ProjectionCalibrations { get; init; }
     public ulong SnapshotSequence { get; init; }
+    public ulong InitializationAgeMs { get; init; }
+    public string InitializationStage { get; init; } = "unknown";
+    public bool PresentHookReady { get; init; }
+    public bool ExecuteHookReady { get; init; }
+    public bool ResizeHookReady { get; init; }
+    public bool FactoryHooksReady { get; init; }
+    public bool GameSwapchainSeen { get; init; }
+    public ulong PresentCalls { get; init; }
+    public ulong ExecuteCalls { get; init; }
+    public uint SwapchainQueueRecords { get; init; }
+    public uint RecentDirectQueueRecords { get; init; }
     public ulong SubmittedFrames { get; init; }
     public ulong CompletedFences { get; init; }
     public ulong RenderedFrames { get; init; }
@@ -50,6 +61,8 @@ public sealed record NativePresentStatusLogSample
 
 public static class NativePresentStatusLogPolicy
 {
+    private const ulong InitializationWarningAgeMs = 10_000;
+
     public static string Format(NativePresentStatusLogSample sample, bool verbose)
     {
         if (verbose || ShouldWarn(sample))
@@ -101,6 +114,17 @@ public static class NativePresentStatusLogPolicy
             Coverage(sample.Poses, sample.PoseProfileMatches),
             ProjectionState(sample),
             Presence(sample.SnapshotSequence),
+            InitializationState(sample),
+            sample.InitializationStage,
+            sample.PresentHookReady,
+            sample.ExecuteHookReady,
+            sample.ResizeHookReady,
+            sample.FactoryHooksReady,
+            sample.GameSwapchainSeen,
+            Presence(sample.PresentCalls),
+            Presence(sample.ExecuteCalls),
+            Presence(sample.SwapchainQueueRecords),
+            Presence(sample.RecentDirectQueueRecords),
             Presence(sample.SubmittedFrames),
             Presence(sample.CompletedFences),
             Presence(sample.RenderedFrames));
@@ -139,6 +163,11 @@ public static class NativePresentStatusLogPolicy
             Math.Round(sample.ProjectionScaleY, 4),
             sample.ProjectionCalibrations,
             sample.SnapshotSequence,
+            sample.InitializationAgeMs,
+            sample.PresentCalls,
+            sample.ExecuteCalls,
+            sample.SwapchainQueueRecords,
+            sample.RecentDirectQueueRecords,
             sample.SubmittedFrames,
             sample.CompletedFences,
             sample.RenderedFrames);
@@ -146,6 +175,7 @@ public static class NativePresentStatusLogPolicy
 
     public static bool ShouldWarn(NativePresentStatusLogSample sample) =>
         string.Equals(sample.Status, "unavailable", StringComparison.OrdinalIgnoreCase) ||
+        IsInitializationStalled(sample) ||
         string.Equals(sample.CaptureStatus, "stalled", StringComparison.OrdinalIgnoreCase) ||
         sample.MissingCapsuleContracts > 0 ||
         sample.MissingMeshContracts > 0 ||
@@ -156,6 +186,12 @@ public static class NativePresentStatusLogPolicy
     private static string FormatVerbose(NativePresentStatusLogSample sample) =>
         $"ESP: native Present status={sample.Status}; scope={sample.ConfiguredScope}; " +
         $"format={sample.Format}; snapshot_sequence={sample.SnapshotSequence}; " +
+        $"init={sample.InitializationStage} age_ms={sample.InitializationAgeMs}; " +
+        $"hooks=present:{sample.PresentHookReady} execute:{sample.ExecuteHookReady} " +
+        $"resize:{sample.ResizeHookReady} factory:{sample.FactoryHooksReady}; " +
+        $"traffic=present:{sample.PresentCalls} execute:{sample.ExecuteCalls}; " +
+        $"association=swapchain:{sample.GameSwapchainSeen} " +
+        $"exact:{sample.SwapchainQueueRecords} recent:{sample.RecentDirectQueueRecords}; " +
         $"capture={sample.CaptureStatus} age_ms={sample.CaptureAgeMs}; " +
         $"hud_rebinds={sample.HudRebinds}; " +
         $"roles={sample.HiderRosterCount}/{sample.HunterRosterCount}; " +
@@ -199,6 +235,26 @@ public static class NativePresentStatusLogPolicy
         string.Equals(sample.CaptureStatus, "active", StringComparison.OrdinalIgnoreCase)
             ? "healthy"
             : sample.Reason;
+
+    private static string InitializationState(NativePresentStatusLogSample sample)
+    {
+        if (!string.Equals(
+                sample.Status,
+                "initializing",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return "inactive";
+        }
+        return IsInitializationStalled(sample) ? "stalled" : "starting";
+    }
+
+    private static bool IsInitializationStalled(
+        NativePresentStatusLogSample sample) =>
+        string.Equals(
+            sample.Status,
+            "initializing",
+            StringComparison.OrdinalIgnoreCase) &&
+        sample.InitializationAgeMs >= InitializationWarningAgeMs;
 
     private static string Coverage(ulong value, ulong expected)
     {

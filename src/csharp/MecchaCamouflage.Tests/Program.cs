@@ -1323,6 +1323,64 @@ static void NativePresentStatusLoggingIgnoresHealthyCounterChurn()
         NativePresentStatusLogPolicy.ShouldWarn(isolatedTargetFault),
         "normal ESP logging must surface a target-local fault without requiring the renderer to become unavailable");
 
+    var initializing = later with
+    {
+        Status = "initializing",
+        Reason = "waiting for an exact or uniquely observed swapchain command queue",
+        Format = "",
+        InitializationAgeMs = 2_000,
+        InitializationStage = "queue_match",
+        PresentHookReady = true,
+        ExecuteHookReady = true,
+        ResizeHookReady = true,
+        FactoryHooksReady = true,
+        GameSwapchainSeen = true,
+        PresentCalls = 120,
+        ExecuteCalls = 5_000,
+        SwapchainQueueRecords = 0,
+        RecentDirectQueueRecords = 1,
+        SubmittedFrames = 0,
+        CompletedFences = 0,
+        RenderedFrames = 0
+    };
+    Assert(
+        !NativePresentStatusLogPolicy.ShouldWarn(initializing),
+        "native Present initialization must retain a short startup grace period");
+
+    var stuckInitializing = initializing with { InitializationAgeMs = 12_000 };
+    var stuckInitializationLog =
+        NativePresentStatusLogPolicy.Format(stuckInitializing, verbose: false);
+    Assert(
+        NativePresentStatusLogPolicy.ShouldWarn(stuckInitializing) &&
+        stuckInitializationLog.Contains(
+            "init=queue_match age_ms=12000", StringComparison.Ordinal) &&
+        stuckInitializationLog.Contains(
+            "hooks=present:True execute:True resize:True factory:True",
+            StringComparison.Ordinal) &&
+        stuckInitializationLog.Contains(
+            "traffic=present:120 execute:5000", StringComparison.Ordinal) &&
+        stuckInitializationLog.Contains(
+            "association=swapchain:True exact:0 recent:1",
+            StringComparison.Ordinal) &&
+        stuckInitializationLog.Contains(
+            "waiting for an exact or uniquely observed swapchain command queue",
+            StringComparison.Ordinal),
+        "stalled native Present initialization must identify the hook, traffic, swapchain, and queue-association boundary");
+    Assert(
+        NativePresentStatusLogPolicy.Signature(initializing, verbose: false) !=
+        NativePresentStatusLogPolicy.Signature(stuckInitializing, verbose: false),
+        "crossing the initialization grace period must produce one warning transition");
+    var stuckCounterChurn = stuckInitializing with
+    {
+        InitializationAgeMs = 24_000,
+        PresentCalls = 240,
+        ExecuteCalls = 10_000
+    };
+    Assert(
+        NativePresentStatusLogPolicy.Signature(stuckInitializing, verbose: false) ==
+        NativePresentStatusLogPolicy.Signature(stuckCounterChurn, verbose: false),
+        "stalled initialization diagnostics must not repeat for healthy counter churn");
+
     var previousFlag = Environment.GetEnvironmentVariable("MECCHA_ESP_VERBOSE_STATUS");
     try
     {
@@ -1588,12 +1646,26 @@ static void NativePresentReportsBackbufferSetupStep()
 {
     var root = FindRepositoryRoot();
     var bridge = ReadRepositoryText(Path.Combine(root, "src", "native", "bridge", "bridge.cpp"));
+    var host = ReadRepositoryText(Path.Combine(
+        root,
+        "src",
+        "csharp",
+        "MecchaCamouflage.WebHost",
+        "MainForm.cs"));
 
     Assert(bridge.Contains("native D3D12 backbuffer setup failed at ", StringComparison.Ordinal) &&
            bridge.Contains("CheckFeatureSupport(format)", StringComparison.Ordinal) &&
            bridge.Contains("CreateGraphicsPipelineState(pipeline)", StringComparison.Ordinal) &&
-           bridge.Contains("failure_step", StringComparison.Ordinal),
-        "native Present diagnostics must identify the exact D3D12 initialization call that rejected the swapchain");
+           bridge.Contains("failure_step", StringComparison.Ordinal) &&
+           bridge.Contains("\\\"initialization_stage\\\"", StringComparison.Ordinal) &&
+           bridge.Contains("\\\"present_hook_ready\\\"", StringComparison.Ordinal) &&
+           bridge.Contains("\\\"execute_calls\\\"", StringComparison.Ordinal) &&
+           bridge.Contains("\\\"swapchain_queue_records\\\"", StringComparison.Ordinal) &&
+           host.Contains("\"initialization_stage\"", StringComparison.Ordinal) &&
+           host.Contains("\"present_hook_ready\"", StringComparison.Ordinal) &&
+           host.Contains("\"execute_calls\"", StringComparison.Ordinal) &&
+           host.Contains("\"swapchain_queue_records\"", StringComparison.Ordinal),
+        "native Present diagnostics must identify the exact D3D12 initialization and queue-association boundary and preserve it in host logs");
 }
 
 static void NativePresentPipelineInitializesValidD3d12Defaults()
